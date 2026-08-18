@@ -529,3 +529,57 @@ test('codex resolveModel on a cold cache fetches the catalog itself', async () =
   assert.deepEqual(resolved.reasoning?.efforts.map(effort => effort.id), ['low', 'high'])
   assert.equal(resolved.context?.contextWindow, 500_000)
 })
+
+test('claude resolveModel advertises the effort selector', async () => {
+  const claude = new ClaudeAdapter({
+    models: STATIC_CLAUDE,
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens(claudeSession),
+  })
+  const resolved = await claude.resolveModel('claude', 'claude-opus-4-5')
+  assert.deepEqual(resolved.reasoning?.efforts.map(effort => effort.id), ['low', 'medium', 'high'])
+  assert.equal(resolved.reasoning?.defaultEffort, 'medium')
+})
+
+test('claude request: effort becomes an extended-thinking budget, max_tokens stays above it', async () => {
+  const claude = new ClaudeAdapter({
+    models: STATIC_CLAUDE,
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens(claudeSession),
+  })
+  const sent: Record<string, unknown>[] = []
+  const realFetch = globalThis.fetch
+  globalThis.fetch = ((_url: unknown, init: { body: string }) => {
+    sent.push(JSON.parse(init.body) as Record<string, unknown>)
+    // The body is irrelevant here: the assertion is about the request we send.
+    return Promise.resolve(new Response(null, { status: 500 }))
+  }) as typeof fetch
+
+  const drain = async (effort?: string, maxTokens?: number): Promise<void> => {
+    const options = {
+      model: 'claude-opus-4-5',
+      messages: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'hi' }] }],
+      signal: new AbortController().signal,
+      ...effort === undefined ? {} : { reasoningEffort: effort },
+      ...maxTokens === undefined ? {} : { maxTokens },
+    }
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      for await (const _chunk of claude.stream(options as any)) { /* not reached */ }
+    } catch { /* 500 from the double — we only care about what was sent */ }
+  }
+
+  try {
+    await drain('high')
+    await drain()
+    await drain('high', 8_000)
+  } finally {
+    globalThis.fetch = realFetch
+  }
+
+  assert.deepEqual(sent[0]?.thinking, { type: 'enabled', budget_tokens: 24_576 })
+  assert.equal(sent[0]?.max_tokens, 32_000, 'дефолт модели уже больше бюджета — оставляем его')
+  assert.equal(sent[1]?.thinking, undefined, 'без effort блок thinking не отправляется')
+  assert.equal(sent[1]?.max_tokens, 32_000)
+  assert.equal(sent[2]?.max_tokens, 28_672, 'тесный max_tokens поднимается выше бюджета размышления')
+})

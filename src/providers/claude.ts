@@ -4,7 +4,7 @@
  * the Anthropic Messages API with the Claude Code identity headers.
  */
 
-import { EMPTY_RESPONSE_CODE, LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
+import { EMPTY_RESPONSE_CODE, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
@@ -41,6 +41,24 @@ const CLAUDE_SCOPE = 'org:create_api_key user:profile user:inference user:sessio
 const CLAUDE_CALLBACK_PATH = '/callback'
 const CLAUDE_CONTEXT_WINDOW = 200_000
 const CLAUDE_DEFAULT_MAX_TOKENS = 32_000
+/**
+ * Reasoning effort maps to Anthropic extended thinking: the wire has no
+ * `effort` field, it has a token budget. Flat table on purpose — the tiers are
+ * a product choice, not a computed value.
+ */
+const CLAUDE_THINKING_BUDGETS: Readonly<Record<string, number>> = {
+  low: 4_096,
+  medium: 12_288,
+  high: 24_576,
+}
+/** Headroom for the answer itself once the thinking budget is reserved. */
+const CLAUDE_ANSWER_HEADROOM = 4_096
+const CLAUDE_EFFORTS = [
+  { id: ReasoningEffortId('low'), name: 'Low' },
+  { id: ReasoningEffortId('medium'), name: 'Medium' },
+  { id: ReasoningEffortId('high'), name: 'High' },
+]
+const CLAUDE_DEFAULT_EFFORT = ReasoningEffortId('medium')
 /** Refresh when the access token has less than this much life left. */
 export const CLAUDE_PREEMPT_MS = 5 * 60_000
 
@@ -333,8 +351,11 @@ export class ClaudeAdapter extends LlmAdapter {
       inputModalities: configured?.inputModalities ?? CLAUDE_MODALITIES,
       context: { contextWindow: configured?.contextWindow ?? CLAUDE_CONTEXT_WINDOW },
       defaultMaxTokens: configured?.maxTokens ?? CLAUDE_DEFAULT_MAX_TOKENS,
-      // No reasoning metadata: the subscription endpoint's thinking support is
-      // not exercised, so effort requests reject as unsupported.
+      // The subscription endpoint does serve extended thinking (verified live:
+      // `thinking` / `thinking_delta` blocks stream back with the Claude Code
+      // beta flags this provider already sends), so the route advertises the
+      // same effort selector the codex and grok routes have.
+      reasoning: { efforts: CLAUDE_EFFORTS, defaultEffort: CLAUDE_DEFAULT_EFFORT },
     })
   }
 
@@ -362,16 +383,27 @@ export class ClaudeAdapter extends LlmAdapter {
 
   private async request(options: GenerateOptions, session: ClaudeSession, signal: AbortSignal): Promise<Response> {
     const messages = await resolveImages(options.messages, this.options.resolveAttachments?.(), signal)
+    const thinkingBudget = options.reasoningEffort === undefined
+      ? undefined
+      : CLAUDE_THINKING_BUDGETS[String(options.reasoningEffort)]
+    const maxTokens = options.maxTokens
+      ?? this.options.models.find(entry => entry.id === options.model)?.maxTokens
+      ?? CLAUDE_DEFAULT_MAX_TOKENS
     const body = {
       model: options.model,
-      max_tokens: options.maxTokens
-        ?? this.options.models.find(entry => entry.id === options.model)?.maxTokens
-        ?? CLAUDE_DEFAULT_MAX_TOKENS,
+      // max_tokens covers the thinking budget too: below it the request is
+      // rejected, and at exactly the budget there is nothing left to answer with.
+      max_tokens: thinkingBudget === undefined
+        ? maxTokens
+        : Math.max(maxTokens, thinkingBudget + CLAUDE_ANSWER_HEADROOM),
       system: toAnthropicSystem(options.system, messages),
       messages: toAnthropicMessages(messages),
       ...options.tools !== undefined && options.tools.length > 0
         ? { tools: toAnthropicTools(options.tools) }
         : {},
+      ...thinkingBudget === undefined
+        ? {}
+        : { thinking: { type: 'enabled', budget_tokens: thinkingBudget } },
       stream: true,
       ...options.sessionId !== undefined ? { metadata: { user_id: String(options.sessionId) } } : {},
     }
