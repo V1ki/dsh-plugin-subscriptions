@@ -245,7 +245,7 @@ test('toAnthropicMessages: merge, tool_use input parsing, tool_result', () => {
     {
       role: 'assistant',
       content: [
-        { type: 'text', text: 'calling', cache_control: { type: 'ephemeral' } },
+        { type: 'text', text: 'calling' },
         { type: 'tool_use', id: 'call-1', name: 'bash', input: { cmd: 'ls' } },
       ],
     },
@@ -270,7 +270,7 @@ test('toAnthropicMessages: resolved image parts become base64 image blocks', () 
     role: 'user',
     content: [
       { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aGk=' } },
-      { type: 'text', text: 'what is this?', cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: 'what is this?' },
     ],
   }])
 })
@@ -284,29 +284,7 @@ test('toAnthropicSystem: Claude Code identity first, then explicit and history s
   assert.equal(toAnthropicSystem().length, 1, 'the identity block is always present')
 })
 
-test('cache_control: last cacheable block marked, tool_use/image never marked', () => {
-  // The final block is a tool_use, which cannot carry cache_control, so the
-  // preceding text block is marked instead.
-  const toolUseLast = toAnthropicMessages([
-    message('assistant', [
-      { type: 'text', text: 'intro' },
-      toolCall('c', 'n', '{}'),
-    ]),
-  ])
-  assert.deepEqual(toolUseLast[0].content, [
-    { type: 'text', text: 'intro', cache_control: { type: 'ephemeral' } },
-    { type: 'tool_use', id: 'c', name: 'n', input: {} },
-  ])
-
-  // A trailing tool_result is cacheable and is the block that gets marked.
-  const toolResultLast = toAnthropicMessages([
-    message('user', [toolResult('c', 'result')], { kind: 'tool', callId: CallId('c') }),
-  ])
-  assert.deepEqual(toolResultLast[0].content, [
-    { type: 'tool_result', tool_use_id: 'c', content: 'result', cache_control: { type: 'ephemeral' } },
-  ])
-
-  // A system prompt with no explicit text still caches the identity block.
+test('cache_control: the stable system prefix has an explicit breakpoint', () => {
   assert.deepEqual(toAnthropicSystem(), [
     { type: 'text', text: CLAUDE_CODE_IDENTITY, cache_control: { type: 'ephemeral' } },
   ])

@@ -18,6 +18,7 @@ import type { ClaudeSession } from '../auth/store.js'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { resolveImages } from '../translate/resolved.js'
 import {
+  EPHEMERAL_CACHE_CONTROL,
   streamAnthropic,
   toAnthropicMessages,
   toAnthropicSystem,
@@ -562,6 +563,7 @@ export class ClaudeAdapter extends LlmAdapter {
     const body = {
       model: options.model,
       max_tokens: maxTokens,
+      cache_control: EPHEMERAL_CACHE_CONTROL,
       system: toAnthropicSystem(options.system, messages),
       messages: toAnthropicMessages(messages),
       ...options.tools !== undefined && options.tools.length > 0

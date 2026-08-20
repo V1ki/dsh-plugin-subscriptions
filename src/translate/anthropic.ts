@@ -31,16 +31,11 @@ export const CLAUDE_CODE_IDENTITY = 'You are Claude Code, Anthropic\'s official 
 /**
  * Anthropic prompt caching is opt-in: marking a content block with
  * `cache_control: { type: "ephemeral" }` caches the request prefix up to and
- * including that block (5-minute TTL, refreshed on each use). Only `text` and
- * `tool_result` blocks accept `cache_control`; `tool_use`, `image`, and
- * `thinking` blocks do not.
+ * including that block (5-minute TTL, refreshed on each use). The claude
+ * provider also sends this value at the request level so Anthropic moves a
+ * second breakpoint forward as the conversation grows.
  */
 export const EPHEMERAL_CACHE_CONTROL = { type: 'ephemeral' } as const
-
-/** Whether a content block may carry `cache_control`. */
-function isCacheable(block: Record<string, unknown>): boolean {
-  return block.type === 'text' || block.type === 'tool_result'
-}
 
 /** One Anthropic request message. */
 export interface AnthropicMessage {
@@ -124,17 +119,6 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[]): A
     const last = out[out.length - 1]
     if (last !== undefined && last.role === role) last.content.push(...blocks)
     else out.push({ role, content: blocks })
-  }
-  // Cache the conversation prefix: mark the last cache-eligible content block
-  // (Anthropic only accepts `cache_control` on `text` / `tool_result`).
-  for (let i = out.length - 1; i >= 0; i--) {
-    const blocks = out[i].content
-    for (let j = blocks.length - 1; j >= 0; j--) {
-      if (isCacheable(blocks[j])) {
-        blocks[j].cache_control = EPHEMERAL_CACHE_CONTROL
-        return out
-      }
-    }
   }
   return out
 }

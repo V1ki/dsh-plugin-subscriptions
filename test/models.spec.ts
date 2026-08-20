@@ -7,7 +7,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { MessageId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { CodexAdapter, codexRequestBody, fetchCodexModels } from '../src/providers/codex.js'
 import { GrokAdapter } from '../src/providers/grok.js'
 import { ClaudeAdapter } from '../src/providers/claude.js'
@@ -203,6 +203,40 @@ test('claude logged in returns the static catalog', async () => {
   })
   const models = await claude.listModels('claude')
   assert.deepEqual(models.map(model => model.id), ['claude-opus-4-5'])
+})
+
+test('claude requests enable automatic prompt caching', async (t) => {
+  let body: Record<string, unknown> | undefined
+  t.mock.method(globalThis, 'fetch', async (_input: string | URL | Request, init?: RequestInit) => {
+    body = JSON.parse(String(init?.body)) as Record<string, unknown>
+    return new Response('rejected', { status: 500 })
+  })
+  const claude = new ClaudeAdapter({
+    models: STATIC_CLAUDE,
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens(claudeSession),
+    discovery: false,
+  })
+
+  await assert.rejects(async () => {
+    const chunks = claude.stream({
+      provider: 'claude',
+      model: 'claude-opus-4-5',
+      system: 'system prompt',
+      messages: [{
+        id: MessageId('request-user'),
+        role: 'user',
+        content: [{ type: 'text', text: 'hello' }],
+        source: { kind: 'user' },
+      }],
+    })
+    await chunks[Symbol.asyncIterator]().next()
+  }, /claude API/)
+  assert.deepEqual(body?.cache_control, { type: 'ephemeral' })
+  assert.deepEqual(body?.system, [
+    { type: 'text', text: 'You are Claude Code, Anthropic\'s official CLI for Claude.' },
+    { type: 'text', text: 'system prompt', cache_control: { type: 'ephemeral' } },
+  ])
 })
 
 test('fetchCodexModels tolerates entries without visibility or priority', async () => {
