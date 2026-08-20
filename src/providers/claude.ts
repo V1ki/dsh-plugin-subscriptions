@@ -63,7 +63,17 @@ export function detectClaudeVersion(): string {
   return CLAUDE_CLI_FALLBACK_VERSION
 }
 
-const CLAUDE_CLI_USER_AGENT = `claude-cli/${detectClaudeVersion()} (external, cli)`
+// Lazy + memoized: detectClaudeVersion() shells out to `claude --version`,
+// so this must not run at module-evaluation time (it would fire for every
+// consumer of this module regardless of whether Claude is a configured
+// provider). Computed on first use of getClaudeCliUserAgent() instead.
+let claudeCliUserAgent: string | undefined
+function getClaudeCliUserAgent(): string {
+  if (claudeCliUserAgent === undefined) {
+    claudeCliUserAgent = `claude-cli/${detectClaudeVersion()} (external, cli)`
+  }
+  return claudeCliUserAgent
+}
 export const CLAUDE_BETA_FALLBACK = [
   'claude-code-20250219',
   'oauth-2025-04-20',
@@ -291,7 +301,7 @@ export async function fetchClaudeUsage(
       'anthropic-beta': 'oauth-2025-04-20',
       // Unrecognized clients are aggressively rate-limited on this endpoint,
       // so it presents as the CLI like every other subscription request.
-      'user-agent': CLAUDE_CLI_USER_AGENT,
+      'user-agent': getClaudeCliUserAgent(),
       'accept': 'application/json',
     },
     ...signal === undefined ? {} : { signal },
@@ -358,7 +368,7 @@ export async function fetchClaudeModels(
     headers: {
       'authorization': `Bearer ${session.accessToken}`,
       'anthropic-version': '2023-06-01',
-      'user-agent': CLAUDE_CLI_USER_AGENT,
+      'user-agent': getClaudeCliUserAgent(),
       'anthropic-dangerous-direct-browser-access': 'true',
       'accept': 'application/json',
     },
@@ -568,7 +578,7 @@ export class ClaudeAdapter extends LlmAdapter {
         'authorization': `Bearer ${session.accessToken}`,
         'anthropic-version': '2023-06-01',
         'anthropic-beta': CLAUDE_BETA_FLAGS,
-        'user-agent': CLAUDE_CLI_USER_AGENT,
+        'user-agent': getClaudeCliUserAgent(),
         'x-app': 'cli',
         'anthropic-dangerous-direct-browser-access': 'true',
         'accept': 'text/event-stream',
