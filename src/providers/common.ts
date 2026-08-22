@@ -14,6 +14,8 @@ import {
   QUOTA_EXCEEDED_CODE,
 } from '@deepseek-ai/dsh-llm'
 import type { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { rateLimitDiagnostics, retryAfterInstant, waitFromReset } from './rate-limit.js'
+import type { RateLimitResetReader } from './rate-limit.js'
 
 /** One configured model catalog entry. */
 export interface ModelEntry {
@@ -66,40 +68,81 @@ export function validateModels(models: readonly ModelEntry[], label: string): Mo
   })
 }
 
+/** Optional per-call hooks {@link httpLlmError} uses to read a rate-limit window. */
+export interface HttpLlmErrorOptions {
+  /**
+   * The calling provider's reader for the instant its rate-limit window
+   * reopens. Consulted on a 429 only, and there ahead of the generic
+   * `retry-after` header, because a provider's own field names the window while
+   * `retry-after` often names a short backoff.
+   */
+  rateLimitReset?: RateLimitResetReader
+  /** Diagnostic sink for a 429 that disclosed no reset instant this code recognizes. */
+  onWarn?: (message: string) => void
+}
+
 /**
- * Build an LlmError from a non-2xx provider response, reading and truncating
- * the body for the message and mapping the status to a stable code.
+ * Build an LlmError from a non-2xx provider response, mapping the status to a
+ * stable code and, for a rate-limited request, the disclosed reset instant to
+ * the `providerRetryAfterMs` the retry plugin waits out.
+ *
+ * A 429 classifies as `RATE_LIMIT` on the strength of the status alone, ahead
+ * of the quota-wording check. On these routes there is no terminal quota to
+ * distinguish: a subscription has no balance to top up, only a window that
+ * reopens, and providers announce an exhausted window with wording
+ * (`usage_limit_reached`) the shared classifier reads as permanent.
  * @param response - the failed response.
  * @param label - diagnostic prefix naming the provider API.
+ * @param options - the calling provider's rate-limit reader and warning sink.
  * @returns the classified error.
  */
-export async function httpLlmError(response: Response, label: string): Promise<LlmError> {
+export async function httpLlmError(
+  response: Response,
+  label: string,
+  options: HttpLlmErrorOptions = {},
+): Promise<LlmError> {
   let body = ''
   try {
-    body = (await response.text()).slice(0, 500)
+    body = await response.text()
   } catch {
     // Only swallow error-body reading: the HTTP status still identifies the failure.
   }
-  const message = body.length > 0
-    ? `${label} error (HTTP ${String(response.status)}): ${body}`
+  // Truncated for display only; the readers below need the whole body to parse it.
+  const shown = body.slice(0, 500)
+  const message = shown.length > 0
+    ? `${label} error (HTTP ${String(response.status)}): ${shown}`
     : `${label} error (HTTP ${String(response.status)})`
   let code: string
   if (response.status === 401 || response.status === 403) code = 'AUTH'
-  else if (isQuotaExceededError(body)) code = QUOTA_EXCEEDED_CODE
   else if (response.status === 429) code = 'RATE_LIMIT'
-  else if (response.status === 400 && isContextWindowExceededError(body)) code = CONTEXT_WINDOW_EXCEEDED_CODE
+  else if (isQuotaExceededError(shown)) code = QUOTA_EXCEEDED_CODE
+  else if (response.status === 400 && isContextWindowExceededError(shown)) code = CONTEXT_WINDOW_EXCEEDED_CODE
   else if (response.status === 408 || response.status === 504) code = 'TIMEOUT'
   else if (response.status >= 500) code = 'SERVER'
   else code = `HTTP_${String(response.status)}`
-  const retryAfter = response.headers.get('retry-after')
-  let providerRetryAfterMs: number | undefined
-  if (retryAfter !== null) {
-    const seconds = Number(retryAfter)
-    if (Number.isFinite(seconds) && seconds > 0) providerRetryAfterMs = seconds * 1000
+  const now = Date.now()
+  // The provider's reader runs on a 429 and nowhere else. Providers attach
+  // their rate-limit headers to every response, so reading them on a transient
+  // 500 would report the current window's rollover — hours out — as the delay
+  // before retrying a failure that has nothing to do with the window, and the
+  // retry plugin honours `providerRetryAfterMs` for every retryable code.
+  // `retry-after` stays readable on any status: there it is a real backoff the
+  // provider asked for (a 503 shedding load), not a window snapshot.
+  //
+  // On a 429 the provider's own field wins outright rather than being raced
+  // against `retry-after`: a rejected window often carries both, and the
+  // generic header then names a short backoff that would burn the retry budget
+  // re-hitting the same closed window.
+  const rateLimited = response.status === 429
+  const reset = rateLimited
+    ? options.rateLimitReset?.(response, body, now) ?? retryAfterInstant(response, now)
+    : retryAfterInstant(response, now)
+  if (reset === undefined && rateLimited) {
+    options.onWarn?.(`${label}: ${rateLimitDiagnostics(response, body)}`)
   }
   return new LlmError(message, code, {
     status: response.status,
-    ...providerRetryAfterMs === undefined ? {} : { providerRetryAfterMs },
+    ...reset === undefined ? {} : { providerRetryAfterMs: waitFromReset(reset, now) },
   })
 }
 

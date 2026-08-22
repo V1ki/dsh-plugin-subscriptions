@@ -5,7 +5,7 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { EMPTY_RESPONSE_CODE, errorChain, LlmAdapter, LlmError, ReasoningEffortId, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
+import { EMPTY_RESPONSE_CODE, errorChain, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
@@ -33,6 +33,16 @@ import {
   TokenManager,
 } from './common.js'
 import type { CatalogPersistence, DiscoveredModel, FetchFn, ModelEntry, ProviderUsage, UsageWindow } from './common.js'
+import {
+  DEFAULT_RATE_LIMIT_WAIT,
+  DEFAULT_RETRY,
+  earliestReset,
+  jsonBody,
+  resetFromFields,
+  resetInstantFromHeader,
+  subscriptionRetryPolicy,
+} from './rate-limit.js'
+import type { RateLimitResetReader, RateLimitWait } from './rate-limit.js'
 
 export const CLAUDE_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
 export const CLAUDE_AUTHORIZE_URL = 'https://claude.ai/oauth/authorize'
@@ -46,6 +56,34 @@ const CLAUDE_CONTEXT_WINDOW = 200_000
 const CLAUDE_DEFAULT_MAX_TOKENS = 32_000
 /** Refresh when the access token has less than this much life left. */
 export const CLAUDE_PREEMPT_MS = 5 * 60_000
+
+/**
+ * Body fields Anthropic uses to name a reset instant, read when the unified
+ * headers are absent.
+ */
+const CLAUDE_RESET_FIELDS = ['resets_at', 'resetsAt', 'reset_at', 'retry_after'] as const
+
+/**
+ * Reads the reset instant of the Anthropic window that rejected a request.
+ *
+ * `anthropic-ratelimit-unified-*` is the subscription-plan family — the one
+ * Claude Code renders as "resets 3pm" — and is the only header that names the
+ * window which actually rejected this request. The per-bucket
+ * `anthropic-ratelimit-{requests,tokens,input-tokens,output-tokens}-reset`
+ * headers are deliberately not read: they are rollover snapshots attached to
+ * every response, so on a 429 they cannot say which bucket refused, and the
+ * earliest of them is typically the bucket that still had room — a wait that
+ * lands straight back in the closed window. They reach the operator through
+ * `rateLimitDiagnostics` instead.
+ */
+export const claudeRateLimitReset: RateLimitResetReader = (response, body, now) => {
+  const unified = earliestReset(
+    resetInstantFromHeader(response, 'anthropic-ratelimit-unified-reset', now),
+    resetInstantFromHeader(response, 'anthropic-ratelimit-unified-fallback-reset', now),
+  )
+  if (unified !== undefined) return unified
+  return resetFromFields(jsonBody(body), CLAUDE_RESET_FIELDS, now)
+}
 
 /**
  * The subscription endpoint only serves requests presenting as Claude Code,
@@ -407,22 +445,13 @@ export interface ClaudeAdapterOptions {
   discovery: boolean
   fetchFn?: FetchFn
   onWarn?: (message: string) => void
-  /** Max retries on a retryable failure before giving up; matches Claude Code's own client-side retry count. Defaults to the dsh-llm default (2) when unset. */
-  maxRetries?: number
+  /** How long this route may hold a turn open waiting for a rate-limit window; defaults to waiting on, six-hour ceiling. */
+  rateLimit?: RateLimitWait
   /** Resolve the attachment service per request; absent means image requests fail loudly. */
   resolveAttachments?: () => AttachmentStore | undefined
   /** Durable catalog store seeding capability metadata across restarts. */
   catalogStore?: CatalogPersistence
 }
-
-/**
- * Claude Code's own SDK retry shape: exponential backoff starting at 1s,
- * doubling per attempt, capped at 60s, plus jitter. `maxRetries` is the
- * count of retries after the first attempt (Claude Code defaults to 10).
- */
-const CLAUDE_RETRY_INITIAL_DELAY_MS = 1_000
-const CLAUDE_RETRY_MAX_DELAY_MS = 60_000
-const CLAUDE_RETRY_JITTER_RATIO = 0.2
 
 /** The Claude 4.5 family accepts image input. */
 const CLAUDE_MODALITIES: readonly ('text' | 'image')[] = ['text', 'image']
@@ -460,16 +489,11 @@ export class ClaudeAdapter extends LlmAdapter {
   }
 
   override providerRetryPolicy(provider: string) {
-    if (this.options.maxRetries === undefined) return undefined
-    return resolveRetryPolicy({
-      mode: 'normal',
-      maxRetries: this.options.maxRetries,
-      backoff: {
-        initialDelayMs: CLAUDE_RETRY_INITIAL_DELAY_MS,
-        maxDelayMs: CLAUDE_RETRY_MAX_DELAY_MS,
-        jitterRatio: CLAUDE_RETRY_JITTER_RATIO,
-      },
-    }, `claude: provider "${provider}" retryPolicy`)
+    return subscriptionRetryPolicy(
+      DEFAULT_RETRY,
+      this.options.rateLimit ?? DEFAULT_RATE_LIMIT_WAIT,
+      `claude: provider "${provider}" retryPolicy`,
+    )
   }
 
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
@@ -520,7 +544,12 @@ export class ClaudeAdapter extends LlmAdapter {
         session = await this.options.tokens.session(true)
         response = await this.request(options, session, watchdog.signal)
       }
-      if (!response.ok) throw await httpLlmError(response, 'claude API')
+      if (!response.ok) {
+        throw await httpLlmError(response, 'claude API', {
+          rateLimitReset: claudeRateLimitReset,
+          ...this.options.onWarn === undefined ? {} : { onWarn: this.options.onWarn },
+        })
+      }
       if (response.body === null) {
         throw new LlmError('claude API returned no response body', EMPTY_RESPONSE_CODE)
       }

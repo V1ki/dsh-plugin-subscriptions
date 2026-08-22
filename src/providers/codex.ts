@@ -37,6 +37,14 @@ import type {
   ProviderUsage,
   UsageWindow,
 } from './common.js'
+import {
+  DEFAULT_RATE_LIMIT_WAIT,
+  DEFAULT_RETRY,
+  jsonBody,
+  resetFromFields,
+  subscriptionRetryPolicy,
+} from './rate-limit.js'
+import type { RateLimitResetReader, RateLimitWait } from './rate-limit.js'
 
 export const CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
 export const CODEX_AUTHORIZE_URL = 'https://auth.openai.com/oauth/authorize'
@@ -48,6 +56,26 @@ const CODEX_CONTEXT_WINDOW = 400_000
 const CODEX_DEFAULT_MAX_TOKENS = 128_000
 /** Refresh when the access token has less than this much life left. */
 export const CODEX_PREEMPT_MS = 5 * 60_000
+
+/**
+ * Body fields the backend uses to name a reset. A window-exhaustion rejection
+ * carries `usage_limit_reached` with the seconds left on the window — the case
+ * that used to classify as a terminal quota and never be retried at all.
+ */
+const CODEX_RESET_FIELDS = ['resets_in_seconds', 'reset_after_seconds', 'resets_at', 'reset_at'] as const
+
+/**
+ * Reads the reset instant of the Codex window that rejected a request.
+ *
+ * Body only. The `x-codex-{primary,secondary}-reset-after-seconds` headers are
+ * rollover snapshots the backend attaches to every response, one per window,
+ * so they say nothing about which window refused: a burst 429 that would clear
+ * in seconds still carries a primary rollover hours out, and reading it would
+ * park the turn for those hours. They reach the operator through
+ * `rateLimitDiagnostics` instead.
+ */
+export const codexRateLimitReset: RateLimitResetReader = (_response, body, now) =>
+  resetFromFields(jsonBody(body), CODEX_RESET_FIELDS, now)
 
 /** Default instruction when the request carries no system prompt. */
 const DEFAULT_CODEX_INSTRUCTIONS = 'You are Codex, a coding agent based on GPT-5. '
@@ -469,6 +497,8 @@ export interface CodexAdapterOptions {
   resolveAttachments?: () => AttachmentStore | undefined
   /** Durable catalog store seeding capability metadata across restarts. */
   catalogStore?: CatalogPersistence
+  /** How long this route may hold a turn open waiting for a rate-limit window; defaults to waiting on, six-hour ceiling. */
+  rateLimit?: RateLimitWait
   /**
    * Per-request speed lookup (the composer Speed toggle's host half). Returns
    * whether this session's current choice sends the model on the fast tier;
@@ -524,6 +554,14 @@ export class CodexAdapter extends LlmAdapter {
 
   override providerInfo(provider: string): LlmProviderInfo {
     return { id: provider, name: 'ChatGPT (Codex)' }
+  }
+
+  override providerRetryPolicy(provider: string) {
+    return subscriptionRetryPolicy(
+      DEFAULT_RETRY,
+      this.options.rateLimit ?? DEFAULT_RATE_LIMIT_WAIT,
+      `codex: provider "${provider}" retryPolicy`,
+    )
   }
 
   private staticModels(provider: string): LlmModelInfo[] {
@@ -621,7 +659,12 @@ export class CodexAdapter extends LlmAdapter {
         session = await this.options.tokens.session(true)
         response = await this.request(options, session, watchdog.signal)
       }
-      if (!response.ok) throw await httpLlmError(response, 'codex API')
+      if (!response.ok) {
+        throw await httpLlmError(response, 'codex API', {
+          rateLimitReset: codexRateLimitReset,
+          ...this.options.onWarn === undefined ? {} : { onWarn: this.options.onWarn },
+        })
+      }
       if (response.body === null) {
         throw new LlmError('codex API returned no response body', EMPTY_RESPONSE_CODE)
       }

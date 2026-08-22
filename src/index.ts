@@ -43,6 +43,8 @@ import type {
 } from './auth/store.js'
 import { TokenManager, validateModels } from './providers/common.js'
 import type { ModelEntry, ProviderUsage } from './providers/common.js'
+import { DEFAULT_RATE_LIMIT_MAX_WAIT_MS, resolveRateLimitWait } from './providers/rate-limit.js'
+import type { RateLimitConfig } from './providers/rate-limit.js'
 import { catalogStore } from './providers/catalog-store.js'
 import {
   CodexAdapter,
@@ -77,6 +79,7 @@ import { createImageGenerateTool } from './tools/image-generate.js'
 import { createVideoGenerateTool, videosDirectory } from './tools/video-generate.js'
 
 export type { ModelEntry, ProviderUsage, UsageWindow } from './providers/common.js'
+export type { RateLimitConfig, RateLimitWait } from './providers/rate-limit.js'
 export type { ProviderStatus } from './auth/rpc.js'
 export type { ClaudeSession, CodexSession, GrokSession, ProviderId } from './auth/store.js'
 
@@ -92,6 +95,8 @@ export interface Config {
   providers?: ProviderId[]
   /** Maximum provider idle time while one stream read is outstanding (default five minutes). */
   streamIdleTimeoutMs?: number
+  /** Whether and how long a route waits out a closed rate-limit window. */
+  rateLimit?: RateLimitConfig
   /** Advisory model catalogs overriding the built-in defaults, per provider. */
   models?: {
     codex?: ModelEntry[]
@@ -112,6 +117,10 @@ const modelEntrySchema: z<ModelEntry> = z.object({
 export const Config: z<Config> = z.object({
   providers: z.array(providerIdSchema).default(['codex', 'claude', 'grok']),
   streamIdleTimeoutMs: z.number().min(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
+  rateLimit: z.object({
+    wait: z.boolean().default(true),
+    maxWaitMs: z.number().min(1).default(DEFAULT_RATE_LIMIT_MAX_WAIT_MS),
+  }),
   models: z.object({
     codex: z.array(modelEntrySchema),
     claude: z.array(modelEntrySchema),
@@ -387,6 +396,7 @@ export function apply(ctx: Context, config: Config): void {
   if (!Number.isFinite(streamIdleTimeoutMs) || streamIdleTimeoutMs <= 0) {
     throw new Error(`${name}: streamIdleTimeoutMs must be a positive finite number`)
   }
+  const rateLimit = resolveRateLimitWait(config.rateLimit, `${name}: rateLimit`)
   const catalog = resolveCatalog(config.models)
   // A non-empty configured catalog is an explicit override: it wins over live
   // discovery entirely (schemastery injects [] for omitted arrays, so only a
@@ -444,6 +454,7 @@ export function apply(ctx: Context, config: Config): void {
         adapter = new CodexAdapter({
           models: catalog.codex,
           streamIdleTimeoutMs,
+          rateLimit,
           tokens,
           discovery: !overridden.has('codex'),
           onWarn,
@@ -476,10 +487,10 @@ export function apply(ctx: Context, config: Config): void {
         handles.set('claude', ctx.llm.registerAdapter(['claude'], new ClaudeAdapter({
           models: catalog.claude,
           streamIdleTimeoutMs,
+          rateLimit,
           tokens,
           discovery: !overridden.has('claude'),
           onWarn,
-          maxRetries: 10,
           resolveAttachments,
           catalogStore: catalogStore('claude'),
         })))
@@ -501,6 +512,7 @@ export function apply(ctx: Context, config: Config): void {
         handles.set('grok', ctx.llm.registerAdapter(['grok'], new GrokAdapter({
           models: catalog.grok,
           streamIdleTimeoutMs,
+          rateLimit,
           tokens,
           discovery: !overridden.has('grok'),
           onWarn,
