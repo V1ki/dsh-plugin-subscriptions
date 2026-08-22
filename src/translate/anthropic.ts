@@ -28,6 +28,10 @@ import type { TranslatableMessage } from './resolved.js'
  */
 export const CLAUDE_CODE_IDENTITY = 'You are Claude Code, Anthropic\'s official CLI for Claude.'
 
+/** Tags wrapping a mid-conversation system message where it sits in the history. */
+export const SYSTEM_REMINDER_OPEN = '<system-reminder>'
+export const SYSTEM_REMINDER_CLOSE = '</system-reminder>'
+
 /** One Anthropic request message. */
 export interface AnthropicMessage {
   role: 'user' | 'assistant'
@@ -77,11 +81,30 @@ function leadWithToolResults(message: AnthropicMessage): void {
 }
 
 /**
+ * Index of the first non-system message; `messages.length` when every message
+ * is a system one.
+ *
+ * A system message before the conversation starts is the operator's opening
+ * instruction and belongs in the `system` slot. One that arrives later is
+ * mid-conversation context, and hoisting it into `system` would move bytes in
+ * front of the whole history — invalidating every cached turn behind it — so
+ * it stays where it is, as a reminder block in `messages`.
+ * @param messages - ordered conversation messages.
+ * @returns the boundary index separating the two.
+ */
+function conversationStart(messages: readonly TranslatableMessage[]): number {
+  const index = messages.findIndex(message => message.role !== 'system')
+  return index === -1 ? messages.length : index
+}
+
+/**
  * Convert harness messages into Anthropic messages. Consecutive same-role
  * messages merge into one message with multiple content blocks; tool results
  * arrive as user messages with `tool_result` blocks, which a merged user
  * message keeps in one leading run ({@link leadWithToolResults}); system-role
- * messages are handled by {@link toAnthropicSystem} and skipped here.
+ * messages before the conversation starts are handled by
+ * {@link toAnthropicSystem} and skipped here, while a later one rides in
+ * place as a user-role `<system-reminder>` block.
  * Reasoning blocks are not replayed (v1). Images must arrive pre-resolved
  * ({@link TranslatableMessage}); an unresolved ImageBlock is skipped because
  * its bytes are unreachable here.
@@ -90,14 +113,23 @@ function leadWithToolResults(message: AnthropicMessage): void {
  */
 export function toAnthropicMessages(messages: readonly TranslatableMessage[]): AnthropicMessage[] {
   const out: AnthropicMessage[] = []
-  for (const message of messages) {
-    if (message.role === 'system') continue
-    const role = message.role
+  const start = conversationStart(messages)
+  for (const [index, message] of messages.entries()) {
+    // A leading system message is an opening instruction; toAnthropicSystem
+    // owns those. A later one rides here so the cached prefix ahead of it
+    // stays byte-identical.
+    if (message.role === 'system' && index < start) continue
+    const role = message.role === 'system' ? 'user' : message.role
     const blocks: Record<string, unknown>[] = []
     for (const block of message.content) {
       switch (block.type) {
         case 'text':
-          blocks.push({ type: 'text', text: block.text })
+          blocks.push({
+            type: 'text',
+            text: message.role === 'system'
+              ? `${SYSTEM_REMINDER_OPEN}${block.text}${SYSTEM_REMINDER_CLOSE}`
+              : block.text,
+          })
           break
         case 'tool-call':
           // Anthropic accepts `tool_use` only in assistant messages, and only
@@ -153,14 +185,15 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[]): A
  * Build the Anthropic `system` array: the mandatory Claude Code identity
  * block, then the explicit system prompt, then any system-role messages.
  * @param system - explicit system prompt, when set.
- * @param messages - conversation messages; their system-role text is appended.
+ * @param messages - conversation messages; the system-role text preceding the
+ * conversation is appended, and a later one is left to {@link toAnthropicMessages}.
  * @returns the system content blocks.
  */
 export function toAnthropicSystem(system?: string, messages?: readonly TranslatableMessage[]): Record<string, unknown>[] {
   const blocks: Record<string, unknown>[] = [{ type: 'text', text: CLAUDE_CODE_IDENTITY }]
   if (system !== undefined && system.length > 0) blocks.push({ type: 'text', text: system })
-  for (const message of messages ?? []) {
-    if (message.role !== 'system') continue
+  const history = messages ?? []
+  for (const message of history.slice(0, conversationStart(history))) {
     for (const block of message.content) {
       if (block.type === 'text') blocks.push({ type: 'text', text: block.text })
     }

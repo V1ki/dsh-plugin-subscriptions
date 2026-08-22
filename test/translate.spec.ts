@@ -334,6 +334,33 @@ test('toAnthropicSystem: Claude Code identity first, then explicit and history s
   assert.equal(toAnthropicSystem().length, 1, 'the identity block is always present')
 })
 
+test('toAnthropicSystem hoists only the system messages that precede the conversation', () => {
+  const history = [
+    message('system', [{ type: 'text', text: 'opening' }]),
+    message('user', [{ type: 'text', text: 'hi' }]),
+    message('system', [{ type: 'text', text: 'mid-conversation' }]),
+  ]
+  assert.deepEqual(toAnthropicSystem('explicit', history), [
+    { type: 'text', text: CLAUDE_CODE_IDENTITY },
+    { type: 'text', text: 'explicit' },
+    { type: 'text', text: 'opening' },
+  ], 'a later system message must not move in front of the cached history')
+})
+
+test('toAnthropicMessages: a mid-conversation system message rides in place as a reminder', () => {
+  const messages = toAnthropicMessages([
+    message('system', [{ type: 'text', text: 'opening' }]),
+    message('user', [{ type: 'text', text: 'hi' }]),
+    message('assistant', [{ type: 'text', text: 'hello' }]),
+    message('system', [{ type: 'text', text: 'terse mode' }]),
+  ])
+  assert.deepEqual(messages, [
+    { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'hello' }] },
+    { role: 'user', content: [{ type: 'text', text: '<system-reminder>terse mode</system-reminder>' }] },
+  ])
+})
+
 test('toAnthropicTools maps to input_schema tools', () => {
   assert.deepEqual(toAnthropicTools([{ name: 'bash', description: 'run', parameters: { type: 'object' } }]), [
     { name: 'bash', description: 'run', input_schema: { type: 'object' } },
