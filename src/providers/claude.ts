@@ -18,6 +18,7 @@ import type { ClaudeSession } from '../auth/store.js'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { resolveImages } from '../translate/resolved.js'
 import {
+  markMessageCache,
   streamAnthropic,
   toAnthropicMessages,
   toAnthropicSystem,
@@ -559,11 +560,16 @@ export class ClaudeAdapter extends LlmAdapter {
     const effort = options.reasoningEffort !== undefined && disc?.reasoning !== undefined
       ? { output_config: { effort: String(options.reasoningEffort) } }
       : {}
+    // Assembled before the body so the breakpoints land on the blocks the
+    // body ships. Every marker costs one of Anthropic's four slots: three
+    // ride the history here, the fourth is on the last `system` block.
+    const anthropicMessages = toAnthropicMessages(messages)
+    markMessageCache(anthropicMessages)
     const body = {
       model: options.model,
       max_tokens: maxTokens,
       system: toAnthropicSystem(options.system, messages),
-      messages: toAnthropicMessages(messages),
+      messages: anthropicMessages,
       ...options.tools !== undefined && options.tools.length > 0
         ? { tools: toAnthropicTools(options.tools) }
         : {},

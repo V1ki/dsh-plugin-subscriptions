@@ -32,6 +32,24 @@ export const CLAUDE_CODE_IDENTITY = 'You are Claude Code, Anthropic\'s official 
 export const SYSTEM_REMINDER_OPEN = '<system-reminder>'
 export const SYSTEM_REMINDER_CLOSE = '</system-reminder>'
 
+/**
+ * How far apart consecutive message breakpoints sit, in content blocks.
+ *
+ * A breakpoint looks back at most 20 blocks for an entry an earlier request
+ * wrote, so marks must stay closer than that: one agentic turn can append a
+ * dozen tool_use/tool_result blocks at once, and a single trailing mark would
+ * silently fall out of range and rebuild the whole prefix.
+ */
+export const CACHE_BLOCK_STRIDE = 15
+
+/**
+ * Message breakpoints per request. Anthropic allows four in total and the
+ * last `system` block takes the fourth, so three are left for the history —
+ * enough to tolerate a turn appending roughly {@link CACHE_BLOCK_STRIDE} × 3
+ * blocks before a read is lost.
+ */
+export const MESSAGE_CACHE_BREAKPOINTS = 3
+
 /** One Anthropic request message. */
 export interface AnthropicMessage {
   role: 'user' | 'assistant'
@@ -182,6 +200,26 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[]): A
 }
 
 /**
+ * Mark the conversation's cache breakpoints in place: the last content block,
+ * then one every {@link CACHE_BLOCK_STRIDE} blocks backwards, {@link
+ * MESSAGE_CACHE_BREAKPOINTS} in total.
+ *
+ * The history is append-only, so the block one request marks last is
+ * byte-identical in the next — that entry is what the next request reads.
+ * Marks are counted across the flattened block sequence, not per message,
+ * because the lookback window Anthropic walks counts blocks the same way.
+ * @param messages - assembled Anthropic messages, marked in place.
+ */
+export function markMessageCache(messages: readonly AnthropicMessage[]): void {
+  const blocks = messages.flatMap(message => message.content)
+  for (let mark = 0; mark < MESSAGE_CACHE_BREAKPOINTS; mark++) {
+    const at = blocks.length - 1 - mark * CACHE_BLOCK_STRIDE
+    if (at < 0) return
+    blocks[at].cache_control = { type: 'ephemeral' }
+  }
+}
+
+/**
  * Build the Anthropic `system` array: the mandatory Claude Code identity
  * block, then the explicit system prompt, then any system-role messages.
  * @param system - explicit system prompt, when set.
@@ -198,6 +236,10 @@ export function toAnthropicSystem(system?: string, messages?: readonly Translata
       if (block.type === 'text') blocks.push({ type: 'text', text: block.text })
     }
   }
+  // `tools` renders ahead of `system`, so this one marker caches both. It is
+  // deliberately separate from the message marks: a tool_choice or thinking
+  // change invalidates the messages tier only, and this entry survives it.
+  blocks[blocks.length - 1].cache_control = { type: 'ephemeral' }
   return blocks
 }
 

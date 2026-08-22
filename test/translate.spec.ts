@@ -17,11 +17,12 @@ import type { ResponsesStreamEvent } from '../src/translate/responses.js'
 import {
   AnthropicStreamTranslator,
   CLAUDE_CODE_IDENTITY,
+  markMessageCache,
   toAnthropicMessages,
   toAnthropicSystem,
   toAnthropicTools,
 } from '../src/translate/anthropic.js'
-import type { AnthropicStreamEvent } from '../src/translate/anthropic.js'
+import type { AnthropicMessage, AnthropicStreamEvent } from '../src/translate/anthropic.js'
 import { resolveImages } from '../src/translate/resolved.js'
 
 let messageCounter = 0
@@ -329,7 +330,7 @@ test('toAnthropicSystem: Claude Code identity first, then explicit and history s
   assert.deepEqual(blocks, [
     { type: 'text', text: CLAUDE_CODE_IDENTITY },
     { type: 'text', text: 'explicit' },
-    { type: 'text', text: 'from history' },
+    { type: 'text', text: 'from history', cache_control: { type: 'ephemeral' } },
   ])
   assert.equal(toAnthropicSystem().length, 1, 'the identity block is always present')
 })
@@ -343,7 +344,7 @@ test('toAnthropicSystem hoists only the system messages that precede the convers
   assert.deepEqual(toAnthropicSystem('explicit', history), [
     { type: 'text', text: CLAUDE_CODE_IDENTITY },
     { type: 'text', text: 'explicit' },
-    { type: 'text', text: 'opening' },
+    { type: 'text', text: 'opening', cache_control: { type: 'ephemeral' } },
   ], 'a later system message must not move in front of the cached history')
 })
 
@@ -359,6 +360,41 @@ test('toAnthropicMessages: a mid-conversation system message rides in place as a
     { role: 'assistant', content: [{ type: 'text', text: 'hello' }] },
     { role: 'user', content: [{ type: 'text', text: '<system-reminder>terse mode</system-reminder>' }] },
   ])
+})
+
+test('toAnthropicSystem marks its last block as the tools+system breakpoint', () => {
+  const blocks = toAnthropicSystem('explicit')
+  assert.deepEqual(blocks, [
+    { type: 'text', text: CLAUDE_CODE_IDENTITY },
+    { type: 'text', text: 'explicit', cache_control: { type: 'ephemeral' } },
+  ])
+})
+
+test('markMessageCache marks the tail and one block every stride backwards', () => {
+  const content: Record<string, unknown>[] = Array.from(
+    { length: 40 },
+    (_, index) => ({ type: 'text', text: `b${index}` }),
+  )
+  const messages: AnthropicMessage[] = [{ role: 'user', content }]
+  markMessageCache(messages)
+  const marked = content.flatMap((block, index) => ('cache_control' in block ? [index] : []))
+  assert.deepEqual(marked, [9, 24, 39], 'three marks, 15 blocks apart, anchored at the tail')
+})
+
+test('markMessageCache marks across messages and stops at the start of a short one', () => {
+  const first: Record<string, unknown>[] = [{ type: 'text', text: 'hi' }]
+  const second: Record<string, unknown>[] = [{ type: 'text', text: 'hello' }]
+  const messages: AnthropicMessage[] = [
+    { role: 'user', content: first },
+    { role: 'assistant', content: second },
+  ]
+  markMessageCache(messages)
+  assert.deepEqual(first, [{ type: 'text', text: 'hi' }], 'no mark within a stride of the tail')
+  assert.deepEqual(second, [{ type: 'text', text: 'hello', cache_control: { type: 'ephemeral' } }])
+})
+
+test('markMessageCache leaves an empty conversation alone', () => {
+  assert.doesNotThrow(() => { markMessageCache([]) })
 })
 
 test('toAnthropicTools maps to input_schema tools', () => {
