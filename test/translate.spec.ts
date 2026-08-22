@@ -397,6 +397,48 @@ test('markMessageCache leaves an empty conversation alone', () => {
   assert.doesNotThrow(() => { markMessageCache([]) })
 })
 
+test('toAnthropicMessages: a system reminder merged with tool results stays behind the leading run', () => {
+  const messages = toAnthropicMessages([
+    message('user', [{ type: 'text', text: 'go' }]),
+    message('assistant', [toolCall('c1', 'bash', '{}')]),
+    message('user', [toolResult('c1', 'ok')]),
+    message('system', [{ type: 'text', text: 'terse mode' }]),
+  ])
+  assert.deepEqual(messages[2].content, [
+    { type: 'tool_result', tool_use_id: 'c1', content: 'ok' },
+    { type: 'text', text: '<system-reminder>terse mode</system-reminder>' },
+  ], 'tool_result blocks must still lead the merged message')
+})
+
+test('an all-system history hoists everything and leaves no messages', () => {
+  const history = [
+    message('system', [{ type: 'text', text: 'first' }]),
+    message('system', [{ type: 'text', text: 'second' }]),
+  ]
+  assert.deepEqual(toAnthropicSystem(undefined, history), [
+    { type: 'text', text: CLAUDE_CODE_IDENTITY },
+    { type: 'text', text: 'first' },
+    { type: 'text', text: 'second', cache_control: { type: 'ephemeral' } },
+  ])
+  assert.deepEqual(toAnthropicMessages(history), [])
+})
+
+test('toAnthropicSystem marks the identity block when it is the only one', () => {
+  assert.deepEqual(toAnthropicSystem(), [
+    { type: 'text', text: CLAUDE_CODE_IDENTITY, cache_control: { type: 'ephemeral' } },
+  ])
+})
+
+test('markMessageCache marks a tool_result block when the turn ends on one', () => {
+  const content: Record<string, unknown>[] = [
+    { type: 'tool_result', tool_use_id: 'c1', content: 'ok' },
+    { type: 'tool_result', tool_use_id: 'c2', content: 'ok' },
+  ]
+  markMessageCache([{ role: 'user', content }])
+  assert.equal(content[0].cache_control, undefined)
+  assert.deepEqual(content[1].cache_control, { type: 'ephemeral' })
+})
+
 test('toAnthropicTools maps to input_schema tools', () => {
   assert.deepEqual(toAnthropicTools([{ name: 'bash', description: 'run', parameters: { type: 'object' } }]), [
     { name: 'bash', description: 'run', input_schema: { type: 'object' } },

@@ -7,10 +7,11 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { MessageId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import type { Message } from '@deepseek-ai/dsh-llm'
 import { CodexAdapter, codexRequestBody, fetchCodexModels } from '../src/providers/codex.js'
 import { GrokAdapter } from '../src/providers/grok.js'
-import { ClaudeAdapter } from '../src/providers/claude.js'
+import { ClaudeAdapter, claudeRequestBody } from '../src/providers/claude.js'
 import { ModelCatalogCache, TokenManager } from '../src/providers/common.js'
 import type { CatalogPersistence, CatalogSnapshot, FetchFn } from '../src/providers/common.js'
 import type { ClaudeSession, CodexSession, GrokSession } from '../src/auth/store.js'
@@ -271,6 +272,66 @@ test('codexRequestBody sends service_tier priority only on the fast tier', () =>
   assert.equal(fast.model, 'gpt-5.1-codex')
   assert.equal(fast.service_tier, 'priority')
   assert.deepEqual(fast.reasoning, { effort: 'high', summary: 'auto' })
+})
+
+/** One text-only message of any role, for request-body assembly. */
+function claudeMessage(id: string, role: Message['role'], text: string): Message {
+  return {
+    id: MessageId(id),
+    role,
+    content: [{ type: 'text', text }],
+    source: role === 'assistant'
+      ? { kind: 'model', provider: 'claude', model: 'claude-opus-5' }
+      : { kind: 'user' },
+  }
+}
+
+test('claudeRequestBody ships the cache breakpoints and never exceeds four', () => {
+  const history: Message[] = [claudeMessage('s0', 'system', 'opening')]
+  for (let turn = 0; turn < 16; turn++) {
+    history.push(claudeMessage(`u${turn}`, 'user', `q${turn}`))
+    history.push(claudeMessage(`a${turn}`, 'assistant', `r${turn}`))
+  }
+  const body = claudeRequestBody(
+    {
+      provider: 'claude',
+      model: 'claude-opus-5',
+      messages: history,
+      system: 'explicit',
+      tools: [
+        { name: 'write', description: 'write a file', parameters: { type: 'object' } },
+        { name: 'bash', description: 'run', parameters: { type: 'object' } },
+      ],
+    },
+    history,
+    32_000,
+    { type: 'adaptive', display: 'summarized' },
+    'high',
+  )
+  const system = body.system as Record<string, unknown>[]
+  const messages = body.messages as { content: Record<string, unknown>[] }[]
+  const marked = [...system, ...messages.flatMap(entry => entry.content)]
+    .filter(block => block.cache_control !== undefined)
+  assert.equal(marked.length, 4, 'one on system plus three across the history is Anthropic\'s maximum')
+  assert.deepEqual(system[system.length - 1].cache_control, { type: 'ephemeral' }, 'the tools+system prefix is cached')
+  assert.deepEqual(
+    (body.tools as { name: string }[]).map(tool => tool.name),
+    ['bash', 'write'],
+    'tools ride in name order',
+  )
+  assert.deepEqual(body.thinking, { type: 'adaptive', display: 'summarized' })
+  assert.deepEqual(body.output_config, { effort: 'high' })
+  assert.equal(body.stream, true)
+})
+
+test('claudeRequestBody omits tools, thinking and effort when the request carries none', () => {
+  const history: Message[] = [claudeMessage('u0', 'user', 'hi')]
+  const body = claudeRequestBody({ provider: 'claude', model: 'claude-opus-5', messages: history }, history, 32_000)
+  assert.equal('tools' in body, false)
+  assert.equal('thinking' in body, false)
+  assert.equal('output_config' in body, false)
+  assert.equal('metadata' in body, false)
+  assert.equal(body.max_tokens, 32_000)
 })
 
 test('modalities: codex and claude declare image input; grok gates text-only models', async () => {
