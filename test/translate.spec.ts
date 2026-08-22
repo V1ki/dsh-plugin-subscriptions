@@ -340,6 +340,22 @@ test('toAnthropicTools maps to input_schema tools', () => {
   ])
 })
 
+test('toAnthropicTools sorts by name so the tools prefix survives registration order', () => {
+  const schemas = [
+    { name: 'write', description: 'write a file', parameters: { type: 'object' } },
+    { name: 'bash', description: 'run', parameters: { type: 'object' } },
+  ]
+  assert.deepEqual(toAnthropicTools(schemas), [
+    { name: 'bash', description: 'run', input_schema: { type: 'object' } },
+    { name: 'write', description: 'write a file', input_schema: { type: 'object' } },
+  ])
+  assert.deepEqual(
+    toAnthropicTools([...schemas].reverse()),
+    toAnthropicTools(schemas),
+    'the wire order does not depend on the input order',
+  )
+})
+
 test('Anthropic translator: text + tool_use stream with usage before finish', () => {
   const events: AnthropicStreamEvent[] = [
     { type: 'message_start', message: { usage: { input_tokens: 50, cache_read_input_tokens: 10 } } },

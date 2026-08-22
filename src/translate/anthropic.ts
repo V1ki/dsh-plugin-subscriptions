@@ -169,16 +169,24 @@ export function toAnthropicSystem(system?: string, messages?: readonly Translata
 }
 
 /**
- * Map harness tool schemas to Anthropic tools.
+ * Map harness tool schemas to Anthropic tools, in name order.
+ *
+ * `tools` renders at position 0 of the cached prefix, so any reordering
+ * invalidates every cache entry behind it — `system` and the whole
+ * conversation included. Registration order belongs to the caller and plugin
+ * load order can differ between processes, so the wire order is fixed here
+ * instead. Anthropic selects a tool by name; the array order carries nothing.
  * @param tools - tool schemas from the request.
- * @returns Anthropic `tools` array entries.
+ * @returns Anthropic `tools` array entries, ordered by tool name.
  */
 export function toAnthropicTools(tools: readonly ToolSchema[]): Record<string, unknown>[] {
-  return tools.map(tool => ({
-    name: tool.name,
-    description: tool.description,
-    input_schema: tool.parameters,
-  }))
+  return [...tools]
+    .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
+    .map(tool => ({
+      name: tool.name,
+      description: tool.description,
+      input_schema: tool.parameters,
+    }))
 }
 
 /** The subset of Anthropic SSE event shapes this translator reads. */
