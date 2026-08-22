@@ -118,10 +118,27 @@ GitHub 安装的:重新执行一遍 `add github:V1ki/dsh-plugin-subscriptions` �
   config:
     providers: [codex, claude]        # 子集;默认三个全启用
     streamIdleTimeoutMs: 300000
+    rateLimit:
+      wait: true                       # 等待限流窗口重开(默认开启)
+      maxWaitMs: 21600000              # 单次等待上限;6 小时,足够覆盖 5 小时会话窗口
     models:                            # 覆盖实时发现/内置目录
       codex:
         - { id: gpt-5.6-sol, name: GPT-5.6 Sol, contextWindow: 272000, inputModalities: [text, image] }
 ```
+
+### 等待限流窗口
+
+订阅套餐天然是按限流窗口计费的 —— 5 小时会话窗口、周窗口,部分套餐还有按模型的周窗口 —— 所以 429 并不是终点:窗口会在 provider 自己告知的时刻重开。每条路由从自己的 429 里读出这个时刻(Anthropic 的 `anthropic-ratelimit-unified-reset`、Codex 在 `usage_limit_reached` 上给出的秒数、xAI 的 `x-ratelimit-reset-*`,或通用的 `retry-after`),并把它作为应等待的时长上报。
+
+真正执行等待的是 [`@deepseek-ai/dsh-llm-retry`](https://www.npmjs.com/package/@deepseek-ai/dsh-llm-retry),三条路由的重试策略都是为它写的:把它加进编排,否则不会有任何等待,关闭的窗口仍旧直接让本轮失败。
+
+```yaml
+- name: '@deepseek-ai/dsh-llm-retry'
+```
+
+重开时刻超过 `maxWaitMs`(比如几天后才重置的周窗口)会立即失败,而不是把会话挂在那里。`wait: false` 恢复到此前秒级的行为。
+
+一个需要知道的取舍:延迟上限与本地指数退避共用,调高它同时也抬高了无关瞬时失败(`TRANSPORT`、`SERVER`、`TIMEOUT`)在有限重试预算耗尽前的退避时长 —— claude 路由第 10 次重试最长会从 60 秒变成 512 秒。
 
 ## 开发
 
@@ -139,7 +156,7 @@ pnpm test      # 编译后跑 node --test 单测
 
 - `src/index.ts` —— 插件入口:配置 schema、adapter 注册、登录态变更通告、RPC 接线
 - `src/auth/` —— PKCE/JWT 工具、token 存储、OAuth 流程引擎(临时本地回调服务)、Claude Code 凭据读取器(Keychain/文件)、`/subscriptions-auth` RPC 通道
-- `src/providers/` —— 各 provider 的 OAuth 常量/换发/刷新 + `LlmAdapter` 实现
+- `src/providers/` —— 各 provider 的 OAuth 常量/换发/刷新 + `LlmAdapter` 实现,以及 `rate-limit.ts`(限流重开时刻解析 + 重试策略)
 - `src/translate/` —— dsh `Message[]` 与 OpenAI Responses / Anthropic Messages 格式互转,SSE → `StreamChunk`
 - `src/tools/` —— `x_search`、`image_generate` 与 `video_generate`
 - `src/client/` —— 设置 → 订阅页面(浏览器面,中英文,跟随明暗主题)

@@ -118,10 +118,27 @@ Not logged in? The provider stays out of the picker, and requests fail with `MIS
   config:
     providers: [codex, claude]        # subset; default all three
     streamIdleTimeoutMs: 300000
+    rateLimit:
+      wait: true                       # wait out a closed rate-limit window (default)
+      maxWaitMs: 21600000              # ceiling on one wait; 6 h, covers a 5-hour session window
     models:                            # override the discovered/built-in catalogs
       codex:
         - { id: gpt-5.6-sol, name: GPT-5.6 Sol, contextWindow: 272000, inputModalities: [text, image] }
 ```
+
+### Waiting out a rate-limit window
+
+A subscription plan is rate-limit shaped by design — a 5-hour session window, a weekly one, and on some plans a per-model weekly one — so a 429 is not a dead end: the window reopens at a time the provider discloses. Each route reads that reset off its own 429 (Anthropic's `anthropic-ratelimit-unified-reset`, the seconds Codex puts on a `usage_limit_reached` rejection, xAI's `x-ratelimit-reset-*`, or a plain `retry-after`) and reports it as the wait to take.
+
+Waiting itself is executed by [`@deepseek-ai/dsh-llm-retry`](https://www.npmjs.com/package/@deepseek-ai/dsh-llm-retry), which every route's retry policy is written for: add it to the composition, or nothing waits and a closed window fails the turn as before.
+
+```yaml
+- name: '@deepseek-ai/dsh-llm-retry'
+```
+
+A reset further out than `maxWaitMs` — a weekly window days away — fails the turn immediately rather than parking the session. `wait: false` restores the previous seconds-scale behaviour.
+
+One trade-off worth knowing: the delay ceiling is shared with local exponential backoff, so raising it also raises how long an unrelated transient failure (`TRANSPORT`, `SERVER`, `TIMEOUT`) can back off for before the finite retry budget runs out — on the claude route, up to 512 s on the last of its ten retries instead of 60 s.
 
 ## Develop
 
@@ -139,7 +156,7 @@ After `pnpm build`, restart `dsh web` to pick up changes.
 
 - `src/index.ts` — plugin entry: config schema, adapter registration, auth-change re-announce, RPC wiring
 - `src/auth/` — PKCE/JWT helpers, token store, OAuth flow engine (temp loopback callback server), Claude Code credential reader (Keychain/file), `/subscriptions-auth` RPC channel
-- `src/providers/` — per-provider OAuth constants/exchange/refresh + `LlmAdapter`s
+- `src/providers/` — per-provider OAuth constants/exchange/refresh + `LlmAdapter`s, and `rate-limit.ts` (reset-instant parsing + retry policy)
 - `src/translate/` — dsh `Message[]` ⟷ OpenAI Responses / Anthropic Messages wire formats, SSE → `StreamChunk`
 - `src/tools/` — `x_search`, `image_generate`, and `video_generate`
 - `src/client/` — the Settings → Subscriptions page (browser half, zh/en, theme-token aware)

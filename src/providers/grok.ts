@@ -35,6 +35,16 @@ import type {
   ProviderUsage,
   UsageWindow,
 } from './common.js'
+import {
+  DEFAULT_RATE_LIMIT_WAIT,
+  DEFAULT_RETRY,
+  earliestReset,
+  jsonBody,
+  resetFromFields,
+  resetInstantFromHeader,
+  subscriptionRetryPolicy,
+} from './rate-limit.js'
+import type { RateLimitResetReader, RateLimitWait } from './rate-limit.js'
 
 export const GROK_CLIENT_ID = 'b1a00492-073a-47ea-816f-4c329264a828'
 export const GROK_DISCOVERY_URL = 'https://auth.x.ai/.well-known/openid-configuration'
@@ -45,6 +55,27 @@ const GROK_CONTEXT_WINDOW = 256_000
 const GROK_DEFAULT_MAX_TOKENS = 32_000
 /** Refresh when the access token has less than this much life left. */
 export const GROK_PREEMPT_MS = 2 * 60_000
+
+/**
+ * xAI serves the OpenAI-compatible rate-limit header family, whose reset
+ * values are durations (`6m0s`) rather than instants.
+ */
+const GROK_RESET_HEADERS = [
+  'x-ratelimit-reset-requests',
+  'x-ratelimit-reset-tokens',
+] as const
+
+/** Body fields xAI uses to name a delay or reset. */
+const GROK_RESET_FIELDS = ['retry_after', 'retry_after_seconds', 'resets_at', 'reset_at'] as const
+
+/** Reads the reset instant of the xAI window that rejected a request. */
+export const grokRateLimitReset: RateLimitResetReader = (response, body, now) => {
+  const headers = earliestReset(
+    ...GROK_RESET_HEADERS.map(header => resetInstantFromHeader(response, header, now)),
+  )
+  if (headers !== undefined) return headers
+  return resetFromFields(jsonBody(body), GROK_RESET_FIELDS, now)
+}
 
 /** Discovered OIDC endpoints for the xAI authorization server. */
 export interface GrokDiscovery {
@@ -516,6 +547,8 @@ export interface GrokAdapterOptions {
   resolveAttachments?: () => AttachmentStore | undefined
   /** Durable catalog store seeding capability metadata across restarts. */
   catalogStore?: CatalogPersistence
+  /** How long this route may hold a turn open waiting for a rate-limit window; defaults to waiting on, six-hour ceiling. */
+  rateLimit?: RateLimitWait
 }
 
 /** Grok wire adapter: one instance serves the `grok` provider route. */
@@ -534,6 +567,14 @@ export class GrokAdapter extends LlmAdapter {
 
   override providerInfo(provider: string): LlmProviderInfo {
     return { id: provider, name: 'Grok (Subscription)' }
+  }
+
+  override providerRetryPolicy(provider: string) {
+    return subscriptionRetryPolicy(
+      DEFAULT_RETRY,
+      this.options.rateLimit ?? DEFAULT_RATE_LIMIT_WAIT,
+      `grok: provider "${provider}" retryPolicy`,
+    )
   }
 
   private staticModels(provider: string): LlmModelInfo[] {
@@ -617,7 +658,12 @@ export class GrokAdapter extends LlmAdapter {
         session = await this.options.tokens.session(true)
         response = await this.request(options, session, watchdog.signal)
       }
-      if (!response.ok) throw await httpLlmError(response, 'grok API')
+      if (!response.ok) {
+        throw await httpLlmError(response, 'grok API', {
+          rateLimitReset: grokRateLimitReset,
+          ...this.options.onWarn === undefined ? {} : { onWarn: this.options.onWarn },
+        })
+      }
       if (response.body === null) {
         throw new LlmError('grok API returned no response body', EMPTY_RESPONSE_CODE)
       }
