@@ -72,8 +72,9 @@ export function validateModels(models: readonly ModelEntry[], label: string): Mo
 export interface HttpLlmErrorOptions {
   /**
    * The calling provider's reader for the instant its rate-limit window
-   * reopens. Tried before the generic `retry-after` header, because a provider's
-   * own field names the window while `retry-after` often names a short backoff.
+   * reopens. Consulted on a 429 only, and there ahead of the generic
+   * `retry-after` header, because a provider's own field names the window while
+   * `retry-after` often names a short backoff.
    */
   rateLimitReset?: RateLimitResetReader
   /** Diagnostic sink for a 429 that disclosed no reset instant this code recognizes. */
@@ -120,12 +121,23 @@ export async function httpLlmError(
   else if (response.status >= 500) code = 'SERVER'
   else code = `HTTP_${String(response.status)}`
   const now = Date.now()
-  // The provider's own field wins outright rather than being raced against
-  // `retry-after`: a rejected window often carries both, and the generic header
-  // then names a short backoff that would burn the retry budget re-hitting the
-  // same closed window.
-  const reset = options.rateLimitReset?.(response, body, now) ?? retryAfterInstant(response, now)
-  if (reset === undefined && code === 'RATE_LIMIT') {
+  // The provider's reader runs on a 429 and nowhere else. Providers attach
+  // their rate-limit headers to every response, so reading them on a transient
+  // 500 would report the current window's rollover — hours out — as the delay
+  // before retrying a failure that has nothing to do with the window, and the
+  // retry plugin honours `providerRetryAfterMs` for every retryable code.
+  // `retry-after` stays readable on any status: there it is a real backoff the
+  // provider asked for (a 503 shedding load), not a window snapshot.
+  //
+  // On a 429 the provider's own field wins outright rather than being raced
+  // against `retry-after`: a rejected window often carries both, and the
+  // generic header then names a short backoff that would burn the retry budget
+  // re-hitting the same closed window.
+  const rateLimited = response.status === 429
+  const reset = rateLimited
+    ? options.rateLimitReset?.(response, body, now) ?? retryAfterInstant(response, now)
+    : retryAfterInstant(response, now)
+  if (reset === undefined && rateLimited) {
     options.onWarn?.(`${label}: ${rateLimitDiagnostics(response, body)}`)
   }
   return new LlmError(message, code, {

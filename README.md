@@ -128,7 +128,11 @@ Not logged in? The provider stays out of the picker, and requests fail with `MIS
 
 ### Waiting out a rate-limit window
 
-A subscription plan is rate-limit shaped by design — a 5-hour session window, a weekly one, and on some plans a per-model weekly one — so a 429 is not a dead end: the window reopens at a time the provider discloses. Each route reads that reset off its own 429 (Anthropic's `anthropic-ratelimit-unified-reset`, the seconds Codex puts on a `usage_limit_reached` rejection, xAI's `x-ratelimit-reset-*`, or a plain `retry-after`) and reports it as the wait to take.
+A subscription plan is rate-limit shaped by design — a 5-hour session window, a weekly one, and on some plans a per-model weekly one — so a 429 is not a dead end: the window reopens at a time the provider discloses. Each route reads that reset off its own 429 and reports it as the wait to take.
+
+Only a signal that names the window which actually rejected the request is waited on: Anthropic's `anthropic-ratelimit-unified-reset`, the seconds Codex puts on a `usage_limit_reached` rejection, the delay xAI names in the error body, or a plain `retry-after`. The per-bucket rollover snapshots (`anthropic-ratelimit-{requests,tokens,…}-reset`, `x-codex-*-reset-after-seconds`, `x-ratelimit-reset-*`) ride every response and cannot say which bucket refused — the earliest is usually one that still had room — so a 429 carrying nothing else is logged through the plugin's warning sink, naming the headers and the head of the body, rather than parking the turn on a guess.
+
+Reading is confined to a 429. Every other failure keeps its short local backoff: those same headers ride a transient 500 too, and honouring them there would hold a turn for the rest of the window over an overload that clears in a second.
 
 Waiting itself is executed by [`@deepseek-ai/dsh-llm-retry`](https://www.npmjs.com/package/@deepseek-ai/dsh-llm-retry), which every route's retry policy is written for: add it to the composition, or nothing waits and a closed window fails the turn as before.
 
@@ -136,9 +140,11 @@ Waiting itself is executed by [`@deepseek-ai/dsh-llm-retry`](https://www.npmjs.c
 - name: '@deepseek-ai/dsh-llm-retry'
 ```
 
-A reset further out than `maxWaitMs` — a weekly window days away — fails the turn immediately rather than parking the session. `wait: false` restores the previous seconds-scale behaviour.
+A reset further out than `maxWaitMs` — a weekly window days away — fails the turn immediately rather than parking the session. `wait: false` drops back to local backoff alone.
 
-One trade-off worth knowing: the delay ceiling is shared with local exponential backoff, so raising it also raises how long an unrelated transient failure (`TRANSPORT`, `SERVER`, `TIMEOUT`) can back off for before the finite retry budget runs out — on the claude route, up to 512 s on the last of its ten retries instead of 60 s.
+All three routes share Claude Code's own retry shape: ten retries after the first attempt, backing off from 1 s with 20% jitter under a 60 s cap. These are consumer subscription endpoints that shed load in bursts, and the dsh-llm defaults (five retries from 500 ms to 10 s) give up after about fifteen seconds, which is short for that. A 429 that discloses no reset is now retried locally for roughly 17 minutes before the turn fails — about 5 minutes with `wait: false`, where the 60 s cap actually binds.
+
+One trade-off worth knowing: the delay ceiling is shared with that local backoff, so raising `maxWaitMs` also raises how long an unrelated transient failure (`TRANSPORT`, `SERVER`, `TIMEOUT`) can back off for before the finite retry budget runs out — up to 512 s on the last of the ten retries instead of the 60 s cap.
 
 ## Develop
 

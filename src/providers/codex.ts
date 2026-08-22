@@ -40,10 +40,8 @@ import type {
 import {
   DEFAULT_RATE_LIMIT_WAIT,
   DEFAULT_RETRY,
-  earliestReset,
   jsonBody,
   resetFromFields,
-  resetInstantFromHeader,
   subscriptionRetryPolicy,
 } from './rate-limit.js'
 import type { RateLimitResetReader, RateLimitWait } from './rate-limit.js'
@@ -60,30 +58,24 @@ const CODEX_DEFAULT_MAX_TOKENS = 128_000
 export const CODEX_PREEMPT_MS = 5 * 60_000
 
 /**
- * The rate-limit snapshot headers the ChatGPT backend attaches to a Codex
- * response, one per window (the same primary/secondary split the usage
- * endpoint reports).
- */
-const CODEX_RESET_HEADERS = [
-  'x-codex-primary-reset-after-seconds',
-  'x-codex-secondary-reset-after-seconds',
-] as const
-
-/**
  * Body fields the backend uses to name a reset. A window-exhaustion rejection
  * carries `usage_limit_reached` with the seconds left on the window — the case
  * that used to classify as a terminal quota and never be retried at all.
  */
 const CODEX_RESET_FIELDS = ['resets_in_seconds', 'reset_after_seconds', 'resets_at', 'reset_at'] as const
 
-/** Reads the reset instant of the Codex window that rejected a request. */
-export const codexRateLimitReset: RateLimitResetReader = (response, body, now) => {
-  // Body first: it names the window that actually rejected the request, while
-  // the snapshot headers describe every window including ones with room left.
-  const fromBody = resetFromFields(jsonBody(body), CODEX_RESET_FIELDS, now)
-  if (fromBody !== undefined) return fromBody
-  return earliestReset(...CODEX_RESET_HEADERS.map(header => resetInstantFromHeader(response, header, now)))
-}
+/**
+ * Reads the reset instant of the Codex window that rejected a request.
+ *
+ * Body only. The `x-codex-{primary,secondary}-reset-after-seconds` headers are
+ * rollover snapshots the backend attaches to every response, one per window,
+ * so they say nothing about which window refused: a burst 429 that would clear
+ * in seconds still carries a primary rollover hours out, and reading it would
+ * park the turn for those hours. They reach the operator through
+ * `rateLimitDiagnostics` instead.
+ */
+export const codexRateLimitReset: RateLimitResetReader = (_response, body, now) =>
+  resetFromFields(jsonBody(body), CODEX_RESET_FIELDS, now)
 
 /** Default instruction when the request carries no system prompt. */
 const DEFAULT_CODEX_INSTRUCTIONS = 'You are Codex, a coding agent based on GPT-5. '

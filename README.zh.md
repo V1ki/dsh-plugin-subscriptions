@@ -128,7 +128,11 @@ GitHub 安装的:重新执行一遍 `add github:V1ki/dsh-plugin-subscriptions` �
 
 ### 等待限流窗口
 
-订阅套餐天然是按限流窗口计费的 —— 5 小时会话窗口、周窗口,部分套餐还有按模型的周窗口 —— 所以 429 并不是终点:窗口会在 provider 自己告知的时刻重开。每条路由从自己的 429 里读出这个时刻(Anthropic 的 `anthropic-ratelimit-unified-reset`、Codex 在 `usage_limit_reached` 上给出的秒数、xAI 的 `x-ratelimit-reset-*`,或通用的 `retry-after`),并把它作为应等待的时长上报。
+订阅套餐天然是按限流窗口计费的 —— 5 小时会话窗口、周窗口,部分套餐还有按模型的周窗口 —— 所以 429 并不是终点:窗口会在 provider 自己告知的时刻重开。每条路由从自己的 429 里读出这个时刻,并把它作为应等待的时长上报。
+
+只有能指明「是哪个窗口拒绝了这次请求」的信号才会被等待:Anthropic 的 `anthropic-ratelimit-unified-reset`、Codex 在 `usage_limit_reached` 上给出的秒数、xAI 在错误体里给出的延迟,或通用的 `retry-after`。各分桶的滚动快照(`anthropic-ratelimit-{requests,tokens,…}-reset`、`x-codex-*-reset-after-seconds`、`x-ratelimit-reset-*`)每个响应上都有,说不出是哪个桶拒绝的 —— 其中最早的那个往往正是还有余量的桶 —— 所以只带这些的 429 会通过插件的告警回调打印出相关 header 与响应体开头,而不是照着猜测把本轮挂起。
+
+读取只发生在 429 上。其他失败仍走各自的短本地退避:同样这些 header 也会出现在瞬时 500 上,在那里照办等于为一次一秒就恢复的过载把本轮挂满整个窗口。
 
 真正执行等待的是 [`@deepseek-ai/dsh-llm-retry`](https://www.npmjs.com/package/@deepseek-ai/dsh-llm-retry),三条路由的重试策略都是为它写的:把它加进编排,否则不会有任何等待,关闭的窗口仍旧直接让本轮失败。
 
@@ -136,9 +140,11 @@ GitHub 安装的:重新执行一遍 `add github:V1ki/dsh-plugin-subscriptions` �
 - name: '@deepseek-ai/dsh-llm-retry'
 ```
 
-重开时刻超过 `maxWaitMs`(比如几天后才重置的周窗口)会立即失败,而不是把会话挂在那里。`wait: false` 恢复到此前秒级的行为。
+重开时刻超过 `maxWaitMs`(比如几天后才重置的周窗口)会立即失败,而不是把会话挂在那里。`wait: false` 则只保留本地退避。
 
-一个需要知道的取舍:延迟上限与本地指数退避共用,调高它同时也抬高了无关瞬时失败(`TRANSPORT`、`SERVER`、`TIMEOUT`)在有限重试预算耗尽前的退避时长 —— claude 路由第 10 次重试最长会从 60 秒变成 512 秒。
+三条路由共用 Claude Code 自己的重试形状:首次尝试之后重试 10 次,从 1 秒开始退避,带 20% 抖动,上限 60 秒。这些都是面向消费者的订阅端点,过载时按突发丢流量,而 dsh-llm 默认值(5 次重试,500 毫秒到 10 秒)约 15 秒就放弃,对这种场景偏短。没有给出重开时刻的 429 现在会本地重试约 17 分钟才让本轮失败 —— `wait: false` 下约 5 分钟,那时 60 秒上限才真正生效。
+
+一个需要知道的取舍:延迟上限与这份本地退避共用,调高 `maxWaitMs` 同时也抬高了无关瞬时失败(`TRANSPORT`、`SERVER`、`TIMEOUT`)在有限重试预算耗尽前的退避时长 —— 第 10 次重试最长会从 60 秒上限变成 512 秒。
 
 ## 开发
 

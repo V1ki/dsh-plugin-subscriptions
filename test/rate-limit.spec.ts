@@ -86,6 +86,13 @@ test('durations parse in the Go form the OpenAI-compatible headers use', () => {
   assert.equal(durationMs('6m0s later'), undefined)
   assert.equal(durationMs('soon'), undefined)
   assert.equal(durationMs(''), undefined)
+  // A rolled-over bucket, not a disclosed reset; the numeric path rejects 0 too.
+  assert.equal(durationMs('0s'), undefined)
+  assert.equal(durationMs('0h0m0s'), undefined)
+  // Components run strictly coarse to fine; anything else is not a duration.
+  assert.equal(durationMs('1s2h'), undefined)
+  assert.equal(durationMs('1s1s'), undefined)
+  assert.equal(durationMs('1m1h'), undefined)
 })
 
 test('a single value is read in every shape a provider might encode it in', () => {
@@ -96,6 +103,9 @@ test('a single value is read in every shape a provider might encode it in', () =
   assert.equal(resetInstantFromValue(null, NOW), undefined)
   assert.equal(resetInstantFromValue({ nested: 1 }, NOW), undefined)
   assert.equal(resetInstantFromValue('whenever', NOW), undefined)
+  // Zero reads the same through both paths, so neither short-circuits a reader.
+  assert.equal(resetInstantFromValue('0s', NOW), undefined)
+  assert.equal(resetInstantFromValue('0', NOW), undefined)
 })
 
 test('retry-after reads a delay in seconds or an HTTP-date, never an epoch stamp', () => {
@@ -140,12 +150,14 @@ test('claude: the unified subscription window wins over the per-bucket headers',
   assert.equal(claudeRateLimitReset(response, '', NOW), 1_800_009_000_000)
 })
 
-test('claude: the earliest per-bucket reset is used when no unified window is named', () => {
+test('claude: the per-bucket snapshot headers never park a turn', () => {
+  // Rollover stamps present on every response: the earliest is the bucket that
+  // still had room, so waiting for it lands straight back in the closed window.
   const response = failure(429, {
-    'anthropic-ratelimit-requests-reset': '2027-01-15T10:30:00Z',
-    'anthropic-ratelimit-tokens-reset': '2026-09-01T00:00:00Z',
+    'anthropic-ratelimit-requests-reset': '2026-09-01T00:00:00Z',
+    'anthropic-ratelimit-input-tokens-reset': '2027-01-15T10:30:00Z',
   })
-  assert.equal(claudeRateLimitReset(response, '', NOW), Date.parse('2026-09-01T00:00:00Z'))
+  assert.equal(claudeRateLimitReset(response, '', NOW), undefined)
 })
 
 test('claude: a header-less rejection falls back to a reset named in the body', () => {
@@ -160,20 +172,25 @@ test('codex: the exhausted window in the body wins over the snapshot headers', (
   assert.equal(codexRateLimitReset(response, body, NOW), NOW + 9_000_000)
 })
 
-test('codex: the snapshot headers serve when the body names nothing', () => {
+test('codex: the snapshot headers never park a turn', () => {
+  // A burst 429 clearing in seconds still carries the primary window rollover
+  // hours out; reading it would hold the turn for those hours.
   const response = failure(429, {
-    'x-codex-primary-reset-after-seconds': '900',
+    'x-codex-primary-reset-after-seconds': '17000',
     'x-codex-secondary-reset-after-seconds': '90000',
   })
-  assert.equal(codexRateLimitReset(response, '{"detail":"slow down"}', NOW), NOW + 900_000)
+  assert.equal(codexRateLimitReset(response, '{"detail":"Too many requests"}', NOW), undefined)
 })
 
-test('grok: the OpenAI-compatible reset headers are read as durations', () => {
+test('grok: the body wins over the OpenAI-compatible snapshot headers', () => {
+  // `x-ratelimit-reset-requests: 0s` is a bucket with room while the token
+  // bucket is the one exhausted; reading it burns the retry budget in seconds.
   const response = failure(429, {
-    'x-ratelimit-reset-requests': '6m0s',
-    'x-ratelimit-reset-tokens': '1h',
+    'x-ratelimit-reset-requests': '0s',
+    'x-ratelimit-reset-tokens': '6m0s',
   })
-  assert.equal(grokRateLimitReset(response, '', NOW), NOW + 360_000)
+  assert.equal(grokRateLimitReset(response, '{"error":{"retry_after":60}}', NOW), NOW + 60_000)
+  assert.equal(grokRateLimitReset(response, '', NOW), undefined)
 })
 
 test('grok: a body-named retry delay serves when no header carries one', () => {
@@ -252,6 +269,44 @@ test('a non-429 failure never emits the rate-limit diagnostic', async () => {
   assert.deepEqual(warnings, [])
 })
 
+test('a non-429 failure never inherits the current window as its retry delay', async () => {
+  // The rate-limit headers ride every response, so a transient overload would
+  // otherwise report the window rollover — hours out — as its backoff, and the
+  // retry plugin honours providerRetryAfterMs for every retryable code.
+  const response = failure(529, {
+    'anthropic-ratelimit-unified-reset': String(Math.floor(NOW / 1_000) + 14_400),
+  }, '{"type":"error","error":{"type":"overloaded_error"}}')
+  const error = await httpLlmError(response, 'claude API', { rateLimitReset: claudeRateLimitReset })
+  assert.equal(error.code, 'SERVER')
+  assert.equal(error.failure.providerRetryAfterMs, undefined)
+})
+
+test('retry-after still serves a non-429 that asked for a backoff', async () => {
+  // Unlike a window snapshot, retry-after on a 503 is a delay the provider
+  // actually asked for, so it stays readable on any status.
+  const error = await httpLlmError(failure(503, { 'retry-after': '30' }, 'shedding load'), 'grok API', {
+    rateLimitReset: grokRateLimitReset,
+  })
+  assert.equal(error.code, 'SERVER')
+  assert.ok(error.failure.providerRetryAfterMs !== undefined)
+  assert.ok(error.failure.providerRetryAfterMs >= 30_000)
+})
+
+test('a 429 whose only signal is a snapshot header warns instead of waiting', async () => {
+  const warnings: string[] = []
+  const response = failure(429, {
+    'x-codex-primary-reset-after-seconds': '17000',
+  }, '{"detail":"Too many requests"}')
+  const error = await httpLlmError(response, 'codex API', {
+    rateLimitReset: codexRateLimitReset,
+    onWarn: message => warnings.push(message),
+  })
+  assert.equal(error.code, 'RATE_LIMIT')
+  assert.equal(error.failure.providerRetryAfterMs, undefined)
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0], /x-codex-primary-reset-after-seconds: 17000/)
+})
+
 test('waiting widens the delay ceiling to the configured maximum', () => {
   const policy = subscriptionRetryPolicy(
     DEFAULT_RETRY,
@@ -276,11 +331,20 @@ test('opting out of waiting restores the route defaults exactly', () => {
 
 test('a wait ceiling below the local backoff ceiling never shortens local backoff', () => {
   const policy = subscriptionRetryPolicy(
-    { maxRetries: 10, initialDelayMs: 1_000, maxDelayMs: 60_000, jitterRatio: 0.2 },
+    DEFAULT_RETRY,
     { wait: true, maxWaitMs: 5_000 },
     'test: retryPolicy',
   )
-  assert.equal(policy.maxDelayMs, 60_000)
+  assert.equal(policy.maxDelayMs, DEFAULT_RETRY.maxDelayMs)
+})
+
+test('the shared retry shape is Claude Code\'s, not the dsh-llm default', () => {
+  assert.deepEqual(DEFAULT_RETRY, {
+    maxRetries: 10,
+    initialDelayMs: 1_000,
+    maxDelayMs: 60_000,
+    jitterRatio: 0.2,
+  })
 })
 
 test('rate-limit waiting defaults to on with a six-hour ceiling', () => {
@@ -330,7 +394,11 @@ test('every route reports a policy able to hold the configured wait', () => {
     assert.ok(policy !== undefined, `${route} reports a policy`)
     assert.equal(policy.maxDelayMs, 4 * 3_600_000, `${route} accepts the configured wait`)
   }
-  // Claude keeps Claude Code's own retry budget.
-  const claudePolicy = claude.providerRetryPolicy('claude')
-  assert.equal(claudePolicy?.mode === 'normal' && claudePolicy.maxRetries, 10)
+  // Every route carries Claude Code's retry budget, not just claude.
+  for (const [route, adapter] of [['claude', claude], ['codex', codex], ['grok', grok]] as const) {
+    const policy = adapter.providerRetryPolicy(route)
+    assert.equal(policy?.mode === 'normal' && policy.maxRetries, DEFAULT_RETRY.maxRetries, route)
+    assert.equal(policy?.initialDelayMs, DEFAULT_RETRY.initialDelayMs, route)
+    assert.equal(policy?.jitterRatio, DEFAULT_RETRY.jitterRatio, route)
+  }
 })

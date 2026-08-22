@@ -38,10 +38,8 @@ import type {
 import {
   DEFAULT_RATE_LIMIT_WAIT,
   DEFAULT_RETRY,
-  earliestReset,
   jsonBody,
   resetFromFields,
-  resetInstantFromHeader,
   subscriptionRetryPolicy,
 } from './rate-limit.js'
 import type { RateLimitResetReader, RateLimitWait } from './rate-limit.js'
@@ -56,26 +54,21 @@ const GROK_DEFAULT_MAX_TOKENS = 32_000
 /** Refresh when the access token has less than this much life left. */
 export const GROK_PREEMPT_MS = 2 * 60_000
 
-/**
- * xAI serves the OpenAI-compatible rate-limit header family, whose reset
- * values are durations (`6m0s`) rather than instants.
- */
-const GROK_RESET_HEADERS = [
-  'x-ratelimit-reset-requests',
-  'x-ratelimit-reset-tokens',
-] as const
-
 /** Body fields xAI uses to name a delay or reset. */
 const GROK_RESET_FIELDS = ['retry_after', 'retry_after_seconds', 'resets_at', 'reset_at'] as const
 
-/** Reads the reset instant of the xAI window that rejected a request. */
-export const grokRateLimitReset: RateLimitResetReader = (response, body, now) => {
-  const headers = earliestReset(
-    ...GROK_RESET_HEADERS.map(header => resetInstantFromHeader(response, header, now)),
-  )
-  if (headers !== undefined) return headers
-  return resetFromFields(jsonBody(body), GROK_RESET_FIELDS, now)
-}
+/**
+ * Reads the reset instant of the xAI window that rejected a request.
+ *
+ * Body only. xAI serves the OpenAI-compatible `x-ratelimit-reset-*` family,
+ * whose values are rollover durations (`6m0s`) present on every response, one
+ * per bucket — on a 429 the earliest of them is usually a bucket with room
+ * (`0s` for the request bucket while the token bucket is the one exhausted),
+ * which would burn the whole retry budget in seconds. They reach the operator
+ * through `rateLimitDiagnostics` instead.
+ */
+export const grokRateLimitReset: RateLimitResetReader = (_response, body, now) =>
+  resetFromFields(jsonBody(body), GROK_RESET_FIELDS, now)
 
 /** Discovered OIDC endpoints for the xAI authorization server. */
 export interface GrokDiscovery {

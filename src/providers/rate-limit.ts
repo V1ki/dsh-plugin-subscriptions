@@ -84,16 +84,27 @@ export function durationMs(text: string): number | undefined {
   // A failed sticky exec resets `lastIndex` to zero, so the reached offset is
   // tracked separately rather than read back off the regex after the loop.
   let index = 0
+  // Components run strictly coarse to fine, the only order Go writes them in;
+  // a repeated or out-of-order unit ("1s2h", "1s1s") is not a duration and
+  // must not be silently summed into one.
+  let previousUnit = Number.POSITIVE_INFINITY
   for (;;) {
     pattern.lastIndex = index
     const match = pattern.exec(trimmed)
     if (match === null) break
-    total += Number(match[1]) * units[match[2]]
+    const unit = units[match[2]]
+    if (unit >= previousUnit) return undefined
+    previousUnit = unit
+    total += Number(match[1]) * unit
     index = pattern.lastIndex
     matched = true
   }
   if (!matched || index !== trimmed.length) return undefined
-  return total
+  // A zero duration ("0s") is not a disclosed reset — it is a bucket that has
+  // already rolled over — and reporting it as one would short-circuit the real
+  // signal behind it with a wait of `now`. The numeric path agrees:
+  // {@link resetInstantFromNumber} rejects zero too.
+  return total > 0 ? total : undefined
 }
 
 /**
@@ -240,6 +251,10 @@ const DIAGNOSTIC_HEADER = /rate-?limit|retry|reset|^x-codex-/i
  * reset instant nothing parsed. Emitted through the adapter's `onWarn`, this is
  * how an unrecognized provider field gets named from live traffic instead of
  * being guessed at.
+ *
+ * It is also where the per-bucket rollover snapshots land by design — no reader
+ * parks a turn on one, because on a 429 they cannot say which bucket refused —
+ * so the operator still sees what the provider disclosed.
  * @param response - the failed response.
  * @param body - the complete response body.
  * @returns a one-line diagnostic.
@@ -268,14 +283,25 @@ export interface RetryDefaults {
 }
 
 /**
- * The dsh-llm defaults, restated so a route that opts out of waiting resolves
- * to exactly the behavior it had before this module existed.
+ * The retry shape every subscription route starts from: Claude Code's own SDK
+ * numbers — ten retries after the first attempt, exponential backoff from 1s
+ * doubling per attempt, capped at 60s, plus 20% jitter.
+ *
+ * Shared across all three routes rather than kept to claude, because what these
+ * numbers are tuned for is the shape of a subscription endpoint — a consumer
+ * plan behind a session window, which sheds load in bursts and rewards an
+ * attempt that outlasts them — and that is the same on all three. The dsh-llm
+ * defaults (5 retries from 500ms to 10s) give up after about fifteen seconds,
+ * which is short for that.
+ *
+ * The 60s cap governs local backoff only: a disclosed rate-limit reset is
+ * accepted up to the configured wait ceiling instead.
  */
 export const DEFAULT_RETRY: RetryDefaults = Object.freeze({
-  maxRetries: 5,
-  initialDelayMs: 500,
-  maxDelayMs: 10_000,
-  jitterRatio: 0.1,
+  maxRetries: 10,
+  initialDelayMs: 1_000,
+  maxDelayMs: 60_000,
+  jitterRatio: 0.2,
 })
 
 /** How long a route may hold a turn open waiting for a rate-limit window. */

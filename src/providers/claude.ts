@@ -35,13 +35,14 @@ import {
 import type { CatalogPersistence, DiscoveredModel, FetchFn, ModelEntry, ProviderUsage, UsageWindow } from './common.js'
 import {
   DEFAULT_RATE_LIMIT_WAIT,
+  DEFAULT_RETRY,
   earliestReset,
   jsonBody,
   resetFromFields,
   resetInstantFromHeader,
   subscriptionRetryPolicy,
 } from './rate-limit.js'
-import type { RateLimitResetReader, RateLimitWait, RetryDefaults } from './rate-limit.js'
+import type { RateLimitResetReader, RateLimitWait } from './rate-limit.js'
 
 export const CLAUDE_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
 export const CLAUDE_AUTHORIZE_URL = 'https://claude.ai/oauth/authorize'
@@ -57,36 +58,30 @@ const CLAUDE_DEFAULT_MAX_TOKENS = 32_000
 export const CLAUDE_PREEMPT_MS = 5 * 60_000
 
 /**
- * Anthropic's own rate-limit disclosure, in preference order.
- *
- * `anthropic-ratelimit-unified-*` is the subscription-plan family — the one
- * Claude Code renders as "resets 3pm" — and names the window that actually
- * rejected the request. The per-bucket headers below it are the API-key
- * families; the earliest of them is the first moment any bucket allows a
- * request again. The body is the last resort, for a rejection that carries a
- * reset without any header at all.
+ * Body fields Anthropic uses to name a reset instant, read when the unified
+ * headers are absent.
  */
-const CLAUDE_BUCKET_RESET_HEADERS = [
-  'anthropic-ratelimit-requests-reset',
-  'anthropic-ratelimit-tokens-reset',
-  'anthropic-ratelimit-input-tokens-reset',
-  'anthropic-ratelimit-output-tokens-reset',
-] as const
-
-/** Body fields Anthropic uses to name a reset instant. */
 const CLAUDE_RESET_FIELDS = ['resets_at', 'resetsAt', 'reset_at', 'retry_after'] as const
 
-/** Reads the reset instant of the Anthropic window that rejected a request. */
+/**
+ * Reads the reset instant of the Anthropic window that rejected a request.
+ *
+ * `anthropic-ratelimit-unified-*` is the subscription-plan family — the one
+ * Claude Code renders as "resets 3pm" — and is the only header that names the
+ * window which actually rejected this request. The per-bucket
+ * `anthropic-ratelimit-{requests,tokens,input-tokens,output-tokens}-reset`
+ * headers are deliberately not read: they are rollover snapshots attached to
+ * every response, so on a 429 they cannot say which bucket refused, and the
+ * earliest of them is typically the bucket that still had room — a wait that
+ * lands straight back in the closed window. They reach the operator through
+ * `rateLimitDiagnostics` instead.
+ */
 export const claudeRateLimitReset: RateLimitResetReader = (response, body, now) => {
   const unified = earliestReset(
     resetInstantFromHeader(response, 'anthropic-ratelimit-unified-reset', now),
     resetInstantFromHeader(response, 'anthropic-ratelimit-unified-fallback-reset', now),
   )
   if (unified !== undefined) return unified
-  const buckets = earliestReset(
-    ...CLAUDE_BUCKET_RESET_HEADERS.map(header => resetInstantFromHeader(response, header, now)),
-  )
-  if (buckets !== undefined) return buckets
   return resetFromFields(jsonBody(body), CLAUDE_RESET_FIELDS, now)
 }
 
@@ -458,19 +453,6 @@ export interface ClaudeAdapterOptions {
   catalogStore?: CatalogPersistence
 }
 
-/**
- * Claude Code's own SDK retry shape: ten retries after the first attempt, with
- * exponential backoff starting at 1s, doubling per attempt, capped at 60s,
- * plus jitter. The cap governs local backoff only — a disclosed rate-limit
- * reset is accepted up to the configured wait ceiling instead.
- */
-const CLAUDE_RETRY: RetryDefaults = Object.freeze({
-  maxRetries: 10,
-  initialDelayMs: 1_000,
-  maxDelayMs: 60_000,
-  jitterRatio: 0.2,
-})
-
 /** The Claude 4.5 family accepts image input. */
 const CLAUDE_MODALITIES: readonly ('text' | 'image')[] = ['text', 'image']
 
@@ -508,7 +490,7 @@ export class ClaudeAdapter extends LlmAdapter {
 
   override providerRetryPolicy(provider: string) {
     return subscriptionRetryPolicy(
-      CLAUDE_RETRY,
+      DEFAULT_RETRY,
       this.options.rateLimit ?? DEFAULT_RATE_LIMIT_WAIT,
       `claude: provider "${provider}" retryPolicy`,
     )
