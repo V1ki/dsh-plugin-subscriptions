@@ -76,6 +76,12 @@ function sanitizeModel(value: unknown): DiscoveredModel | undefined {
   if (thinkingType !== undefined && thinkingType !== 'enabled' && thinkingType !== 'adaptive') return undefined
   const fastTier = raw.fastTier
   if (fastTier !== undefined && typeof fastTier !== 'boolean') return undefined
+  const copilotWire = raw.copilotWire
+  if (copilotWire !== undefined && copilotWire !== 'chat-completions' && copilotWire !== 'responses') {
+    return undefined
+  }
+  const copilotResponses = raw.copilotResponses
+  if (copilotResponses !== undefined && typeof copilotResponses !== 'boolean') return undefined
   const inputModalities = raw.inputModalities
   if (inputModalities !== undefined
     && (!Array.isArray(inputModalities) || inputModalities.length === 0
@@ -89,6 +95,8 @@ function sanitizeModel(value: unknown): DiscoveredModel | undefined {
     ...reasoning === undefined ? {} : { reasoning },
     ...thinkingType === undefined ? {} : { thinkingType: thinkingType as 'enabled' | 'adaptive' },
     ...fastTier === undefined ? {} : { fastTier },
+    ...copilotWire === undefined ? {} : { copilotWire: copilotWire as 'chat-completions' | 'responses' },
+    ...copilotResponses === undefined ? {} : { copilotResponses },
     ...inputModalities === undefined ? {} : { inputModalities: [...inputModalities] as ('text' | 'image')[] },
   }
 }

@@ -406,11 +406,15 @@ export class ResponsesStreamTranslator {
  * Consume a Responses SSE byte stream and yield harness StreamChunks.
  * @param stream - raw response body.
  * @param onActivity - transport-activity callback for the idle watchdog.
+ * @param transform - optional per-event rewrite applied before translation
+ *   (Copilot's gateway mints a fresh item id per event; the adapter rewrites
+ *   them into stable per-item keys).
  * @returns the chunk stream; throws when the stream ends before `response.completed`.
  */
 export async function* streamResponses(
   stream: ReadableStream<Uint8Array>,
   onActivity?: () => void,
+  transform?: (event: ResponsesStreamEvent) => ResponsesStreamEvent,
 ): AsyncGenerator<StreamChunk> {
   const translator = new ResponsesStreamTranslator()
   for await (const sseEvent of parseSse(stream, onActivity)) {
@@ -420,6 +424,7 @@ export async function* streamResponses(
     } catch {
       throw new LlmError(`malformed SSE payload: ${sseEvent.data.slice(0, 120)}`, 'MALFORMED_RESPONSE')
     }
+    if (transform !== undefined) event = transform(event)
     yield* translator.push(event)
     if (translator.terminated) return
   }

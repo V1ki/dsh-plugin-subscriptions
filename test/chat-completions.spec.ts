@@ -194,6 +194,59 @@ test('translator: reasoning_content becomes a reasoning block', () => {
   ])
 })
 
+test('translator: Copilot Gemini streams (usage on every chunk) keep their deltas', () => {
+  // Regression: Copilot's Gemini models attach a zero `usage` object to every
+  // chunk and stream thinking as `reasoning_text`; the real usage rides the
+  // finish chunk itself. The old early-return on usage-bearing chunks
+  // swallowed every delta, leaving an empty response with usage only.
+  const translator = new ChatCompletionsStreamTranslator()
+  const mid = drain(translator, [
+    {
+      choices: [{ index: 0, delta: { content: null, role: 'assistant', reasoning_text: 'greeting…' } }],
+      usage: { prompt_tokens: 0, completion_tokens: 0 },
+    },
+    {
+      choices: [{ index: 0, delta: { content: 'Hello, how are you today?', role: 'assistant' } }],
+      usage: { prompt_tokens: 0, completion_tokens: 0 },
+    },
+  ])
+  // The mid-stream zero-usage chunks emit no usage of their own.
+  assert.deepEqual(mid, [
+    { type: 'block-start', index: 0, blockType: 'reasoning' },
+    { type: 'reasoning-delta', index: 0, text: 'greeting…' },
+    { type: 'block-start', index: 1, blockType: 'text' },
+    { type: 'text-delta', index: 1, text: 'Hello, how are you today?' },
+  ])
+  assert.equal(translator.terminated, false)
+  // The finish chunk carries finish_reason AND the real usage together.
+  const terminal = translator.push({
+    choices: [{ index: 0, delta: { content: null, role: 'assistant' }, finish_reason: 'stop' }],
+    usage: {
+      prompt_tokens: 8,
+      completion_tokens: 7,
+      prompt_tokens_details: { cached_tokens: 0 },
+      completion_tokens_details: { reasoning_tokens: 4 },
+    },
+  })
+  assert.deepEqual(terminal, [
+    { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'greeting…' } },
+    { type: 'block-end', index: 1, block: { type: 'text', text: 'Hello, how are you today?' } },
+    { type: 'usage', usage: { inputTokens: 8, outputTokens: 7, cacheReadTokens: 0, reasoningTokens: 4 } },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ])
+  assert.equal(translator.terminated, true)
+})
+
+test('translator: a finish chunk without usage still arms until flush', () => {
+  const translator = new ChatCompletionsStreamTranslator()
+  drain(translator, [
+    { choices: [{ delta: { content: 'hi' } }] },
+    { choices: [{ delta: {}, finish_reason: 'stop' }] },
+  ])
+  // No usage anywhere: [DONE] (flush) releases the finish alone.
+  assert.deepEqual(translator.flush(), [{ type: 'finish', reason: { kind: 'stop' } }])
+})
+
 test('translator: finish reasons map to harness kinds', () => {
   const length = new ChatCompletionsStreamTranslator()
   drain(length, [
@@ -252,6 +305,35 @@ test('streamChatCompletions consumes an SSE stream through [DONE]', async () => 
   assert.deepEqual(chunks.map(chunk => chunk.type), [
     'block-start', 'text-delta', 'block-end', 'usage', 'finish',
   ])
+})
+
+test('streamChatCompletions: a Copilot Gemini SSE stream yields text and terminates', async () => {
+  // Raw shape captured from api.githubcopilot.com with gemini-3.5-flash:
+  // every data frame carries a (zero) usage object; the terminal frame folds
+  // the real usage into the finish chunk; [DONE] follows.
+  const stream = byteStream([
+    frame({
+      choices: [{ index: 0, delta: { content: null, role: 'assistant', reasoning_text: 'greeting…' } }],
+      usage: { prompt_tokens: 0, completion_tokens: 0 },
+    }),
+    frame({
+      choices: [{ index: 0, delta: { content: 'Hello, how are you today?', role: 'assistant' } }],
+      usage: { prompt_tokens: 0, completion_tokens: 0 },
+    }),
+    frame({
+      choices: [{ index: 0, delta: { content: null, role: 'assistant' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 8, completion_tokens: 7 },
+    }),
+    'data: [DONE]\n\n',
+  ])
+  const chunks: StreamChunk[] = []
+  for await (const chunk of streamChatCompletions(stream)) chunks.push(chunk)
+  assert.deepEqual(chunks.map(chunk => chunk.type), [
+    'block-start', 'reasoning-delta', 'block-start', 'text-delta',
+    'block-end', 'block-end', 'usage', 'finish',
+  ])
+  const text = chunks.find(chunk => chunk.type === 'text-delta')
+  assert.equal(text?.type === 'text-delta' ? text.text : undefined, 'Hello, how are you today?')
 })
 
 test('streamChatCompletions: a stream without a finish chunk throws STREAM_CLOSED', async () => {

@@ -144,7 +144,10 @@ export interface ChatCompletionsStreamEvent {
     index?: number
     delta?: {
       content?: string | null
+      role?: string
       reasoning_content?: string | null
+      /** Copilot's Gemini models stream thinking as `reasoning_text`. */
+      reasoning_text?: string | null
       tool_calls?: {
         index?: number
         id?: string
@@ -211,9 +214,15 @@ function closeBlock(block: OpenBlock): ContentBlock {
  * Push-model chat completions SSE translator: feed each parsed chunk object
  * to {@link push} and collect the emitted harness StreamChunks. The terminal
  * `finish_reason` chunk closes every block but only ARMS the finish chunk —
- * the usage-only final chunk (stream_options.include_usage) still follows, and
- * usage must precede the terminal finish. `flush()` emits whatever remains
- * when the stream's `[DONE]` (or EOF) arrives.
+ * usage must precede the terminal finish, and where usage lives differs by
+ * upstream: OpenAI-style streams send a trailing usage-only chunk
+ * (stream_options.include_usage), while Copilot's Gemini models attach a
+ * (zero) usage object to EVERY chunk and fold the real usage into the
+ * finish chunk itself. A chunk therefore never early-returns on `usage`
+ * alone: its deltas are always processed, and the terminal pair is drained
+ * when the finish is armed and usage arrived (or when a usage-only chunk
+ * follows an armed finish). `flush()` emits whatever remains when the
+ * stream's `[DONE]` (or EOF) arrives.
  */
 export class ChatCompletionsStreamTranslator {
   /** Text/reasoning blocks keyed by kind; tool calls keyed by their wire index. */
@@ -301,12 +310,9 @@ export class ChatCompletionsStreamTranslator {
   push(event: ChatCompletionsStreamEvent): StreamChunk[] {
     if (this.terminated) return []
     const chunks: StreamChunk[] = []
-    if (event.usage !== undefined && event.usage !== null) {
-      this.pendingUsage = event.usage
-      // A usage-only chunk arrives after the finish-reason chunk; flush both.
-      this.drainTerminal(chunks)
-      return chunks
-    }
+    const usage = event.usage
+    const hasUsage = usage !== undefined && usage !== null
+    if (hasUsage) this.pendingUsage = usage
     const choice = event.choices?.[0]
     const delta = choice?.delta
     if (delta !== undefined) {
@@ -315,10 +321,13 @@ export class ChatCompletionsStreamTranslator {
         block.text += delta.content
         chunks.push({ type: 'text-delta', index: block.index, text: delta.content })
       }
-      if (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0) {
+      const reasoning = typeof delta.reasoning_content === 'string' ? delta.reasoning_content
+        : typeof delta.reasoning_text === 'string' ? delta.reasoning_text
+        : undefined
+      if (reasoning !== undefined && reasoning.length > 0) {
         const block = this.blocks.get('reasoning') ?? this.open('reasoning', 'reasoning', chunks)
-        block.text += delta.reasoning_content
-        chunks.push({ type: 'reasoning-delta', index: block.index, text: delta.reasoning_content })
+        block.text += reasoning
+        chunks.push({ type: 'reasoning-delta', index: block.index, text: reasoning })
       }
       for (const call of delta.tool_calls ?? []) {
         const key = `call:${String(call.index ?? 0)}`
@@ -347,10 +356,20 @@ export class ChatCompletionsStreamTranslator {
     }
     if (choice?.finish_reason !== undefined && choice.finish_reason !== null) {
       this.closeAll(chunks)
-      // Only arm: the usage-only final chunk (include_usage) still follows,
-      // and usage must be emitted before the terminal finish. The usage chunk
-      // or flush() drains both.
-      this.armedFinish = this.finishChunk(choice.finish_reason)
+      // Only arm: usage must be emitted before the terminal finish, and it
+      // may still arrive (OpenAI's trailing usage-only chunk) or may have
+      // arrived in this very chunk (Gemini folds it in). The drain below or
+      // flush() releases the pair.
+      if (this.armedFinish === undefined) this.armedFinish = this.finishChunk(choice.finish_reason)
+    }
+    // Drain at the terminal point: this chunk carried usage AND either the
+    // finish is armed (usage + finish pair complete — same chunk for Gemini,
+    // trailing chunk for OpenAI) or the chunk is usage-only (no choices to
+    // process). Mid-stream usage carriers (Gemini's zero-usage deltas) keep
+    // their pendingUsage for a later drain; only the final real usage is
+    // emitted.
+    if (hasUsage && (this.armedFinish !== undefined || choice === undefined)) {
+      this.drainTerminal(chunks)
     }
     return chunks
   }

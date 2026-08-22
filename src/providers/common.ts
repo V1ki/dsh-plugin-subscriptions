@@ -368,6 +368,14 @@ export interface DiscoveredModel {
   thinkingType?: 'enabled' | 'adaptive'
   /** Codex-specific: the catalog advertises a fast (priority) service tier. */
   fastTier?: boolean
+  /** Copilot-specific: which upstream protocol the model's endpoints speak. */
+  copilotWire?: 'chat-completions' | 'responses'
+  /**
+   * Copilot-specific: the catalog also lists `/responses` for this model
+   * (dual-protocol entries, e.g. gpt-5.4), so a chat-wire request may reroute
+   * there when it combines function tools with a reasoning effort.
+   */
+  copilotResponses?: boolean
 }
 
 /** How long a discovered catalog is trusted before re-fetching. */

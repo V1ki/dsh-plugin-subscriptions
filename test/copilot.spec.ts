@@ -9,9 +9,16 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { MessageId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import {
   completeCopilotLogin,
   COPILOT_TOKEN_URL,
+  CopilotResponsesItemNormalizer,
+  copilotChatRequestBody,
+  copilotResponsesRequestBody,
+  copilotRequestWire,
+  copilotWireFor,
   exchangeCopilotToken,
   FALLBACK_VSCODE_VERSION,
   GITHUB_USER_URL,
@@ -21,8 +28,10 @@ import {
   VSCODE_RELEASES_URL,
 } from '../src/providers/copilot.js'
 import { OAuthEndpointError } from '../src/providers/common.js'
-import type { FetchFn } from '../src/providers/common.js'
+import type { DiscoveredModel, FetchFn } from '../src/providers/common.js'
 import type { CopilotSession } from '../src/auth/store.js'
+import { streamResponses } from '../src/translate/responses.js'
+import type { ResponsesStreamEvent } from '../src/translate/responses.js'
 
 /** A fetch implementation routing canned responses by URL; records request headers. */
 function fakeFetch(routes: Record<string, { payload: unknown; status?: number } | Error>): {
@@ -139,4 +148,164 @@ test('refreshCopilot re-exchanges and preserves the account', async () => {
   })
   // The refresh exchanges with the GITHUB token, never the stale Copilot one.
   assert.equal(headers(COPILOT_TOKEN_URL)[0].authorization, 'Bearer gh-token')
+})
+
+/** Minimal generate options for the request body builders. */
+const BODY_OPTIONS: GenerateOptions = {
+  provider: 'copilot',
+  model: 'gpt-5.6-sol',
+  messages: [{
+    id: MessageId('m-1'),
+    role: 'user',
+    content: [{ type: 'text', text: 'hi' }],
+    source: { kind: 'user' },
+  }],
+  maxTokens: 16_000,
+}
+
+test('copilotChatRequestBody sends max_completion_tokens, never max_tokens', () => {
+  // gpt-5.4-and-later on Copilot reject the legacy `max_tokens` outright
+  // (HTTP 400 "Unsupported parameter"); the rest of the catalog accepts the
+  // new spelling.
+  const body = copilotChatRequestBody(BODY_OPTIONS, [{ role: 'user', content: 'hi' }])
+  assert.equal(body.max_completion_tokens, 16_000)
+  assert.equal('max_tokens' in body, false)
+  assert.equal('reasoning_effort' in body, false)
+  assert.equal(body.stream, true)
+  assert.deepEqual(body.stream_options, { include_usage: true })
+})
+
+test('copilotChatRequestBody maps the selected effort to reasoning_effort', () => {
+  const options = { ...BODY_OPTIONS, reasoningEffort: ReasoningEffortId('high') }
+  const body = copilotChatRequestBody(options, [{ role: 'user', content: 'hi' }])
+  assert.equal(body.reasoning_effort, 'high')
+})
+
+test('copilotResponsesRequestBody maps the selected effort to reasoning.effort', () => {
+  const options = { ...BODY_OPTIONS, reasoningEffort: ReasoningEffortId('xhigh') }
+  const body = copilotResponsesRequestBody(options, { input: [] })
+  assert.deepEqual(body.reasoning, { effort: 'xhigh' })
+})
+
+test('copilotResponsesRequestBody maps the Responses wire shape', () => {
+  const body = copilotResponsesRequestBody(BODY_OPTIONS, {
+    instructions: 'be terse',
+    input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }],
+  })
+  assert.deepEqual(body, {
+    model: 'gpt-5.6-sol',
+    instructions: 'be terse',
+    input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }],
+    max_output_tokens: 16_000,
+    stream: true,
+  })
+  // No system prompt → no instructions field; tools ride the Responses shape.
+  const { maxTokens: omitted, ...bareOptions } = BODY_OPTIONS
+  const bare = copilotResponsesRequestBody(
+    { ...bareOptions, tools: [{ name: 'bash', description: 'run', parameters: { type: 'object' } }] },
+    { input: [] },
+  )
+  assert.equal('instructions' in bare, false)
+  assert.equal('max_output_tokens' in bare, false)
+  assert.deepEqual(bare.tools, [{ type: 'function', name: 'bash', description: 'run', parameters: { type: 'object' } }])
+  assert.equal(bare.tool_choice, 'auto')
+})
+
+test('copilotWireFor defaults to chat completions unless the catalog says responses', () => {
+  assert.equal(copilotWireFor(undefined), 'chat-completions')
+  const chat: DiscoveredModel = { id: 'gpt-5-mini', name: 'GPT-5 mini', copilotWire: 'chat-completions' }
+  assert.equal(copilotWireFor(chat), 'chat-completions')
+  const responses: DiscoveredModel = { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', copilotWire: 'responses' }
+  assert.equal(copilotWireFor(responses), 'responses')
+  // An entry without the flag (static fallback path) stays on the chat wire.
+  assert.equal(copilotWireFor({ id: 'gpt-4o', name: 'GPT-4o' }), 'chat-completions')
+})
+
+test('copilotRequestWire reroutes dual-protocol models to Responses for tools + effort', () => {
+  // gpt-5.4 lists both endpoints: chat by default, but Copilot 400s there
+  // once a request combines function tools with a reasoning effort
+  // ("use /v1/responses or set reasoning_effort to 'none'").
+  const dual: DiscoveredModel = {
+    id: 'gpt-5.4',
+    name: 'GPT-5.4',
+    copilotWire: 'chat-completions',
+    copilotResponses: true,
+  }
+  const tools = [{ name: 'bash', description: 'run', parameters: { type: 'object' } }]
+  assert.equal(copilotRequestWire(dual, { tools, reasoningEffort: ReasoningEffortId('medium') }), 'responses')
+  assert.equal(copilotRequestWire(dual, { tools, reasoningEffort: ReasoningEffortId('xhigh') }), 'responses')
+  // 'none' is the one effort the chat wire accepts alongside tools.
+  assert.equal(copilotRequestWire(dual, { tools, reasoningEffort: ReasoningEffortId('none') }), 'chat-completions')
+  // Effort without tools, or tools without effort, keep the default wire.
+  assert.equal(copilotRequestWire(dual, { reasoningEffort: ReasoningEffortId('medium') }), 'chat-completions')
+  assert.equal(copilotRequestWire(dual, { tools }), 'chat-completions')
+  assert.equal(copilotRequestWire(dual, {}), 'chat-completions')
+  // A model listing no `/responses` (claude, kimi, …) never reroutes.
+  const chatOnly: DiscoveredModel = { id: 'kimi-k3', name: 'Kimi K3', copilotWire: 'chat-completions' }
+  assert.equal(
+    copilotRequestWire(chatOnly, { tools, reasoningEffort: ReasoningEffortId('high') }),
+    'chat-completions',
+  )
+  // Responses-only models and unknown entries keep their wire untouched.
+  assert.equal(
+    copilotRequestWire({ id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', copilotWire: 'responses' }, {}),
+    'responses',
+  )
+  assert.equal(copilotRequestWire(undefined, {}), 'chat-completions')
+})
+
+test('CopilotResponsesItemNormalizer folds per-event item ids into one stable key', () => {
+  // Raw shape captured from api.githubcopilot.com/responses with gpt-5.6:
+  // every event of one item carries a DIFFERENT opaque id.
+  const normalizer = new CopilotResponsesItemNormalizer()
+  const rewritten = [
+    { type: 'response.output_item.added', item: { type: 'message', id: 'added-id' } },
+    { type: 'response.output_text.delta', item_id: 'delta-id-1', delta: 'Hi' },
+    { type: 'response.output_text.delta', item_id: 'delta-id-2', delta: ' there' },
+    { type: 'response.output_item.done', item: { type: 'message', id: 'done-id', content: [{ type: 'output_text', text: 'Hi there' }] } },
+  ].map(event => normalizer.push(event as ResponsesStreamEvent))
+  assert.equal(rewritten[0]?.item?.id, 'copilot-item-1')
+  assert.equal(rewritten[1]?.item_id, 'copilot-item-1')
+  assert.equal(rewritten[2]?.item_id, 'copilot-item-1')
+  assert.equal(rewritten[3]?.item?.id, 'copilot-item-1')
+  // The next item gets the next ordinal.
+  const next = normalizer.push({ type: 'response.output_item.added', item: { type: 'function_call', id: 'x', call_id: 'call-1', name: 'bash' } })
+  assert.equal(next.item?.id, 'copilot-item-2')
+})
+
+test('normalized Copilot Responses events assemble text and whole-done tool arguments', async () => {
+  // End-to-end through the shared translator with the normalizer: text
+  // fragments join into one block, and a function call whose argument deltas
+  // are empty (the gateway delivers the arguments whole on done) closes with
+  // the full payload.
+  const normalizer = new CopilotResponsesItemNormalizer()
+  const events: ResponsesStreamEvent[] = [
+    { type: 'response.output_item.added', item: { type: 'message', id: 'a' } },
+    { type: 'response.output_text.delta', item_id: 'd1', delta: 'Hi' },
+    { type: 'response.output_text.delta', item_id: 'd2', delta: '!' },
+    { type: 'response.output_item.done', item: { type: 'message', id: 'b', content: [{ type: 'output_text', text: 'Hi!' }] } },
+    { type: 'response.output_item.added', item: { type: 'function_call', id: 'c', call_id: 'call-9', name: 'bash' } },
+    { type: 'response.function_call_arguments.delta', item_id: 'd3', delta: '' },
+    { type: 'response.output_item.done', item: { type: 'function_call', id: 'e', call_id: 'call-9', name: 'bash', arguments: '{"cmd":"ls"}' } },
+    { type: 'response.completed', response: { usage: { input_tokens: 5, output_tokens: 3 } } },
+  ]
+  const frames = events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('') + 'data: [DONE]\n\n'
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(frames))
+      controller.close()
+    },
+  })
+  const chunks: { type: string; block?: { type: string; name?: string; text?: string; arguments?: string } }[] = []
+  for await (const chunk of streamResponses(stream, undefined, event => normalizer.push(event))) {
+    chunks.push(chunk as { type: string; block?: { type: string; name?: string; text?: string; arguments?: string } })
+  }
+  const blocks = chunks.filter(chunk => chunk.type === 'block-end').map(chunk => chunk.block)
+  assert.equal(blocks.length, 2)
+  assert.deepEqual(blocks[0], { type: 'text', text: 'Hi!' })
+  assert.equal(blocks[1]?.type, 'tool-call')
+  assert.equal(blocks[1]?.name, 'bash')
+  assert.equal(blocks[1]?.arguments, '{"cmd":"ls"}')
+  const finish = chunks.find(chunk => chunk.type === 'finish')
+  assert.equal(finish?.type, 'finish')
 })

@@ -1,8 +1,11 @@
 /**
  * GitHub Copilot subscription provider: OAuth device-authorization flow with
  * the VS Code Copilot Chat client id, a GitHub-token → Copilot-token exchange
- * against `copilot_internal/v2/token`, and streaming against the
- * OpenAI-compatible chat completions endpoint (stream-only upstream).
+ * against `copilot_internal/v2/token`, and streaming against two upstream
+ * protocols chosen per model: the OpenAI-compatible chat completions endpoint
+ * for models whose catalog entry lists `/chat/completions`, and the Responses
+ * endpoint for the newer model families (gpt-5.5/5.6, …) that only list
+ * `/responses`. Both upstreams are stream-only.
  *
  * Two token generations are in play: the long-lived GitHub OAuth token (kept
  * as the session's `refreshToken`) and the ~30-minute Copilot API token it
@@ -11,7 +14,7 @@
  * unchanged.
  */
 
-import { EMPTY_RESPONSE_CODE, errorChain, LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
+import { EMPTY_RESPONSE_CODE, errorChain, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
@@ -28,6 +31,8 @@ import {
   toChatMessages,
   toChatTools,
 } from '../translate/chat-completions.js'
+import { streamResponses, toResponsesInput, toResponsesTools } from '../translate/responses.js'
+import type { ResponsesRequestInput, ResponsesStreamEvent } from '../translate/responses.js'
 import {
   httpLlmError,
   idleWatchdog,
@@ -55,6 +60,8 @@ export const COPILOT_DEVICE_TOKEN_URL = 'https://github.com/login/oauth/access_t
 export const COPILOT_TOKEN_URL = 'https://api.github.com/copilot_internal/v2/token'
 export const GITHUB_USER_URL = 'https://api.github.com/user'
 export const COPILOT_API_URL = 'https://api.githubcopilot.com/chat/completions'
+/** Responses endpoint for models whose catalog entry only lists `/responses`. */
+export const COPILOT_RESPONSES_URL = 'https://api.githubcopilot.com/responses'
 export const COPILOT_MODELS_URL = 'https://api.githubcopilot.com/models'
 const COPILOT_SCOPE = 'read:user'
 const COPILOT_CONTEXT_WINDOW = 128_000
@@ -259,16 +266,52 @@ interface CopilotWireModel {
   policy?: { state?: string }
   supported_endpoints?: string[]
   capabilities?: {
-    supports?: { vision?: boolean; tool_calls?: boolean }
+    supports?: {
+      vision?: boolean
+      tool_calls?: boolean
+      /** Supported reasoning efforts, present only on models that reason. */
+      reasoning_effort?: string[] | null
+    }
     limits?: { max_context_window_tokens?: number }
   }
 }
 
+/** Display name for one Copilot wire reasoning-effort value. */
+function copilotEffortName(effort: string): string {
+  return effort === 'xhigh' ? 'Extra High' : effort.charAt(0).toUpperCase() + effort.slice(1)
+}
+
 /**
- * Fetch the live Copilot model list. Models hidden from the picker, disabled
- * by policy, or unable to speak /chat/completions are excluded — this adapter
- * only speaks that one protocol. Vision support from the catalog becomes the
- * model's input modalities.
+ * Map a catalog entry's `supports.reasoning_effort` array into selectable
+ * efforts. The endpoint discloses no default effort, so none is claimed
+ * (absence preserves the provider's own default). Duplicates and non-string
+ * entries are dropped: the harness rejects duplicate effort ids outright.
+ */
+function copilotReasoning(entry: CopilotWireModel): { efforts: { id: ReasoningEffortId; name: string }[] } | undefined {
+  const wire = entry.capabilities?.supports?.reasoning_effort
+  if (!Array.isArray(wire)) return undefined
+  const seen = new Set<string>()
+  const efforts: { id: ReasoningEffortId; name: string }[] = []
+  for (const value of wire) {
+    if (typeof value !== 'string' || value.length === 0 || seen.has(value)) continue
+    seen.add(value)
+    efforts.push({ id: ReasoningEffortId(value), name: copilotEffortName(value) })
+  }
+  return efforts.length > 0 ? { efforts } : undefined
+}
+
+/**
+ * Fetch the live Copilot model list. Models hidden from the picker or
+ * disabled by policy are excluded, as are models able to speak neither
+ * protocol this adapter knows: an entry listing `/chat/completions` speaks
+ * the chat wire, one listing only `/responses` (the newer GPT families,
+ * e.g. gpt-5.6) speaks the Responses wire, and the choice is recorded on the
+ * discovered entry so requests pick the matching endpoint; an entry listing
+ * BOTH endpoints additionally records `/responses` availability, which
+ * {@link copilotRequestWire} uses to reroute tools+effort requests. Vision
+ * support from the catalog becomes the model's input modalities, and a
+ * non-empty `supports.reasoning_effort` array becomes the model's selectable
+ * reasoning efforts (the endpoint discloses no default, so none is claimed).
  * @param session - the stored session (used as-is; never refreshed here).
  * @param fetchFn - fetch implementation (injectable for tests).
  * @returns discovered chat models in endpoint order.
@@ -292,9 +335,16 @@ export async function fetchCopilotModels(
   for (const entry of payload.data) {
     if (typeof entry.id !== 'string' || entry.id.length === 0 || seen.has(entry.id)) continue
     if (entry.model_picker_enabled !== true || entry.policy?.state === 'disabled') continue
-    if (Array.isArray(entry.supported_endpoints)
-      && !entry.supported_endpoints.includes('/chat/completions')) continue
+    let wire: 'chat-completions' | 'responses' | undefined
+    let responsesSupported = false
+    if (Array.isArray(entry.supported_endpoints)) {
+      responsesSupported = entry.supported_endpoints.includes('/responses')
+      if (entry.supported_endpoints.includes('/chat/completions')) wire = 'chat-completions'
+      else if (responsesSupported) wire = 'responses'
+      else continue
+    }
     seen.add(entry.id)
+    const reasoning = copilotReasoning(entry)
     discovered.push({
       id: entry.id,
       name: typeof entry.name === 'string' && entry.name.length > 0 ? entry.name : entry.id,
@@ -303,6 +353,9 @@ export async function fetchCopilotModels(
         ? { contextWindow: entry.capabilities.limits.max_context_window_tokens }
         : {},
       inputModalities: entry.capabilities?.supports?.vision === true ? ['text', 'image'] : ['text'],
+      ...reasoning === undefined ? {} : { reasoning },
+      ...wire === undefined ? {} : { copilotWire: wire },
+      ...responsesSupported ? { copilotResponses: true } : {},
     })
   }
   // An empty catalog from a 200 response is treated as a discovery failure so
@@ -310,6 +363,148 @@ export async function fetchCopilotModels(
   // the picker.
   if (discovered.length === 0) throw new Error('copilot models endpoint returned an empty catalog')
   return discovered
+}
+
+/** Which upstream protocol one Copilot model speaks. */
+export type CopilotWire = 'chat-completions' | 'responses'
+
+/**
+ * The wire protocol for one model: the discovered catalog entry's recorded
+ * choice, defaulting to chat completions for unknown models (static-catalog
+ * and no-discovery configurations, and models listing both endpoints).
+ * @param entry - the discovered catalog entry, when known.
+ * @returns the protocol the request for this model must speak.
+ */
+export function copilotWireFor(entry: DiscoveredModel | undefined): CopilotWire {
+  return entry?.copilotWire === 'responses' ? 'responses' : 'chat-completions'
+}
+
+/**
+ * The upstream protocol for ONE REQUEST: the model's default wire, except
+ * that a dual-protocol model defaulting to chat completions must reroute to
+ * Responses when the request combines function tools with a reasoning effort
+ * — Copilot rejects exactly that combination on /chat/completions with
+ * HTTP 400 invalid_request_body ("Function tools with reasoning_effort are
+ * not supported … use /v1/responses or set reasoning_effort to 'none'",
+ * observed on gpt-5.4) while /responses serves it. Effort 'none' stays on
+ * the chat wire (the API allows the combination there), and models not
+ * listing /responses never reroute.
+ * @param entry - the discovered catalog entry, when known.
+ * @param options - the harness generate options (tools + effort only).
+ * @returns the protocol the request for this model must speak.
+ */
+export function copilotRequestWire(
+  entry: DiscoveredModel | undefined,
+  options: Pick<GenerateOptions, 'tools' | 'reasoningEffort'>,
+): CopilotWire {
+  const wire = copilotWireFor(entry)
+  if (wire !== 'chat-completions') return wire
+  if (entry?.copilotResponses !== true) return wire
+  if (options.tools === undefined || options.tools.length === 0) return wire
+  if (options.reasoningEffort === undefined || options.reasoningEffort === 'none') return wire
+  return 'responses'
+}
+
+/**
+ * The chat completions request body for one generation. The output cap rides
+ * `max_completion_tokens` — the newer OpenAI-family models on Copilot reject
+ * the legacy `max_tokens` parameter outright (HTTP 400 "Unsupported
+ * parameter"), and the rest of the catalog accepts the new spelling.
+ * @param options - the harness generate options.
+ * @param messages - translated wire messages (images pre-resolved).
+ * @returns the JSON body.
+ */
+export function copilotChatRequestBody(
+  options: GenerateOptions,
+  messages: Record<string, unknown>[],
+): Record<string, unknown> {
+  return {
+    model: options.model,
+    messages,
+    ...options.tools !== undefined && options.tools.length > 0
+      ? { tools: toChatTools(options.tools), tool_choice: 'auto' }
+      : {},
+    ...options.maxTokens !== undefined ? { max_completion_tokens: options.maxTokens } : {},
+    // The harness only passes an effort the resolved model advertised (the
+    // catalog's reasoning_effort array), and copilotRequestWire keeps the
+    // tools+effort combination off this wire for models that reject it.
+    ...options.reasoningEffort !== undefined
+      ? { reasoning_effort: String(options.reasoningEffort) }
+      : {},
+    // The upstream is stream-only; usage arrives on the terminal chunk.
+    stream: true,
+    stream_options: { include_usage: true },
+  }
+}
+
+/**
+ * The Responses request body for one generation (the wire the `/responses`-
+ * only model families speak). Usage arrives on `response.completed`.
+ * @param options - the harness generate options.
+ * @param resolved - translated instructions + input (images pre-resolved).
+ * @returns the JSON body.
+ */
+export function copilotResponsesRequestBody(
+  options: GenerateOptions,
+  resolved: ResponsesRequestInput,
+): Record<string, unknown> {
+  return {
+    model: options.model,
+    ...resolved.instructions !== undefined ? { instructions: resolved.instructions } : {},
+    input: resolved.input,
+    ...options.tools !== undefined && options.tools.length > 0
+      ? { tools: toResponsesTools(options.tools), tool_choice: 'auto' }
+      : {},
+    ...options.maxTokens !== undefined ? { max_output_tokens: options.maxTokens } : {},
+    // The Responses wire spells the effort nested; only advertised efforts
+    // ever reach this branch (see copilotChatRequestBody).
+    ...options.reasoningEffort !== undefined
+      ? { reasoning: { effort: String(options.reasoningEffort) } }
+      : {},
+    stream: true,
+  }
+}
+
+/**
+ * Rewrite Copilot's Responses-gateway item ids into stable per-item keys.
+ * Unlike chatgpt.com's Responses backend, the Copilot gateway mints a FRESH
+ * opaque `item.id`/`item_id` on every event of one response (the `added`,
+ * each delta, and the `done` all differ), which defeats id-keyed block
+ * assembly in the shared translator: text fragments would each open their
+ * own block, `done` would synthesize duplicates, and a function call whose
+ * arguments arrive whole only on `done` (the deltas carry empty strings)
+ * would close empty. Events of one item are contiguous on the wire, so the
+ * item's ordinal — assigned at `output_item.added` and reused until the next
+ * one — is a faithful stable key. Function-call identity additionally rides
+ * the gateway-stable `call_id`.
+ */
+export class CopilotResponsesItemNormalizer {
+  private ordinal = 0
+
+  private get key(): string {
+    return `copilot-item-${String(this.ordinal)}`
+  }
+
+  /**
+   * Rewrite one parsed Responses event.
+   * @param event - the event as parsed off the wire.
+   * @returns the event with a stable item key.
+   */
+  push(event: ResponsesStreamEvent): ResponsesStreamEvent {
+    if (event.type === 'response.output_item.added') {
+      this.ordinal += 1
+      return event.item === undefined
+        ? event
+        : { ...event, item: { ...event.item, id: this.key } }
+    }
+    if (event.type === 'response.output_item.done') {
+      return event.item === undefined
+        ? event
+        : { ...event, item: { ...event.item, id: this.key } }
+    }
+    if (event.item_id === undefined) return event
+    return { ...event, item_id: this.key }
+  }
 }
 
 /** Constructor dependencies for {@link CopilotAdapter}. */
@@ -409,14 +604,24 @@ export class CopilotAdapter extends LlmAdapter {
       inputModalities: discovered?.inputModalities ?? configured?.inputModalities ?? ['text'],
       context: { contextWindow: discovered?.contextWindow ?? configured?.contextWindow ?? COPILOT_CONTEXT_WINDOW },
       defaultMaxTokens: configured?.maxTokens ?? COPILOT_DEFAULT_MAX_TOKENS,
+      // Efforts come from the discovered catalog's reasoning_effort array; a
+      // model that did not advertise one exposes none, so the harness rejects
+      // an explicit effort before provider I/O instead of the API 400ing
+      // (Copilot returns invalid_request_body for models that cannot reason).
+      ...discovered?.reasoning === undefined ? {} : { reasoning: discovered.reasoning },
     }
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     const watchdog = idleWatchdog(options.signal, this.options.streamIdleTimeoutMs)
     try {
+      // The discovered catalog decides the protocol: `/responses`-only model
+      // families (gpt-5.5/5.6, …) reject /chat/completions outright, and
+      // dual-protocol models reroute there once the request combines function
+      // tools with a reasoning effort (gpt-5.4 400s on the chat wire then).
+      const wire = copilotRequestWire(await this.discovered(options.model), options)
       let session = await this.options.tokens.session()
-      let response = await this.request(options, session, watchdog.signal)
+      let response = await this.request(options, session, watchdog.signal, wire)
       if (response.status === 401) {
         // One forced refresh + retry on an unexpired-but-rejected token. The
         // editor version is force-refreshed too: a 401 `IDE token expired`
@@ -424,13 +629,19 @@ export class CopilotAdapter extends LlmAdapter {
         // Editor-Version header fixes that (a new token does not).
         await latestVsCodeVersion(this.options.fetchFn ?? fetch, true)
         session = await this.options.tokens.session(true)
-        response = await this.request(options, session, watchdog.signal)
+        response = await this.request(options, session, watchdog.signal, wire)
       }
       if (!response.ok) throw await httpLlmError(response, 'copilot API')
       if (response.body === null) {
         throw new LlmError('copilot API returned no response body', EMPTY_RESPONSE_CODE)
       }
-      yield* streamChatCompletions(response.body, () => { watchdog.pulse() })
+      const pulse = (): void => { watchdog.pulse() }
+      if (wire === 'responses') {
+        const normalizer = new CopilotResponsesItemNormalizer()
+        yield* streamResponses(response.body, pulse, event => normalizer.push(event))
+      } else {
+        yield* streamChatCompletions(response.body, pulse)
+      }
     } catch (error: unknown) {
       throw mapFetchFailure('copilot API', error, watchdog, options.signal)
     } finally {
@@ -438,21 +649,18 @@ export class CopilotAdapter extends LlmAdapter {
     }
   }
 
-  private async request(options: GenerateOptions, session: CopilotSession, signal: AbortSignal): Promise<Response> {
+  private async request(
+    options: GenerateOptions,
+    session: CopilotSession,
+    signal: AbortSignal,
+    wire: CopilotWire,
+  ): Promise<Response> {
     const messages = await resolveImages(options.messages, this.options.resolveAttachments?.(), signal)
     const hasVision = messages.some(message => message.content.some(block => block.type === 'image'))
-    const body = {
-      model: options.model,
-      messages: toChatMessages(messages, options.system),
-      ...options.tools !== undefined && options.tools.length > 0
-        ? { tools: toChatTools(options.tools), tool_choice: 'auto' }
-        : {},
-      ...options.maxTokens !== undefined ? { max_tokens: options.maxTokens } : {},
-      // The upstream is stream-only; usage arrives on the terminal chunk.
-      stream: true,
-      stream_options: { include_usage: true },
-    }
-    return fetch(COPILOT_API_URL, {
+    const body = wire === 'responses'
+      ? copilotResponsesRequestBody(options, toResponsesInput(messages, options.system))
+      : copilotChatRequestBody(options, toChatMessages(messages, options.system))
+    return fetch(wire === 'responses' ? COPILOT_RESPONSES_URL : COPILOT_API_URL, {
       method: 'POST',
       headers: {
         'authorization': `Bearer ${session.accessToken}`,
