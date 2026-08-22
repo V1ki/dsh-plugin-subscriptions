@@ -28,6 +28,28 @@ import type { TranslatableMessage } from './resolved.js'
  */
 export const CLAUDE_CODE_IDENTITY = 'You are Claude Code, Anthropic\'s official CLI for Claude.'
 
+/** Tags wrapping a mid-conversation system message where it sits in the history. */
+export const SYSTEM_REMINDER_OPEN = '<system-reminder>'
+export const SYSTEM_REMINDER_CLOSE = '</system-reminder>'
+
+/**
+ * How far apart consecutive message breakpoints sit, in content blocks.
+ *
+ * A breakpoint looks back at most 20 blocks for an entry an earlier request
+ * wrote, so marks must stay closer than that: one agentic turn can append a
+ * dozen tool_use/tool_result blocks at once, and a single trailing mark would
+ * silently fall out of range and rebuild the whole prefix.
+ */
+export const CACHE_BLOCK_STRIDE = 15
+
+/**
+ * Message breakpoints per request. Anthropic allows four in total and the
+ * last `system` block takes the fourth, so three are left for the history —
+ * enough to tolerate a turn appending roughly {@link CACHE_BLOCK_STRIDE} × 3
+ * blocks before a read is lost.
+ */
+export const MESSAGE_CACHE_BREAKPOINTS = 3
+
 /** One Anthropic request message. */
 export interface AnthropicMessage {
   role: 'user' | 'assistant'
@@ -54,11 +76,54 @@ function parseToolInput(raw: string): Record<string, unknown> {
 }
 
 /**
+ * Move a user message's `tool_result` blocks into one contiguous run at the
+ * front, preserving the relative order of both groups.
+ *
+ * Anthropic answers every `tool_use` against the blocks that *lead* the next
+ * message, so a block of any other kind before or between the results reads
+ * as a call left unanswered and the request is rejected. The harness merges
+ * everything queued for one user turn into a single message, and a parallel
+ * tool batch arrives as one result message per call, so any context spliced
+ * mid-batch lands between two results. Restoring the run here keeps that
+ * independent of delivery order. Order *among* the results does not matter.
+ * @param message - one assembled user message, reordered in place.
+ */
+function leadWithToolResults(message: AnthropicMessage): void {
+  const firstOther = message.content.findIndex(block => block.type !== 'tool_result')
+  if (firstOther === -1) return
+  if (!message.content.slice(firstOther).some(block => block.type === 'tool_result')) return
+  message.content = [
+    ...message.content.filter(block => block.type === 'tool_result'),
+    ...message.content.filter(block => block.type !== 'tool_result'),
+  ]
+}
+
+/**
+ * Index of the first non-system message; `messages.length` when every message
+ * is a system one.
+ *
+ * A system message before the conversation starts is the operator's opening
+ * instruction and belongs in the `system` slot. One that arrives later is
+ * mid-conversation context, and hoisting it into `system` would move bytes in
+ * front of the whole history — invalidating every cached turn behind it — so
+ * it stays where it is, as a reminder block in `messages`.
+ * @param messages - ordered conversation messages.
+ * @returns the boundary index separating the two.
+ */
+function conversationStart(messages: readonly TranslatableMessage[]): number {
+  const index = messages.findIndex(message => message.role !== 'system')
+  return index === -1 ? messages.length : index
+}
+
+/**
  * Convert harness messages into Anthropic messages. Consecutive same-role
  * messages merge into one message with multiple content blocks; tool results
- * arrive as user messages with `tool_result` blocks; system-role messages are
- * handled by {@link toAnthropicSystem} and skipped here. Reasoning blocks are
- * not replayed (v1). Images must arrive pre-resolved
+ * arrive as user messages with `tool_result` blocks, which a merged user
+ * message keeps in one leading run ({@link leadWithToolResults}); system-role
+ * messages before the conversation starts are handled by
+ * {@link toAnthropicSystem} and skipped here, while a later one rides in
+ * place as a user-role `<system-reminder>` block.
+ * Reasoning blocks are not replayed (v1). Images must arrive pre-resolved
  * ({@link TranslatableMessage}); an unresolved ImageBlock is skipped because
  * its bytes are unreachable here.
  * @param messages - ordered conversation messages with resolved images.
@@ -66,22 +131,39 @@ function parseToolInput(raw: string): Record<string, unknown> {
  */
 export function toAnthropicMessages(messages: readonly TranslatableMessage[]): AnthropicMessage[] {
   const out: AnthropicMessage[] = []
-  for (const message of messages) {
-    if (message.role === 'system') continue
-    const role = message.role
+  const start = conversationStart(messages)
+  for (const [index, message] of messages.entries()) {
+    // A leading system message is an opening instruction; toAnthropicSystem
+    // owns those. A later one rides here so the cached prefix ahead of it
+    // stays byte-identical.
+    if (message.role === 'system' && index < start) continue
+    const role = message.role === 'system' ? 'user' : message.role
     const blocks: Record<string, unknown>[] = []
     for (const block of message.content) {
       switch (block.type) {
         case 'text':
-          blocks.push({ type: 'text', text: block.text })
+          blocks.push({
+            type: 'text',
+            text: message.role === 'system'
+              ? `${SYSTEM_REMINDER_OPEN}${block.text}${SYSTEM_REMINDER_CLOSE}`
+              : block.text,
+          })
           break
         case 'tool-call':
-          blocks.push({
-            type: 'tool_use',
-            id: String(block.id),
-            name: block.name,
-            input: parseToolInput(block.arguments),
-          })
+          // Anthropic accepts `tool_use` only in assistant messages, and only
+          // when a matching `tool_result` follows. A tool call in any other
+          // role is replayed narrative — a settled subagent's closing message
+          // spliced into the parent as a user-role notice carries the calls it
+          // died holding, which no result will ever answer — so it rides as
+          // descriptive text instead of a call the API would reject.
+          blocks.push(role === 'assistant'
+            ? {
+                type: 'tool_use',
+                id: String(block.id),
+                name: block.name,
+                input: parseToolInput(block.arguments),
+              }
+            : { type: 'text', text: `[tool call ${block.name}: ${block.arguments}]` })
           break
         case 'tool-result':
           blocks.push({
@@ -111,39 +193,75 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[]): A
     if (last !== undefined && last.role === role) last.content.push(...blocks)
     else out.push({ role, content: blocks })
   }
+  for (const message of out) {
+    if (message.role === 'user') leadWithToolResults(message)
+  }
   return out
+}
+
+/**
+ * Mark the conversation's cache breakpoints in place: the last content block,
+ * then one every {@link CACHE_BLOCK_STRIDE} blocks backwards, {@link
+ * MESSAGE_CACHE_BREAKPOINTS} in total.
+ *
+ * The history is append-only, so the block one request marks last is
+ * byte-identical in the next — that entry is what the next request reads.
+ * Marks are counted across the flattened block sequence, not per message,
+ * because the lookback window Anthropic walks counts blocks the same way.
+ * @param messages - assembled Anthropic messages, marked in place.
+ */
+export function markMessageCache(messages: readonly AnthropicMessage[]): void {
+  const blocks = messages.flatMap(message => message.content)
+  for (let mark = 0; mark < MESSAGE_CACHE_BREAKPOINTS; mark++) {
+    const at = blocks.length - 1 - mark * CACHE_BLOCK_STRIDE
+    if (at < 0) return
+    blocks[at].cache_control = { type: 'ephemeral' }
+  }
 }
 
 /**
  * Build the Anthropic `system` array: the mandatory Claude Code identity
  * block, then the explicit system prompt, then any system-role messages.
  * @param system - explicit system prompt, when set.
- * @param messages - conversation messages; their system-role text is appended.
+ * @param messages - conversation messages; the system-role text preceding the
+ * conversation is appended, and a later one is left to {@link toAnthropicMessages}.
  * @returns the system content blocks.
  */
 export function toAnthropicSystem(system?: string, messages?: readonly TranslatableMessage[]): Record<string, unknown>[] {
   const blocks: Record<string, unknown>[] = [{ type: 'text', text: CLAUDE_CODE_IDENTITY }]
   if (system !== undefined && system.length > 0) blocks.push({ type: 'text', text: system })
-  for (const message of messages ?? []) {
-    if (message.role !== 'system') continue
+  const history = messages ?? []
+  for (const message of history.slice(0, conversationStart(history))) {
     for (const block of message.content) {
       if (block.type === 'text') blocks.push({ type: 'text', text: block.text })
     }
   }
+  // `tools` renders ahead of `system`, so this one marker caches both. It is
+  // deliberately separate from the message marks: a tool_choice or thinking
+  // change invalidates the messages tier only, and this entry survives it.
+  blocks[blocks.length - 1].cache_control = { type: 'ephemeral' }
   return blocks
 }
 
 /**
- * Map harness tool schemas to Anthropic tools.
+ * Map harness tool schemas to Anthropic tools, in name order.
+ *
+ * `tools` renders at position 0 of the cached prefix, so any reordering
+ * invalidates every cache entry behind it — `system` and the whole
+ * conversation included. Registration order belongs to the caller and plugin
+ * load order can differ between processes, so the wire order is fixed here
+ * instead. Anthropic selects a tool by name; the array order carries nothing.
  * @param tools - tool schemas from the request.
- * @returns Anthropic `tools` array entries.
+ * @returns Anthropic `tools` array entries, ordered by tool name.
  */
 export function toAnthropicTools(tools: readonly ToolSchema[]): Record<string, unknown>[] {
-  return tools.map(tool => ({
-    name: tool.name,
-    description: tool.description,
-    input_schema: tool.parameters,
-  }))
+  return [...tools]
+    .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
+    .map(tool => ({
+      name: tool.name,
+      description: tool.description,
+      input_schema: tool.parameters,
+    }))
 }
 
 /** The subset of Anthropic SSE event shapes this translator reads. */

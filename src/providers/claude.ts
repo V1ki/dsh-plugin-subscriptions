@@ -17,7 +17,9 @@ import type { FlowSpec } from '../auth/oauth-flow.js'
 import type { ClaudeSession } from '../auth/store.js'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { resolveImages } from '../translate/resolved.js'
+import type { TranslatableMessage } from '../translate/resolved.js'
 import {
+  markMessageCache,
   streamAnthropic,
   toAnthropicMessages,
   toAnthropicSystem,
@@ -427,6 +429,45 @@ const CLAUDE_RETRY_JITTER_RATIO = 0.2
 /** The Claude 4.5 family accepts image input. */
 const CLAUDE_MODALITIES: readonly ('text' | 'image')[] = ['text', 'image']
 
+/**
+ * Assemble the Anthropic request body.
+ *
+ * Extracted from the adapter so the wire shape — cache breakpoints above all —
+ * is testable without a network round trip. The message array is marked before
+ * it is placed so the breakpoints land on the blocks the body ships: one on the
+ * last `system` block (covering `tools` + `system`, which render ahead of it)
+ * and up to three across the history, Anthropic's four-slot maximum.
+ * @param options - the generate request.
+ * @param messages - conversation messages with images already resolved.
+ * @param maxTokens - the resolved output cap.
+ * @param thinking - the thinking parameter, when the model takes one.
+ * @param effort - the reasoning effort, when the model advertises efforts.
+ * @returns the JSON body to POST.
+ */
+export function claudeRequestBody(
+  options: GenerateOptions,
+  messages: readonly TranslatableMessage[],
+  maxTokens: number,
+  thinking?: Record<string, unknown>,
+  effort?: string,
+): Record<string, unknown> {
+  const anthropicMessages = toAnthropicMessages(messages)
+  markMessageCache(anthropicMessages)
+  return {
+    model: options.model,
+    max_tokens: maxTokens,
+    system: toAnthropicSystem(options.system, messages),
+    messages: anthropicMessages,
+    ...options.tools !== undefined && options.tools.length > 0
+      ? { tools: toAnthropicTools(options.tools) }
+      : {},
+    ...thinking === undefined ? {} : { thinking },
+    ...effort === undefined ? {} : { output_config: { effort } },
+    stream: true,
+    ...options.sessionId !== undefined ? { metadata: { user_id: String(options.sessionId) } } : {},
+  }
+}
+
 /** Claude wire adapter: one instance serves the `claude` provider route. */
 export class ClaudeAdapter extends LlmAdapter {
   private readonly catalog: ModelCatalogCache
@@ -557,21 +598,9 @@ export class ClaudeAdapter extends LlmAdapter {
     const disc = await this.discovered(options.model)
     const thinking = this.thinkingParam(disc?.thinkingType, maxTokens)
     const effort = options.reasoningEffort !== undefined && disc?.reasoning !== undefined
-      ? { output_config: { effort: String(options.reasoningEffort) } }
-      : {}
-    const body = {
-      model: options.model,
-      max_tokens: maxTokens,
-      system: toAnthropicSystem(options.system, messages),
-      messages: toAnthropicMessages(messages),
-      ...options.tools !== undefined && options.tools.length > 0
-        ? { tools: toAnthropicTools(options.tools) }
-        : {},
-      ...thinking === undefined ? {} : { thinking },
-      ...effort,
-      stream: true,
-      ...options.sessionId !== undefined ? { metadata: { user_id: String(options.sessionId) } } : {},
-    }
+      ? String(options.reasoningEffort)
+      : undefined
+    const body = claudeRequestBody(options, messages, maxTokens, thinking, effort)
     return fetch(CLAUDE_API_URL, {
       method: 'POST',
       headers: {
