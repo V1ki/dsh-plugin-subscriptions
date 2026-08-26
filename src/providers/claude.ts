@@ -286,10 +286,28 @@ function claudeLimitsWindows(value: unknown): UsageWindow[] {
 }
 
 /**
+ * Display name of the plan a stored `subscriptionType` names, e.g. `max` →
+ * `Max`. The usage endpoint reports no plan of its own (unlike codex, whose
+ * payload carries `plan_type`), so the session's own subscription type is the
+ * only tier this provider can disclose. An unknown value is title-cased
+ * rather than dropped, so a tier introduced later still shows up.
+ * @param subscriptionType - the value stored with the session, when present.
+ * @returns the display name, or undefined when the session names no tier.
+ */
+function claudePlanName(subscriptionType: string | undefined): string | undefined {
+  if (typeof subscriptionType !== 'string') return undefined
+  const trimmed = subscriptionType.trim()
+  if (trimmed.length === 0) return undefined
+  return trimmed.charAt(0).toUpperCase() + trimmed.slice(1)
+}
+
+/**
  * Fetch the claude subscription usage from the OAuth usage endpoint (the
  * source of Claude Code's `/usage` screen). Newer responses carry a
  * structured `limits` array; older ones the flat `five_hour`/`seven_day*`
  * buckets — both shapes are read, the array winning when it has entries.
+ * The plan rides the stored session (see {@link claudePlanName}), because the
+ * payload itself names no tier.
  * @param session - the stored session (used as-is; never refreshed here).
  * @param fetchFn - fetch implementation (injectable for tests).
  * @param signal - caller cancellation from the RPC transport.
@@ -313,8 +331,10 @@ export async function fetchClaudeUsage(
   })
   if (!response.ok) throw await oauthEndpointError(response, 'claude usage')
   const payload = await response.json() as Record<string, unknown>
+  const plan = claudePlanName(session.subscriptionType)
+  const planField = plan === undefined ? {} : { plan }
   const modern = claudeLimitsWindows(payload.limits)
-  if (modern.length > 0) return { supported: true, windows: modern }
+  if (modern.length > 0) return { supported: true, windows: modern, ...planField }
   const windows: UsageWindow[] = []
   const legacy = [
     claudeLegacyWindow(payload.five_hour, 'session'),
@@ -325,7 +345,7 @@ export async function fetchClaudeUsage(
   for (const window of legacy) {
     if (window !== undefined) windows.push(window)
   }
-  return { supported: true, windows }
+  return { supported: true, windows, ...planField }
 }
 
 interface ClaudeModelCapabilities {

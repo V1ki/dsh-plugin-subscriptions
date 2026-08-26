@@ -193,11 +193,17 @@ const styles: Record<string, CSSProperties> = {
     display: 'flex', justifyContent: 'space-between', gap: 8,
     fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)',
   },
+  // Meter geometry follows the shell's own ContextMeter bar (4px, fully
+  // rounded, filled track, no border) so a progress bar contributed by a
+  // plugin reads as the same control the product draws elsewhere.
   usageTrack: {
-    height: 6, borderRadius: 3, overflow: 'hidden',
-    background: 'var(--dsw-alias-bg-layer-1)', border: '1px solid var(--dsw-alias-border-l2)',
+    height: 4, borderRadius: 999, overflow: 'hidden',
+    background: 'var(--dsw-alias-interactive-bg-hover)',
   },
-  usageFill: { height: '100%', borderRadius: 3 },
+  usageFill: {
+    height: '100%', borderRadius: 999,
+    transition: 'width .3s ease, background-color .3s ease',
+  },
   manual: { marginTop: 4, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-secondary)' },
   manualRow: { display: 'flex', gap: 8, marginTop: 6 },
   manualInput: {
@@ -288,11 +294,17 @@ function usageWindowLabel(t: SubscriptionsSectionInjected['t'], window: UsageWin
   return window.scope !== undefined && window.scope !== '' ? `${base} · ${window.scope}` : base
 }
 
-/** Bar fill color: success normally, warn from 80%, error from 95%. */
+/**
+ * Bar fill color. The steps follow the Claude Code app, which warns from 75%
+ * rather than 80%, so a plan this panel and that app both report reaches its
+ * warning shade at the same point. Below the warning step the meter is the
+ * neutral business tone rather than success green: a half-consumed limit is a
+ * reading, not an achievement, and green reads as the latter.
+ */
 function usageBarColor(usedPercent: number): string {
   if (usedPercent >= 95) return 'var(--dsw-alias-state-error-primary)'
-  if (usedPercent >= 80) return 'var(--dsw-alias-state-warn-label)'
-  return 'var(--dsw-alias-state-success-primary)'
+  if (usedPercent >= 75) return 'var(--dsw-alias-state-warn-label)'
+  return 'var(--dsw-static-blue-450)'
 }
 
 /** One-line status text of the proxy config card. */

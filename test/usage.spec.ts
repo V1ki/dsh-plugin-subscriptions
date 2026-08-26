@@ -21,6 +21,7 @@ const { fetchClaudeUsage } = await import('../src/providers/claude.js')
 const { fetchGrokUsage, grokTierName } = await import('../src/providers/grok.js')
 const plugin = await import('../src/index.js')
 
+import { OAuthEndpointError, retryAfterMs } from '../src/providers/common.js'
 import type { FetchFn } from '../src/providers/common.js'
 import type { ClaudeSession, CodexSession, GrokSession } from '../src/auth/store.js'
 
@@ -43,8 +44,11 @@ const grokSession: GrokSession = {
   tokenEndpoint: 'https://auth.x.ai/token',
 }
 
-/** A fetch implementation answering one JSON payload; records the request. */
-function fakeFetch(payload: unknown, status = 200): {
+/**
+ * A fetch implementation answering one JSON payload; records the request.
+ * @param responseHeaders - headers to answer with (e.g. `retry-after` on a 429).
+ */
+function fakeFetch(payload: unknown, status = 200, responseHeaders?: Record<string, string>): {
   fetchFn: FetchFn
   requests: { url: string; headers: Record<string, string> }[]
 } {
@@ -53,7 +57,10 @@ function fakeFetch(payload: unknown, status = 200): {
     const headers: Record<string, string> = {}
     new Headers(init?.headers).forEach((value, key) => { headers[key] = value })
     requests.push({ url: String(url), headers })
-    return Promise.resolve(new Response(JSON.stringify(payload), { status }))
+    return Promise.resolve(new Response(JSON.stringify(payload), {
+      status,
+      ...responseHeaders === undefined ? {} : { headers: responseHeaders },
+    }))
   }) as FetchFn
   return { fetchFn, requests }
 }
@@ -179,6 +186,56 @@ test('fetchClaudeUsage prefers the modern limits array when present', async () =
     { kind: 'weekly', usedPercent: 40, resetsAt: Date.parse('2026-04-14T16:59:59Z') },
     { kind: 'weekly', scope: 'Opus', usedPercent: 7, resetsAt: Date.parse('2026-04-14T16:59:59Z') },
   ])
+})
+
+test('fetchClaudeUsage reports the plan from the stored subscription type', async () => {
+  // The usage payload names no tier (unlike codex's plan_type), so the plan
+  // rides the session; both response shapes must carry it.
+  const modern = fakeFetch({
+    limits: [{ kind: 'weekly_all', percent: 40, resets_at: '2026-04-14T16:59:59Z' }],
+  })
+  const withPlan = { ...claudeSession, subscriptionType: 'max' }
+  assert.equal((await fetchClaudeUsage(withPlan, modern.fetchFn)).plan, 'Max')
+
+  const legacy = fakeFetch({ five_hour: { utilization: 6, resets_at: null } })
+  assert.equal((await fetchClaudeUsage(withPlan, legacy.fetchFn)).plan, 'Max')
+})
+
+test('fetchClaudeUsage omits the plan when the session names none', async () => {
+  const { fetchFn } = fakeFetch({
+    limits: [{ kind: 'weekly_all', percent: 40, resets_at: '2026-04-14T16:59:59Z' }],
+  })
+  const usage = await fetchClaudeUsage(claudeSession, fetchFn)
+  assert.equal('plan' in usage, false)
+  const blank = await fetchClaudeUsage({ ...claudeSession, subscriptionType: '   ' }, fakeFetch({
+    limits: [{ kind: 'weekly_all', percent: 40 }],
+  }).fetchFn)
+  assert.equal('plan' in blank, false)
+})
+
+test('retryAfterMs reads both header forms and refuses past deadlines', () => {
+  const now = 1_700_000_000_000
+  assert.equal(retryAfterMs('120'), 120_000)
+  assert.equal(retryAfterMs('0'), undefined)
+  assert.equal(retryAfterMs(null), undefined)
+  assert.equal(retryAfterMs('   '), undefined)
+  assert.equal(retryAfterMs('tomorrow'), undefined)
+  assert.equal(retryAfterMs(new Date(now + 60_000).toUTCString(), now), 60_000)
+  assert.equal(retryAfterMs(new Date(now - 60_000).toUTCString(), now), undefined)
+})
+
+test('a rate-limited usage lookup surfaces the provider retry delay', async () => {
+  // The `internal` RpcResult branch types `details` as an empty object
+  // upstream, so the delay rides the message; a caller backing off on 429 can
+  // then honour the interval the provider actually asked for.
+  const { fetchFn } = fakeFetch({ error: 'rate_limited' }, 429, { 'retry-after': '300' })
+  const error = await fetchClaudeUsage(claudeSession, fetchFn).then(
+    () => undefined,
+    (thrown: unknown) => thrown,
+  )
+  assert.ok(error instanceof OAuthEndpointError)
+  assert.equal(error.status, 429)
+  assert.equal(error.retryAfterMs, 300_000)
 })
 
 test('fetchGrokUsage maps the credits-config shape (weekly percent + reset)', async () => {

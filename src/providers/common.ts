@@ -186,13 +186,42 @@ export class OAuthEndpointError extends Error {
   readonly status: number
   /** The provider's OAuth `error` code (e.g. `invalid_grant`), when present. */
   readonly oauthCode: string | undefined
+  /**
+   * How long the provider asked the caller to wait, in milliseconds, when it
+   * sent a `Retry-After` header. Rate-limited endpoints (notably the claude
+   * usage lookup) answer 429 with one, and a caller that ignores it can only
+   * guess at a backoff — so it rides the error rather than being dropped with
+   * the rest of the response.
+   */
+  readonly retryAfterMs: number | undefined
 
-  constructor(message: string, status: number, oauthCode?: string) {
+  constructor(message: string, status: number, oauthCode?: string, retryAfterMs?: number) {
     super(message)
     this.name = 'OAuthEndpointError'
     this.status = status
     this.oauthCode = oauthCode
+    this.retryAfterMs = retryAfterMs
   }
+}
+
+/**
+ * Parse a `Retry-After` header. The header carries either a delay in seconds
+ * or an HTTP date; both forms resolve to a forward-looking delay, and a past
+ * date or unparsable value answers undefined rather than a negative wait.
+ * @param value - the raw header value, when the response carried one.
+ * @param now - clock override for tests.
+ * @returns the delay in milliseconds, when the header named a future one.
+ */
+export function retryAfterMs(value: string | null, now: number = Date.now()): number | undefined {
+  if (value === null) return undefined
+  const trimmed = value.trim()
+  if (trimmed.length === 0) return undefined
+  const seconds = Number(trimmed)
+  if (Number.isFinite(seconds)) return seconds > 0 ? seconds * 1000 : undefined
+  const at = Date.parse(trimmed)
+  if (!Number.isFinite(at)) return undefined
+  const delay = at - now
+  return delay > 0 ? delay : undefined
 }
 
 /**
@@ -214,7 +243,12 @@ export async function oauthEndpointError(response: Response, label: string): Pro
   const message = detail.length > 0
     ? `${label} token endpoint error (HTTP ${String(response.status)}): ${detail}`
     : `${label} token endpoint error (HTTP ${String(response.status)})`
-  return new OAuthEndpointError(message, response.status, oauthCode)
+  return new OAuthEndpointError(
+    message,
+    response.status,
+    oauthCode,
+    retryAfterMs(response.headers.get('retry-after')),
+  )
 }
 
 /** A session fresh enough to serve a request without a refresh. */
