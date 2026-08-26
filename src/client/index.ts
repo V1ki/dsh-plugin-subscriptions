@@ -21,6 +21,9 @@ import type { CommandUiContract } from '@deepseek-ai/dsh-client-ui-commands/clie
 // nodenext the .js specifier resolves to the .tsx source (see README note).
 import { SubscriptionsSection } from './SubscriptionsSection.js'
 import type { SubscriptionsSectionInjected } from './SubscriptionsSection.js'
+import { installNavIcon } from './nav-icon.js'
+import { UsageMeter, createModelChecker, createUsageStore } from './UsageMeter.js'
+import type { UsageMeterInjected } from './UsageMeter.js'
 import { ImageGenerateToolview, createImageLoader } from './ImageGenerateToolview.js'
 import type { ImageGenerateToolviewInjected } from './ImageGenerateToolview.js'
 import { VideoGenerateToolview, createVideoLoader } from './VideoGenerateToolview.js'
@@ -85,6 +88,10 @@ export function apply(ctx: ClientContext): void {
     label: () => t('nav'),
     inject: injected,
   }, SubscriptionsSection))
+  // The shell picks nav glyphs by section id and gives every unknown id the
+  // settings gear; registration carries no icon field. Decorate our own cell
+  // instead, reading the same label thunk so the match follows the locale.
+  ctx.effect(() => installNavIcon(() => t('nav')), 'dsh-plugin-subscriptions: settings nav glyph')
 
   // The image_generate keyed toolview owns how image calls render inline; its
   // gallery bytes ride the same channel through the injected loader. The
@@ -120,6 +127,22 @@ export function apply(ctx: ClientContext): void {
       setSpeed: createSpeedSetter(connection, sessionId),
     }),
   }, SpeedSelect))
+
+  // The claude usage meter sits in the same tool row, just left of the model
+  // selector and two seats from the shell's own context meter it mirrors. One
+  // store serves every session: the slot renders per session, and the usage
+  // endpoint is both rate limited and shared with the settings page above.
+  const usageStore = createUsageStore(connection.rpc)
+  ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
+    name: 'conversation.input.right',
+    id: 'claude-usage',
+    order: 10,
+    locale: NS,
+    inject: (sessionId: SessionId): UsageMeterInjected => ({
+      checkModel: createModelChecker(connection, sessionId),
+      store: usageStore,
+    }),
+  }, UsageMeter))
 
   // The /fast slash command offers the same Standard/Fast choice as a popup.
   // `available` is synchronous and sees only the session id, so the command

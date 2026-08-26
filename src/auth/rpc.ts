@@ -11,7 +11,7 @@ import type { RpcResult } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { PROVIDER_IDS, type ProviderId } from './store.js'
-import type { ProviderUsage } from '../providers/common.js'
+import { OAuthEndpointError, type ProviderUsage } from '../providers/common.js'
 import type { ProxyConfigView, ProxyDraft, ProxyInput, ProxyTestResult } from '../http.js'
 
 /** The RPC channel this plugin registers on the host connection. */
@@ -137,7 +137,28 @@ function failure(error: unknown): RpcResult<unknown> {
     // The issues array is zod-shaped upstream; this channel validates by hand.
     return { ok: false, error: { code: 'bad-request', message, details: { issues: [] } } }
   }
-  return { ok: false, error: { code: 'internal', message, details: {} } }
+  return { ok: false, error: { code: 'internal', message: withRetryAfter(error, message), details: {} } }
+}
+
+/**
+ * Append the provider's retry delay to a failure message when it sent one.
+ *
+ * The delay belongs in structured data, but the `internal` RpcResult branch
+ * types `details` as an empty object upstream (`z.object({})` in
+ * dsh-host-apiproxy's rpc schema), so a field added here would be stripped in
+ * validation rather than reaching the page. The message is the only channel
+ * that survives, so the suffix is a stable, parseable one — a browser caller
+ * that backs off on a 429 can honour the interval the provider actually asked
+ * for instead of inventing its own.
+ *
+ * @param error - the thrown failure, which may carry a parsed `Retry-After`.
+ * @param message - the failure message as it stands.
+ * @returns the message, with ` (retry-after: <seconds>s)` appended when known.
+ */
+function withRetryAfter(error: unknown, message: string): string {
+  if (!(error instanceof OAuthEndpointError) || error.retryAfterMs === undefined) return message
+  const seconds = Math.max(1, Math.round(error.retryAfterMs / 1000))
+  return `${message} (retry-after: ${String(seconds)}s)`
 }
 
 function readProvider(payload: unknown): ProviderId {
