@@ -15,7 +15,7 @@
  */
 import type { CSSProperties } from 'react'
 import type { ConnectionHandle, RpcResult } from '@deepseek-ai/dsh-api-remotes/client'
-import type { ToolCallBlock } from '@deepseek-ai/dsh-client-runtime/client'
+import type { ToolCallBlock } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { IconSparkle16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { ImageGallery } from './ImageGallery.js'
 import type { ImageAttachmentRef, ImageLoader, MessageImageLabels } from './ImageGallery.js'

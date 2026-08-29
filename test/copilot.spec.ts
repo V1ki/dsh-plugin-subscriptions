@@ -9,7 +9,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { CallId, MessageId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, MessageId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import {
   completeCopilotLogin,
@@ -674,15 +674,15 @@ function toolRoundTripHistory(callId = 'call_A'): GenerateOptions['messages'] {
       role: 'assistant',
       content: [
         { type: 'reasoning', text: 'thinking' },
-        { type: 'tool-call', id: CallId(callId), name: 'bash', arguments: '{"cmd":"ls"}' },
+        { type: 'tool-call', id: ToolCallId(callId), name: 'bash', arguments: '{"cmd":"ls"}' },
       ],
       source: { kind: 'model', provider: 'copilot', model: 'gpt-5.6-sol' },
     },
     {
       id: MessageId('m-b'),
       role: 'user',
-      content: [{ type: 'tool-result', toolCallId: CallId(callId), content: [{ type: 'text', text: 'file-a' }] }],
-      source: { kind: 'tool', callId: CallId(callId) },
+      content: [{ type: 'tool-result', toolCallId: ToolCallId(callId), content: [{ type: 'text', text: 'file-a' }] }],
+      source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   ]
 }
@@ -696,15 +696,15 @@ function twoRoundHistory(): GenerateOptions['messages'] {
       role: 'assistant',
       content: [
         { type: 'reasoning', text: 'thinking more' },
-        { type: 'tool-call', id: CallId('call_B'), name: 'grep', arguments: '{"q":"x"}' },
+        { type: 'tool-call', id: ToolCallId('call_B'), name: 'grep', arguments: '{"q":"x"}' },
       ],
       source: { kind: 'model', provider: 'copilot', model: 'gpt-5.6-sol' },
     },
     {
       id: MessageId('m-d'),
       role: 'user',
-      content: [{ type: 'tool-result', toolCallId: CallId('call_B'), content: [{ type: 'text', text: 'match' }] }],
-      source: { kind: 'tool', callId: CallId('call_B') },
+      content: [{ type: 'tool-result', toolCallId: ToolCallId('call_B'), content: [{ type: 'text', text: 'match' }] }],
+      source: { kind: 'tool', callId: ToolCallId('call_B') },
     },
   ]
 }

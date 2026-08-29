@@ -7,7 +7,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
-import type { RpcResult } from '@deepseek-ai/dsh-host-apiproxy/api'
+import type { ConnectionRpcResult as RpcResult } from '@deepseek-ai/dsh-client-connection'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { PROVIDER_IDS, type ProviderId } from './store.js'
@@ -489,7 +489,6 @@ export function registerAuthRpc(
             return failure(error)
           }
         },
-        { authority: 'loopback' },
       ),
       'dsh-plugin-subscriptions: /subscriptions-auth rpc channel',
     )

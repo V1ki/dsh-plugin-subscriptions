@@ -16,7 +16,7 @@
 import { useEffect, useState } from 'react'
 import type { CSSProperties } from 'react'
 import type { ConnectionHandle, RpcResult } from '@deepseek-ai/dsh-api-remotes/client'
-import type { ToolCallBlock } from '@deepseek-ai/dsh-client-runtime/client'
+import type { ToolCallBlock } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { IconSparkle16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'

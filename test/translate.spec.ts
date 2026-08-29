@@ -6,7 +6,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { CallId, LlmError, MessageId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, LlmError, MessageId } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, Message, MessageSource, StreamChunk } from '@deepseek-ai/dsh-llm'
 import {
   ResponsesStreamTranslator,
@@ -40,13 +40,13 @@ function message(
 }
 
 function toolCall(id: string, name: string, args: string): ContentBlock {
-  return { type: 'tool-call', id: CallId(id), name, arguments: args }
+  return { type: 'tool-call', id: ToolCallId(id), name, arguments: args }
 }
 
 function toolResult(callId: string, text: string, isError?: boolean): ContentBlock {
   return {
     type: 'tool-result',
-    toolCallId: CallId(callId),
+    toolCallId: ToolCallId(callId),
     content: [{ type: 'text', text }],
     ...isError === undefined ? {} : { isError },
   }
@@ -64,7 +64,7 @@ test('toResponsesInput: text, tool call, and tool result round trip', () => {
       { type: 'text', text: 'running ls' },
       toolCall('call-1', 'bash', '{"cmd":"ls"}'),
     ]),
-    message('user', [toolResult('call-1', 'file-a\nfile-b')], { kind: 'tool', callId: CallId('call-1') }),
+    message('user', [toolResult('call-1', 'file-a\nfile-b')], { kind: 'tool', callId: ToolCallId('call-1') }),
   ], 'be helpful')
 
   assert.equal(instructions, 'be helpful')
@@ -351,9 +351,9 @@ test('toAnthropicMessages: merged user message keeps tool_result blocks in one l
   // at the front or the request is rejected for an unanswered call.
   const messages = toAnthropicMessages([
     message('assistant', [toolCall('call-1', 'bash', '{}'), toolCall('call-2', 'bash', '{}')]),
-    message('user', [toolResult('call-1', 'first')], { kind: 'tool', callId: CallId('call-1') }),
+    message('user', [toolResult('call-1', 'first')], { kind: 'tool', callId: ToolCallId('call-1') }),
     message('user', [{ type: 'text', text: 'spliced notice' }]),
-    message('user', [toolResult('call-2', 'second')], { kind: 'tool', callId: CallId('call-2') }),
+    message('user', [toolResult('call-2', 'second')], { kind: 'tool', callId: ToolCallId('call-2') }),
   ])
   assert.deepEqual(messages[1], {
     role: 'user',

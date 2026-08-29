@@ -7,7 +7,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { CallId, LlmError, MessageId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, LlmError, MessageId } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, Message, MessageSource, StreamChunk } from '@deepseek-ai/dsh-llm'
 import {
   ChatCompletionsStreamTranslator,
@@ -34,13 +34,13 @@ function message(
 }
 
 function toolCall(id: string, name: string, args: string): ContentBlock {
-  return { type: 'tool-call', id: CallId(id), name, arguments: args }
+  return { type: 'tool-call', id: ToolCallId(id), name, arguments: args }
 }
 
 function toolResult(callId: string, text: string): ContentBlock {
   return {
     type: 'tool-result',
-    toolCallId: CallId(callId),
+    toolCallId: ToolCallId(callId),
     content: [{ type: 'text', text }],
   }
 }
@@ -57,7 +57,7 @@ test('toChatMessages: text, tool call, and tool result round trip', () => {
       { type: 'text', text: 'running ls' },
       toolCall('call-1', 'bash', '{"cmd":"ls"}'),
     ]),
-    message('user', [toolResult('call-1', 'file-a\nfile-b')], { kind: 'tool', callId: CallId('call-1') }),
+    message('user', [toolResult('call-1', 'file-a\nfile-b')], { kind: 'tool', callId: ToolCallId('call-1') }),
   ], 'be helpful')
 
   assert.deepEqual(messages, [
@@ -173,10 +173,10 @@ test('translator: tool call fragments assemble into one tool-call block', () => 
   const terminal = translator.flush()
   assert.deepEqual(chunks, [
     { type: 'block-start', index: 0, blockType: 'tool-call' },
-    { type: 'tool-call-delta', index: 0, id: CallId('call-1'), name: 'bash', argumentsDelta: '' },
-    { type: 'tool-call-delta', index: 0, id: CallId('call-1'), argumentsDelta: '{"cmd"' },
-    { type: 'tool-call-delta', index: 0, id: CallId('call-1'), argumentsDelta: ':"ls"}' },
-    { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId('call-1'), name: 'bash', arguments: '{"cmd":"ls"}' } },
+    { type: 'tool-call-delta', index: 0, id: ToolCallId('call-1'), name: 'bash', argumentsDelta: '' },
+    { type: 'tool-call-delta', index: 0, id: ToolCallId('call-1'), argumentsDelta: '{"cmd"' },
+    { type: 'tool-call-delta', index: 0, id: ToolCallId('call-1'), argumentsDelta: ':"ls"}' },
+    { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('call-1'), name: 'bash', arguments: '{"cmd":"ls"}' } },
   ])
   assert.deepEqual(terminal, [{ type: 'finish', reason: { kind: 'tool-calls' } }])
 })

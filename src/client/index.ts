@@ -6,7 +6,8 @@
  * namespace with zh/en dictionaries, rebound per read so the nav label and
  * page text follow the active locale.
  */
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { ConnectionHandle, SessionId } from '@deepseek-ai/dsh-api-remotes/client'
 // Type-only: pulls the shell's SlotMap merge (the 'settings.section' entry).
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
@@ -126,7 +127,7 @@ export function apply(ctx: ClientContext): void {
   // stays listed everywhere; `options` throws the friendly gate when the
   // session's current model is not a fast-capable codex model (the same
   // in-popup error posture the /model contribution uses for its guards).
-  ctx.inject(['commandUi'], (scope) => {
+  ctx.inject(['commandUi'], (scope: ClientContext) => {
     const command = scope.get('commandUi') as CommandUiContract
     scope.effect(() => command.register({
       name: 'fast',

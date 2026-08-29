@@ -30,7 +30,7 @@ const CLIENT_EXTERNALS: readonly string[] = [
  * Wire/type layers a client bundle may inline: browser-safe contracts
  * with no runtime identity to share (no Symbol/instanceof/singleton state).
  */
-const INLINE_SAFE = /^@deepseek-ai\/dsh-(host-apiproxy|session|llm|tools|brand)(\/|$)/
+const INLINE_SAFE = /^@deepseek-ai\/dsh-(session|llm|tools|brand)(\/|$)/
 
 /** Vendored framework libraries: ordinary libraries a browser bundle inlines. */
 const VENDORED_LIBRARY = /^@deepseek-ai\/(cosmokit|schemastery)(\/|$)/
