@@ -54,6 +54,9 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: 0.1.2-alpha.3
         version: 0.1.2-alpha.3(9856107a6511bd37694bb5d55ebb619c)
+      '@deepseek-ai/dsh-user-approval':
+        specifier: 0.1.2-alpha.3
+        version: 0.1.2-alpha.3(802fc4f1099cfbae100b0e7a224c7b5b)
       '@deepseek-ai/schemastery':
         specifier: ^3.18.1
         version: 3.18.2

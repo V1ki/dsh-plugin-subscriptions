@@ -5,12 +5,24 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto'
-import { attributionHeaders, EMPTY_RESPONSE_CODE, errorChain, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import {
+  attributionHeaders,
+  BlockAssembler,
+  createAssistantMessage,
+  createUserMessage,
+  EMPTY_RESPONSE_CODE,
+  errorChain,
+  LlmAdapter,
+  LlmError,
+  ReasoningEffortId,
+} from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
+  ContentBlock,
   LlmModelInfo,
   LlmProviderInfo,
   LlmResolvedModelInfo,
+  Message,
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import { decodeJwtPayload } from '../auth/jwt.js'
@@ -54,11 +66,20 @@ import {
   subscriptionRetryPolicy,
 } from './rate-limit.js'
 import type { RateLimitResetReader, RateLimitWait } from './rate-limit.js'
+import { CODEX_GUARDIAN_POLICY } from './codex-guardian-policy.js'
+import type {
+  ApprovalReviewAgent,
+  ApprovalReviewRequest,
+  ApprovalReviewer,
+  AutoReviewDecision,
+} from '../auto-review.js'
 
 export const CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
 export const CODEX_AUTHORIZE_URL = 'https://auth.openai.com/oauth/authorize'
 export const CODEX_TOKEN_URL = 'https://auth.openai.com/oauth/token'
 export const CODEX_API_URL = 'https://chatgpt.com/backend-api/codex/responses'
+/** Auto-review model identifier from Codex CLI 0.151.0. */
+export const CODEX_AUTO_REVIEW_MODEL = 'codex-auto-review'
 const CODEX_SCOPE = 'openid profile email offline_access api.connectors.read api.connectors.invoke'
 const CODEX_CALLBACK_PATH = '/auth/callback'
 const CODEX_CONTEXT_WINDOW = 400_000
@@ -391,9 +412,10 @@ export const CODEX_MODELS_URL = 'https://chatgpt.com/backend-api/codex/models'
  * Client version sent on the /models catalog request. The backend gates the
  * visible model list by client version: versions below ~0.101 get an empty
  * list, while current codex CLI releases get the full catalog — keep this in
- * the range of current codex CLI releases.
+ * the range of current codex CLI releases. This is also the source version
+ * used by the Guardian compatibility constants below.
  */
-export const CODEX_CLIENT_VERSION = '0.147.0'
+export const CODEX_CLIENT_VERSION = '0.151.0'
 
 /** The codex `/models` entry shape this plugin reads (subset of codex-rs `ModelInfo`). */
 interface CodexWireModel {
@@ -505,6 +527,8 @@ export interface CodexAdapterOptions {
   onWarn?: (message: string) => void
   /** Fetch implementation for discovery (defaults to global fetch). */
   fetchFn?: FetchFn
+  /** Approval-review transport seam for deterministic provider tests. */
+  reviewFetchFn?: FetchFn
   /** Resolve the attachment service per request; absent means image requests fail loudly. */
   resolveAttachments?: () => AttachmentStore | undefined
   /** Durable catalog store seeding capability metadata across restarts. */
@@ -608,13 +632,371 @@ export function codexRequestBody(
   }
 }
 
+/**
+ * Exact Codex 0.151.0 Guardian execution limits.
+ * Sources: `core/src/guardian/mod.rs` (`GUARDIAN_REVIEW_TIMEOUT`) and
+ * `core/src/guardian/review.rs` (`GUARDIAN_REVIEW_MAX_ATTEMPTS`).
+ */
+const CODEX_REVIEW_TIMEOUT_MS = 90_000
+const CODEX_REVIEW_MAX_ATTEMPTS = 3
+
+/**
+ * Codex budgets Guardian in approximate tokens and defines one token as four
+ * UTF-8 bytes (`utils/string/src/truncate.rs`). These are exact byte
+ * conversions of the caps in `core/src/guardian/mod.rs` and `prompt.rs`:
+ * 10k per transcript lane, 2k per message, 1k per tool entry, 16k for the
+ * action, and 512 for the approval reason. Messages and tools have separate
+ * lanes so verbose tool output cannot evict the human authorization context.
+ */
+const CODEX_REVIEW_APPROX_BYTES_PER_TOKEN = 4
+const CODEX_REVIEW_MESSAGE_BUDGET_BYTES = 10_000 * CODEX_REVIEW_APPROX_BYTES_PER_TOKEN
+const CODEX_REVIEW_TOOL_BUDGET_BYTES = 10_000 * CODEX_REVIEW_APPROX_BYTES_PER_TOKEN
+const CODEX_REVIEW_MESSAGE_ENTRY_BYTES = 2_000 * CODEX_REVIEW_APPROX_BYTES_PER_TOKEN
+const CODEX_REVIEW_TOOL_ENTRY_BYTES = 1_000 * CODEX_REVIEW_APPROX_BYTES_PER_TOKEN
+const CODEX_REVIEW_ACTION_BYTES = 16_000 * CODEX_REVIEW_APPROX_BYTES_PER_TOKEN
+const CODEX_REVIEW_APPROVAL_REASON_BYTES = 512 * CODEX_REVIEW_APPROX_BYTES_PER_TOKEN
+
+/** Exact Codex 0.151.0 transcript recency cap (`GUARDIAN_RECENT_ENTRY_LIMIT`). */
+const CODEX_REVIEW_RECENT_NON_USER_LIMIT = 40
+
+/**
+ * Exact standard-model denial breaker from Codex 0.151.0 Guardian: interrupt
+ * after 3 consecutive denials or 10 denials in the latest 50 reviews of one
+ * turn. Cyber-model thresholds are intentionally absent because DSH does not
+ * expose Codex's `model_specialty` on the approval request.
+ */
+const CODEX_REVIEW_MAX_CONSECUTIVE_DENIALS = 3
+const CODEX_REVIEW_MAX_RECENT_DENIALS = 10
+const CODEX_REVIEW_DENIAL_WINDOW = 50
+
+const CODEX_REVIEW_RISK_LEVELS = ['low', 'medium', 'high', 'critical'] as const
+const CODEX_REVIEW_AUTHORIZATION_LEVELS = ['unknown', 'low', 'medium', 'high'] as const
+const CODEX_REVIEW_OUTCOMES = ['allow', 'deny'] as const
+
+/** Exact structured result vocabulary consumed by Codex Guardian 0.151.0. */
+const CODEX_REVIEW_OUTPUT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    risk_level: { type: 'string', enum: CODEX_REVIEW_RISK_LEVELS },
+    user_authorization: { type: 'string', enum: CODEX_REVIEW_AUTHORIZATION_LEVELS },
+    outcome: { type: 'string', enum: CODEX_REVIEW_OUTCOMES },
+    rationale: { type: 'string' },
+  },
+  required: ['outcome'],
+} as const
+
+type CodexTranscriptKind = 'user' | 'assistant' | 'tool'
+
+interface CodexTranscriptEntry {
+  readonly kind: CodexTranscriptKind
+  readonly ordinal: number
+  readonly text: string
+}
+
+interface CodexTranscriptSnapshot {
+  readonly nodes: number[]
+  readonly entries: CodexTranscriptEntry[]
+}
+
+interface CodexApprovalReviewSession {
+  readonly parentThreadId: string
+  readonly promptCacheKey: string
+  readonly transportSessionId: string
+  readonly reviewThreadId: string
+  readonly windowId: string
+  readonly messages: Message[]
+  surfaceNodes: number[]
+  tail: Promise<void>
+  denialTurnId?: string
+  consecutiveDenials: number
+  recentDenials: boolean[]
+  interruptionScheduled: boolean
+}
+
+interface ParsedCodexReview {
+  readonly decision: CodexApprovalDecision
+  readonly raw: string
+}
+
+type CodexApprovalDecision = AutoReviewDecision & { readonly decision: 'allow' | 'deny' }
+
+class RetryableCodexReviewError extends Error {}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isStringEnum<const T extends readonly string[]>(
+  value: unknown,
+  options: T,
+): value is T[number] {
+  return typeof value === 'string' && options.includes(value)
+}
+
+function utf8Prefix(text: string, maxBytes: number): string {
+  let end = Math.min(text.length, maxBytes)
+  while (end > 0 && Buffer.byteLength(text.slice(0, end), 'utf8') > maxBytes) end -= 1
+  return text.slice(0, end)
+}
+
+function utf8Suffix(text: string, maxBytes: number): string {
+  let start = Math.max(0, text.length - maxBytes)
+  while (start < text.length && Buffer.byteLength(text.slice(start), 'utf8') > maxBytes) start += 1
+  return text.slice(start)
+}
+
+/** Preserve both ends, as Codex's Guardian truncator does, on UTF-8 boundaries. */
+function bounded(text: string, maxBytes: number): string {
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text
+  const marker = '\n[truncated]\n'
+  const retainedBytes = Math.max(0, maxBytes - Buffer.byteLength(marker, 'utf8'))
+  const prefixBytes = Math.ceil(retainedBytes / 2)
+  return `${utf8Prefix(text, prefixBytes)}${marker}${utf8Suffix(text, retainedBytes - prefixBytes)}`
+}
+
+function renderBlocks(value: readonly ContentBlock[]): { messages: string[]; tools: string[] } {
+  const messages: string[] = []
+  const tools: string[] = []
+  for (const block of value) {
+    if (block.type === 'text' && block.text.trim().length > 0) {
+      messages.push(block.text.trim())
+    } else if (block.type === 'tool-call') {
+      tools.push(`${block.name}(${block.arguments})`)
+    } else if (block.type === 'tool-result') {
+      const nested = renderBlocks(block.content)
+      tools.push(`result ${block.toolCallId}${block.isError === true ? ' (error)' : ''}: ${[
+        ...nested.messages,
+        ...nested.tools,
+      ].join('\n')}`)
+    } else if (block.type === 'image') {
+      messages.push('[image omitted from approval transcript]')
+    }
+    // Hidden reasoning is intentionally excluded, matching Codex Guardian.
+  }
+  return { messages, tools }
+}
+
+/** Collect direct user intent plus recent visible assistant/tool evidence from the DSH surface. */
+function codexTranscriptSnapshot(agent: ApprovalReviewAgent, startNode = 0): CodexTranscriptSnapshot {
+  const { events, surface } = agent.session
+  const nodes = [...surface.nodes]
+  const entries: CodexTranscriptEntry[] = []
+  let ordinal = 0
+  for (const node of nodes.slice(startNode)) {
+    const event = events[node]
+    if (event === undefined) continue
+    if (event.type === 'user/message') {
+      if (event.data.source.kind !== 'user') continue
+      const rendered = renderBlocks(event.data.content)
+      if (rendered.messages.length > 0) {
+        entries.push({ kind: 'user', ordinal: ordinal++, text: rendered.messages.join('\n') })
+      }
+      continue
+    }
+    if (event.type === 'assistant/message') {
+      const rendered = renderBlocks(event.data.message.content)
+      if (rendered.messages.length > 0) {
+        entries.push({ kind: 'assistant', ordinal: ordinal++, text: rendered.messages.join('\n') })
+      }
+      for (const tool of rendered.tools) entries.push({ kind: 'tool', ordinal: ordinal++, text: tool })
+      continue
+    }
+    if (event.type === 'tool/result') {
+      const rendered = renderBlocks(event.data.message.content)
+      const text = [...rendered.messages, ...rendered.tools].join('\n')
+      if (text.length > 0) entries.push({ kind: 'tool', ordinal: ordinal++, text })
+    }
+  }
+  return { nodes, entries }
+}
+
+/** Mirror Codex's bounded transcript policy: user anchors first, then recent assistant/tool evidence. */
+function selectCodexTranscript(entries: readonly CodexTranscriptEntry[]): string[] {
+  const rendered = entries.map(entry => {
+    const cap = entry.kind === 'tool' ? CODEX_REVIEW_TOOL_ENTRY_BYTES : CODEX_REVIEW_MESSAGE_ENTRY_BYTES
+    const text = `[${entry.ordinal + 1}] ${entry.kind.toUpperCase()}: ${bounded(entry.text, cap)}`
+    return { entry, text, size: Buffer.byteLength(text, 'utf8') }
+  })
+  const included = new Set<number>()
+  let messageBytes = 0
+  let toolBytes = 0
+  const users = rendered
+    .map((entry, index) => ({ ...entry, index }))
+    .filter(item => item.entry.kind === 'user')
+  const includeUser = (item: typeof users[number] | undefined): void => {
+    if (item === undefined || included.has(item.index)) return
+    if (messageBytes + item.size > CODEX_REVIEW_MESSAGE_BUDGET_BYTES) return
+    included.add(item.index)
+    messageBytes += item.size
+  }
+  includeUser(users[0])
+  includeUser(users.at(-1))
+  for (const user of [...users].reverse()) includeUser(user)
+
+  let recentNonUser = 0
+  for (let index = rendered.length - 1; index >= 0; index -= 1) {
+    const item = rendered[index]
+    if (item === undefined || item.entry.kind === 'user'
+      || recentNonUser >= CODEX_REVIEW_RECENT_NON_USER_LIMIT) continue
+    const fits = item.entry.kind === 'tool'
+      ? toolBytes + item.size <= CODEX_REVIEW_TOOL_BUDGET_BYTES
+      : messageBytes + item.size <= CODEX_REVIEW_MESSAGE_BUDGET_BYTES
+    if (!fits) continue
+    included.add(index)
+    recentNonUser += 1
+    if (item.entry.kind === 'tool') toolBytes += item.size
+    else messageBytes += item.size
+  }
+  return rendered.filter((_entry, index) => included.has(index)).map(entry => entry.text)
+}
+
+function isNodePrefix(prefix: readonly number[], nodes: readonly number[]): boolean {
+  return prefix.length <= nodes.length && prefix.every((node, index) => nodes[index] === node)
+}
+
+function guardianPromptCacheKey(parentThreadId: string): string {
+  const direct = `guardian:${parentThreadId}`
+  if (direct.length <= 64) return direct
+  return `guardian:${createHash('sha256').update(parentThreadId).digest('hex').slice(0, 55)}`
+}
+
+function approvalTurnId(agent: ApprovalReviewAgent): string {
+  for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {
+    const event = agent.session.events[index]
+    if (event?.type === 'turn/start') return String(event.data.turn)
+  }
+  return '<unknown-turn>'
+}
+
+function safeActionJson(request: ApprovalReviewRequest): string {
+  let serialized: string
+  try {
+    serialized = JSON.stringify({
+      tool: request.action.name,
+      call_id: request.action.callId,
+      arguments: request.action.arguments,
+      ...request.reason === undefined
+        ? {}
+        : { approval_reason: bounded(request.reason, CODEX_REVIEW_APPROVAL_REASON_BYTES) },
+    }, null, 2)
+  } catch {
+    serialized = JSON.stringify({
+      tool: request.action.name,
+      call_id: request.action.callId,
+      arguments: '[unserializable arguments]',
+      ...request.reason === undefined
+        ? {}
+        : { approval_reason: bounded(request.reason, CODEX_REVIEW_APPROVAL_REASON_BYTES) },
+    }, null, 2)
+  }
+  return bounded(serialized, CODEX_REVIEW_ACTION_BYTES)
+}
+
+function codexReviewPrompt(
+  request: ApprovalReviewRequest,
+  state: CodexApprovalReviewSession,
+): { prompt: string; nodes: number[] } {
+  const current = codexTranscriptSnapshot(request.agent)
+  const delta = state.messages.length > 0 && isNodePrefix(state.surfaceNodes, current.nodes)
+  const snapshot = delta ? codexTranscriptSnapshot(request.agent, state.surfaceNodes.length) : current
+  const transcript = selectCodexTranscript(snapshot.entries)
+  return {
+    nodes: current.nodes,
+    prompt: [
+      delta
+        ? 'Transcript entries added since the previous approval review:'
+        : 'Compact transcript for authorization and local context:',
+      transcript.length > 0 ? transcript.join('\n') : '<no new retained transcript entries>',
+      '>>> APPROVAL REQUEST START',
+      'Assess the exact planned action below.',
+      safeActionJson(request),
+      '>>> APPROVAL REQUEST END',
+    ].join('\n'),
+  }
+}
+
+function codexReviewRequestBody(
+  messages: Message[],
+  state: CodexApprovalReviewSession,
+  installationId: string,
+): Record<string, unknown> {
+  const options: GenerateOptions = {
+    provider: 'codex',
+    model: CODEX_AUTO_REVIEW_MODEL,
+    reasoningEffort: ReasoningEffortId('low'),
+    messages,
+    sessionId: state.promptCacheKey as NonNullable<GenerateOptions['sessionId']>,
+  }
+  return {
+    ...codexRequestBody(options, toResponsesInput(messages, CODEX_GUARDIAN_POLICY), false),
+    parallel_tool_calls: false,
+    text: {
+      format: {
+        type: 'json_schema',
+        // Basic Guardian sessions explicitly disable strict schema validation
+        // (`core/src/session/turn.rs` in Codex 0.151.0). Its schema intentionally
+        // requires only `outcome`; the diagnostic fields remain optional.
+        strict: false,
+        name: 'codex_output_schema',
+        schema: CODEX_REVIEW_OUTPUT_SCHEMA,
+      },
+    },
+    client_metadata: {
+      'x-codex-installation-id': installationId,
+      'session_id': state.transportSessionId,
+      'thread_id': state.reviewThreadId,
+      'x-codex-window-id': state.windowId,
+      'x-openai-subagent': 'guardian',
+      'x-codex-parent-thread-id': state.parentThreadId,
+    },
+  }
+}
+
+/** Parse exactly like Codex Guardian: tolerate one prose wrapper and optional detail fields. */
+export function parseCodexApprovalReview(raw: string): CodexApprovalDecision | undefined {
+  let value: unknown
+  try {
+    value = JSON.parse(raw)
+  } catch {
+    const start = raw.indexOf('{')
+    const end = raw.lastIndexOf('}')
+    if (start < 0 || end <= start) return undefined
+    try {
+      value = JSON.parse(raw.slice(start, end + 1))
+    } catch {
+      return undefined
+    }
+  }
+  if (!isRecord(value)) return undefined
+  if (!isStringEnum(value.outcome, CODEX_REVIEW_OUTCOMES)) return undefined
+  if (value.risk_level !== undefined && !isStringEnum(value.risk_level, CODEX_REVIEW_RISK_LEVELS)) {
+    return undefined
+  }
+  if (value.user_authorization !== undefined
+    && !isStringEnum(value.user_authorization, CODEX_REVIEW_AUTHORIZATION_LEVELS)) return undefined
+  if (value.rationale !== undefined && typeof value.rationale !== 'string') return undefined
+  const rationale = value.rationale?.trim()
+  const reason = rationale === undefined || rationale.length === 0
+    ? value.outcome === 'allow'
+      ? 'Auto-review returned a low-risk allow decision.'
+      : 'Auto-review returned a deny decision without a rationale.'
+    : rationale
+  return { decision: value.outcome, reason }
+}
+
 /** Codex wire adapter: one instance serves the `codex` provider route. */
-export class CodexAdapter extends LlmAdapter {
+export class CodexAdapter extends LlmAdapter implements ApprovalReviewer {
+  readonly reviewerId = 'codex'
+  readonly reviewerLabel = 'Codex'
+  private readonly installationId = randomUUID()
   private readonly catalog: ModelCatalogCache
   /** In-memory catalogs for non-default accounts (the persisted cache is the default's). */
   private readonly accountCatalogs = new Map<string, ModelCatalogCache>()
   /** Account whose snapshot currently lives in {@link catalog}; cleared on default change. */
   private catalogOwner: string | undefined
+  /** One locked, reusable Guardian conversation per parent agent session. */
+  private readonly approvalReviewSessions = new WeakMap<ApprovalReviewAgent, CodexApprovalReviewSession>()
 
   constructor(private readonly options: CodexAdapterOptions) {
     super()
@@ -815,6 +1197,189 @@ export class CodexAdapter extends LlmAdapter {
       defaultMaxTokens: configured?.maxTokens ?? CODEX_DEFAULT_MAX_TOKENS,
       ...(reasoning === undefined ? {} : { reasoning }),
     }
+  }
+
+  /**
+   * Review one real native approval request with Codex. Calls for the same
+   * agent are serialized so the reusable transcript cursor and cached reviewer
+   * conversation cannot race.
+   */
+  reviewApproval(request: ApprovalReviewRequest): Promise<AutoReviewDecision | undefined> {
+    let state = this.approvalReviewSessions.get(request.agent)
+    if (state === undefined) {
+      const identity = request.agent.id
+      state = {
+        parentThreadId: identity,
+        promptCacheKey: guardianPromptCacheKey(identity),
+        transportSessionId: randomUUID(),
+        reviewThreadId: randomUUID(),
+        windowId: randomUUID(),
+        messages: [],
+        surfaceNodes: [],
+        tail: Promise.resolve(),
+        consecutiveDenials: 0,
+        recentDenials: [],
+        interruptionScheduled: false,
+      }
+      this.approvalReviewSessions.set(request.agent, state)
+    }
+    const review = state.tail.then(() => this.runApprovalReview(request, state))
+    state.tail = review.then(() => undefined, () => undefined)
+    return review
+  }
+
+  private async runApprovalReview(
+    request: ApprovalReviewRequest,
+    state: CodexApprovalReviewSession,
+  ): Promise<AutoReviewDecision | undefined> {
+    const signal = AbortSignal.any([request.signal, AbortSignal.timeout(CODEX_REVIEW_TIMEOUT_MS)])
+    const { prompt, nodes } = codexReviewPrompt(request, state)
+    const userMessage = createUserMessage({
+      source: { kind: 'plugin', plugin: 'dsh-plugin-subscriptions' },
+      content: [{ type: 'text', text: prompt }],
+    })
+    const messages = [...state.messages, userMessage]
+    const body = codexReviewRequestBody(messages, state, this.installationId)
+    let parsed: ParsedCodexReview | undefined
+    let lastError: unknown
+    for (let attempt = 1; attempt <= CODEX_REVIEW_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        parsed = await this.performApprovalReview(body, state, signal)
+        break
+      } catch (error) {
+        lastError = error
+        if (signal.aborted || attempt === CODEX_REVIEW_MAX_ATTEMPTS
+          || (!(error instanceof RetryableCodexReviewError) && !(error instanceof TypeError))) {
+          throw error
+        }
+      }
+    }
+    if (parsed === undefined) throw lastError ?? new Error('Codex approval review failed')
+    state.messages.push(
+      userMessage,
+      createAssistantMessage({
+        source: { provider: 'codex', model: CODEX_AUTO_REVIEW_MODEL },
+        content: [{ type: 'text', text: parsed.raw }],
+      }),
+    )
+    state.surfaceNodes = nodes
+    this.recordApprovalReviewDecision(request, state, parsed.decision.decision)
+    return parsed.decision
+  }
+
+  /** Match Codex Guardian's per-turn 3-consecutive / 10-of-50 denial breaker. */
+  private recordApprovalReviewDecision(
+    request: ApprovalReviewRequest,
+    state: CodexApprovalReviewSession,
+    decision: CodexApprovalDecision['decision'],
+  ): void {
+    const turnId = approvalTurnId(request.agent)
+    if (state.denialTurnId !== turnId) {
+      state.denialTurnId = turnId
+      state.consecutiveDenials = 0
+      state.recentDenials = []
+      state.interruptionScheduled = false
+    }
+    const denied = decision === 'deny'
+    state.consecutiveDenials = denied ? state.consecutiveDenials + 1 : 0
+    state.recentDenials.push(denied)
+    if (state.recentDenials.length > CODEX_REVIEW_DENIAL_WINDOW) state.recentDenials.shift()
+    const recentDenials = state.recentDenials.filter(Boolean).length
+    if (!denied || state.interruptionScheduled
+      || (state.consecutiveDenials < CODEX_REVIEW_MAX_CONSECUTIVE_DENIALS
+        && recentDenials < CODEX_REVIEW_MAX_RECENT_DENIALS)) return
+    state.interruptionScheduled = true
+    const cancel = request.agent.cancel
+    // Codex schedules the abort after recording the review. Defer here too so
+    // the approval service can commit its rejected audit outcome first.
+    setTimeout(() => {
+      try {
+        Reflect.apply(cancel, request.agent, [{
+          kind: 'hook',
+          reason: 'Automatic approval review rejected too many requests in this turn.',
+        }])
+      } catch {
+        // A disappearing agent must not turn a valid denial into manual fallback.
+      }
+    }, 0)
+  }
+
+  private async performApprovalReview(
+    body: Record<string, unknown>,
+    state: CodexApprovalReviewSession,
+    signal: AbortSignal,
+  ): Promise<ParsedCodexReview> {
+    let session = await this.options.tokens.session()
+    let response = await this.requestApprovalReview(body, session, state, signal)
+    if (response.status === 401) {
+      session = await this.options.tokens.session(undefined, true)
+      response = await this.requestApprovalReview(body, session, state, signal)
+    }
+    if (!response.ok) {
+      const error = await httpLlmError(response, 'codex approval review API', {
+        rateLimitReset: codexRateLimitReset,
+        ...this.options.onWarn === undefined ? {} : { onWarn: this.options.onWarn },
+      })
+      if (response.status === 408 || response.status === 429 || response.status >= 500) {
+        throw new RetryableCodexReviewError(error.message)
+      }
+      throw error
+    }
+    if (response.body === null) throw new RetryableCodexReviewError('codex approval review API returned no response body')
+    const assembler = new BlockAssembler()
+    try {
+      for await (const chunk of streamResponses(response.body)) assembler.push(chunk)
+    } catch (error) {
+      throw new RetryableCodexReviewError(error instanceof Error ? error.message : String(error))
+    }
+    const finish = assembler.finish
+    if (finish.kind === 'error' || finish.kind === 'aborted') {
+      throw new RetryableCodexReviewError(finish.failure.message)
+    }
+    if (finish.kind === 'max-tokens') {
+      throw new RetryableCodexReviewError('codex approval review API exhausted its output limit')
+    }
+    const raw = assembler.blocks()
+      .filter(block => block.type === 'text')
+      .map(block => block.type === 'text' ? block.text : '')
+      .join('')
+      .trim()
+    const decision = parseCodexApprovalReview(raw)
+    if (decision === undefined) throw new RetryableCodexReviewError('codex approval review API returned malformed JSON')
+    return { decision, raw }
+  }
+
+  private requestApprovalReview(
+    body: Record<string, unknown>,
+    session: CodexSession,
+    state: CodexApprovalReviewSession,
+    signal: AbortSignal,
+  ): Promise<Response> {
+    const init: RequestInit = {
+      method: 'POST',
+      headers: {
+        'authorization': `Bearer ${session.accessToken}`,
+        'chatgpt-account-id': session.accountId,
+        'originator': 'codex_cli_rs',
+        'session-id': state.transportSessionId,
+        'thread-id': state.reviewThreadId,
+        'x-client-request-id': state.reviewThreadId,
+        'x-openai-subagent': 'guardian',
+        'x-codex-installation-id': this.installationId,
+        'x-codex-window-id': state.windowId,
+        'x-codex-parent-thread-id': state.parentThreadId,
+        'accept': 'text/event-stream',
+        'content-type': 'application/json',
+        ...attributionHeaders(),
+      },
+      body: JSON.stringify(body),
+      signal,
+    }
+    // Codex routes basic auto-review to /responses by default. The unmetered
+    // /guardian route is gated by its private `[features.guardianv2]
+    // free_guardian = true` flag plus backend/session/model checks; this plugin
+    // exposes no such flag, so claiming that route would diverge from Codex.
+    return (this.options.reviewFetchFn ?? proxiedFetch)(CODEX_API_URL, init)
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {

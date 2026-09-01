@@ -7,9 +7,28 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { MessageId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import {
+  createAssistantMessage,
+  createUserMessage,
+  MessageId,
+  ReasoningEffortId,
+  ToolCallId,
+} from '@deepseek-ai/dsh-llm'
 import type { Message } from '@deepseek-ai/dsh-llm'
-import { CodexAdapter, codexRequestBody, fetchCodexModels } from '../src/providers/codex.js'
+import type {
+  ApprovalReviewAgent,
+  ApprovalReviewCancellation,
+  ApprovalReviewRequest,
+  ApprovalReviewSessionEvent,
+} from '../src/auto-review.js'
+import {
+  CODEX_API_URL,
+  CODEX_AUTO_REVIEW_MODEL,
+  CodexAdapter,
+  codexRequestBody,
+  fetchCodexModels,
+  parseCodexApprovalReview,
+} from '../src/providers/codex.js'
 import { GrokAdapter } from '../src/providers/grok.js'
 import { ClaudeAdapter, claudeRequestBody } from '../src/providers/claude.js'
 import { CopilotAdapter, fetchCopilotModels } from '../src/providers/copilot.js'
@@ -119,6 +138,7 @@ function codexAdapter(overrides: {
   session?: CodexSession
   discovery?: boolean
   fetchFn?: FetchFn
+  reviewFetchFn?: FetchFn
   warnings?: string[]
   defaultEffortOf?: (model: string) => string | undefined
 }): CodexAdapter {
@@ -128,12 +148,269 @@ function codexAdapter(overrides: {
     tokens: memoryTokens(overrides.session),
     discovery: overrides.discovery ?? true,
     ...overrides.fetchFn === undefined ? {} : { fetchFn: overrides.fetchFn },
+    ...overrides.reviewFetchFn === undefined ? {} : { reviewFetchFn: overrides.reviewFetchFn },
     ...overrides.warnings === undefined
       ? {}
       : { onWarn: (message: string) => { overrides.warnings?.push(message) } },
     ...overrides.defaultEffortOf === undefined ? {} : { defaultEffortOf: overrides.defaultEffortOf },
   })
 }
+
+function codexGuardianResponse(outcome: 'allow' | 'deny', rationale: string): Response {
+  const text = JSON.stringify({
+    risk_level: outcome === 'allow' ? 'low' : 'high',
+    user_authorization: outcome === 'allow' ? 'high' : 'unknown',
+    outcome,
+    rationale,
+  })
+  const events = [
+    { type: 'response.output_item.added', output_index: 0, item: { type: 'message', id: 'review-message' } },
+    {
+      type: 'response.output_item.done',
+      output_index: 0,
+      item: { type: 'message', id: 'review-message', content: [{ type: 'output_text', text }] },
+    },
+    { type: 'response.completed', response: { usage: { input_tokens: 10, output_tokens: 5 } } },
+  ]
+  return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(''), {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  })
+}
+
+function approvalReviewAgent(options: {
+  id: string
+  events?: ApprovalReviewSessionEvent[]
+  nodes?: number[]
+  cancel?: (cause: ApprovalReviewCancellation) => void
+}): ApprovalReviewAgent {
+  return {
+    id: options.id,
+    session: {
+      events: options.events ?? [],
+      surface: { nodes: options.nodes ?? [] },
+    },
+    cancel: options.cancel ?? (() => {}),
+  }
+}
+
+function reviewUserEvent(seq: number, text: string): ApprovalReviewSessionEvent {
+  return {
+    type: 'user/message',
+    seq,
+    time: 0,
+    surfaceOp: 'append',
+    data: createUserMessage({
+      source: { kind: 'user' },
+      content: [{ type: 'text', text }],
+    }),
+  }
+}
+
+function reviewAssistantEvent(seq: number, text: string): ApprovalReviewSessionEvent {
+  return {
+    type: 'assistant/message',
+    seq,
+    time: 0,
+    surfaceOp: 'append',
+    data: {
+      turn: 1,
+      step: 1,
+      message: createAssistantMessage({
+        source: { provider: 'codex', model: 'gpt-5.6-sol' },
+        content: [{ type: 'text', text }],
+      }),
+    },
+  }
+}
+
+function reviewTurnStartEvent(turn: number): ApprovalReviewSessionEvent {
+  return { type: 'turn/start', seq: 0, time: 0, data: { turn } }
+}
+
+test('Codex Guardian parser accepts the upstream minimal result and prose recovery path', () => {
+  assert.deepEqual(parseCodexApprovalReview('{"outcome":"allow"}'), {
+    decision: 'allow',
+    reason: 'Auto-review returned a low-risk allow decision.',
+  })
+  assert.deepEqual(parseCodexApprovalReview('Result: {"outcome":"deny"} done.'), {
+    decision: 'deny',
+    reason: 'Auto-review returned a deny decision without a rationale.',
+  })
+  assert.equal(parseCodexApprovalReview('{"outcome":"allow","risk_level":"unexpected"}'), undefined)
+})
+
+test('Codex adapter implements approval review on the default Responses route', async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = []
+  const reviewFetchFn = ((url: unknown, init?: RequestInit) => {
+    calls.push({ url: String(url), ...init === undefined ? {} : { init } })
+    return Promise.resolve(codexGuardianResponse('allow', 'The scoped fetch matches the explicit request.'))
+  }) as FetchFn
+  const adapter = codexAdapter({ session: codexSession, discovery: false, reviewFetchFn })
+  const agent = approvalReviewAgent({
+    id: 'agent-7',
+    events: [
+      reviewUserEvent(0, 'Fetch the latest upstream changes.'),
+      reviewAssistantEvent(1, 'I will fetch upstream.'),
+    ],
+    nodes: [0, 1],
+  })
+
+  const decision = await adapter.reviewApproval({
+    agent,
+    action: {
+      name: 'bash',
+      callId: ToolCallId('call-fetch'),
+      arguments: {
+        command: 'git fetch upstream',
+        workdir: '/repo',
+        sandbox_permissions: 'danger-full-access',
+      },
+    },
+    reason: 'Network access is required.',
+    signal: new AbortController().signal,
+  })
+
+  assert.deepEqual(decision, {
+    decision: 'allow',
+    reason: 'The scoped fetch matches the explicit request.',
+  })
+  assert.equal(adapter.reviewerId, 'codex')
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0]?.url, CODEX_API_URL)
+  const body = JSON.parse(String(calls[0]?.init?.body)) as Record<string, unknown>
+  assert.equal(body.model, CODEX_AUTO_REVIEW_MODEL)
+  assert.deepEqual(body.reasoning, { effort: 'low', summary: 'auto' })
+  assert.equal(typeof body.prompt_cache_key, 'string')
+  const metadata = body.client_metadata as Record<string, unknown>
+  assert.equal(metadata['x-openai-subagent'], 'guardian')
+  assert.equal(typeof metadata['x-codex-installation-id'], 'string')
+  assert.equal(typeof metadata['x-codex-window-id'], 'string')
+  assert.equal(metadata['x-codex-parent-thread-id'], 'agent-7')
+  assert.equal(typeof metadata.session_id, 'string')
+  assert.equal(typeof metadata.thread_id, 'string')
+  const headers = new Headers(calls[0]?.init?.headers)
+  assert.equal(headers.get('session-id'), metadata.session_id)
+  assert.equal(headers.get('thread-id'), metadata.thread_id)
+  assert.equal(headers.get('x-client-request-id'), metadata.thread_id)
+  assert.equal(headers.get('x-openai-subagent'), 'guardian')
+  assert.equal(headers.get('x-codex-window-id'), metadata['x-codex-window-id'])
+  assert.equal(headers.get('x-codex-parent-thread-id'), 'agent-7')
+  assert.deepEqual((body.text as { format: unknown }).format, {
+    type: 'json_schema',
+    strict: false,
+    name: 'codex_output_schema',
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        risk_level: { type: 'string', enum: ['low', 'medium', 'high', 'critical'] },
+        user_authorization: { type: 'string', enum: ['unknown', 'low', 'medium', 'high'] },
+        outcome: { type: 'string', enum: ['allow', 'deny'] },
+        rationale: { type: 'string' },
+      },
+      required: ['outcome'],
+    },
+  })
+  assert.match(String(body.instructions), /# Evidence Handling/)
+  assert.match(String(body.instructions), /# Environment Profile/)
+  assert.match(String(body.instructions), /For low-risk actions, give the final answer directly/)
+  const serializedInput = JSON.stringify(body.input)
+  assert.match(serializedInput, /Fetch the latest upstream changes/)
+  assert.match(serializedInput, /I will fetch upstream/)
+  assert.match(serializedInput, /git fetch upstream/)
+})
+
+test('Codex approval reviewer reuses its session and sends only transcript delta after the first review', async () => {
+  const bodies: Record<string, unknown>[] = []
+  const sessionHeaders: string[] = []
+  const threadHeaders: string[] = []
+  const reviewFetchFn = ((_url: unknown, init?: RequestInit) => {
+    bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+    sessionHeaders.push(new Headers(init?.headers).get('session-id') ?? '')
+    threadHeaders.push(new Headers(init?.headers).get('thread-id') ?? '')
+    return Promise.resolve(codexGuardianResponse('allow', 'Scoped.'))
+  }) as FetchFn
+  const adapter = codexAdapter({ session: codexSession, discovery: false, reviewFetchFn })
+  const events: ApprovalReviewSessionEvent[] = [reviewUserEvent(0, 'Initial request.')]
+  const nodes = [0]
+  const agent = approvalReviewAgent({ id: 'agent-delta', events, nodes })
+  const request = (callId: string): ApprovalReviewRequest => ({
+    agent,
+    action: { name: 'bash', callId: ToolCallId(callId), arguments: { command: `command-${callId}` } },
+    signal: new AbortController().signal,
+  })
+
+  await adapter.reviewApproval(request('one'))
+  events.push(reviewUserEvent(1, 'New authorization.'))
+  nodes.push(1)
+  await adapter.reviewApproval(request('two'))
+
+  assert.equal(bodies.length, 2)
+  assert.equal(bodies[0]?.prompt_cache_key, bodies[1]?.prompt_cache_key)
+  assert.equal(sessionHeaders[0], sessionHeaders[1])
+  assert.equal(threadHeaders[0], threadHeaders[1])
+  const secondInput = bodies[1]?.input as Record<string, unknown>[]
+  const latest = JSON.stringify(secondInput.at(-1))
+  assert.match(latest, /New authorization/)
+  assert.doesNotMatch(latest, /Initial request/)
+  assert.match(latest, /command-two/)
+  assert.ok(secondInput.length > (bodies[0]?.input as unknown[]).length)
+})
+
+test('Codex approval reviewer interrupts a turn after three consecutive denials', async () => {
+  const cancellations: ApprovalReviewCancellation[] = []
+  const adapter = codexAdapter({
+    session: codexSession,
+    discovery: false,
+    reviewFetchFn: (() => Promise.resolve(codexGuardianResponse('deny', 'Unsafe.'))) as FetchFn,
+  })
+  const agent = approvalReviewAgent({
+    id: 'agent-denials',
+    cancel: cause => { cancellations.push(cause) },
+    events: [reviewTurnStartEvent(4)],
+  })
+
+  for (let index = 0; index < 3; index += 1) {
+    const decision = await adapter.reviewApproval({
+      agent,
+      action: { name: 'bash', callId: ToolCallId(`denied-${index}`), arguments: { command: 'unsafe' } },
+      signal: new AbortController().signal,
+    })
+    assert.equal(decision?.decision, 'deny')
+  }
+  await new Promise(resolve => setTimeout(resolve, 0))
+
+  assert.deepEqual(cancellations, [{
+    kind: 'hook',
+    reason: 'Automatic approval review rejected too many requests in this turn.',
+  }])
+})
+
+test('a Codex approval resets the consecutive-denial circuit breaker', async () => {
+  const outcomes: Array<'allow' | 'deny'> = ['deny', 'deny', 'allow', 'deny']
+  const cancellations: ApprovalReviewCancellation[] = []
+  const adapter = codexAdapter({
+    session: codexSession,
+    discovery: false,
+    reviewFetchFn: (() => Promise.resolve(codexGuardianResponse(outcomes.shift() ?? 'deny', 'Reviewed.'))) as FetchFn,
+  })
+  const agent = approvalReviewAgent({
+    id: 'agent-reset',
+    cancel: cause => { cancellations.push(cause) },
+    events: [reviewTurnStartEvent(9)],
+  })
+
+  for (let index = 0; index < 4; index += 1) {
+    await adapter.reviewApproval({
+      agent,
+      action: { name: 'bash', callId: ToolCallId(`review-${index}`), arguments: { command: 'command' } },
+      signal: new AbortController().signal,
+    })
+  }
+
+  assert.deepEqual(cancellations, [])
+})
 
 const CODEX_MODELS_PAYLOAD = {
   models: [

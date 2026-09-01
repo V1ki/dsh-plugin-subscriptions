@@ -1,0 +1,67 @@
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import {
+  createAutoReviewLoader,
+  createAutoReviewSetter,
+  type AutoReviewRpc,
+} from '../src/client/AutoReviewSelect.js'
+import { en } from '../src/client/locales.js'
+
+interface ActivityFormatterModule {
+  formatAutoReviewActivity(provider: string, outcome?: string): string
+}
+
+function hasActivityFormatter(value: unknown): value is ActivityFormatterModule {
+  return typeof value === 'object' && value !== null
+    && 'formatAutoReviewActivity' in value
+    && typeof value.formatAutoReviewActivity === 'function'
+}
+
+test('auto-review composer control uses the explicit Auto-Review label', () => {
+  assert.equal(en.autoReview, 'Auto-Review')
+})
+
+test('auto-review chat activity names the provider and visible review result', async () => {
+  const moduleUrl = new URL('../src/client/AutoReviewActivity.js', import.meta.url)
+  const loaded: unknown = await import(moduleUrl.href).catch(() => undefined)
+
+  assert.equal(hasActivityFormatter(loaded), true)
+  if (!hasActivityFormatter(loaded)) return
+  assert.equal(loaded.formatAutoReviewActivity('Codex'), 'Auto-Review · Codex · Reviewing...')
+  assert.equal(loaded.formatAutoReviewActivity('Codex', 'allowed-once'), 'Auto-Review · Codex · Allowed')
+  assert.equal(loaded.formatAutoReviewActivity('Codex', 'rejected'), 'Auto-Review · Codex · Denied')
+  assert.equal(loaded.formatAutoReviewActivity('Codex', 'unavailable'), 'Auto-Review · Codex · Manual approval')
+})
+
+test('auto-review composer callbacks bind reads and writes to one session', async () => {
+  const calls: Array<{ channel: string; endpoint: string; payload: unknown }> = []
+  const rpc: AutoReviewRpc = {
+    async call(channel: string, endpoint: string, payload: unknown) {
+      calls.push({ channel, endpoint, payload })
+      return endpoint === 'autoReview'
+        ? { ok: true, value: { reviewer: 'none' } }
+        : { ok: true, value: { ok: true } }
+    },
+  }
+
+  assert.deepEqual(await createAutoReviewLoader(rpc, 'session-7')(), { reviewer: 'none' })
+  assert.equal(await createAutoReviewSetter(rpc, 'session-7')('codex'), true)
+  assert.deepEqual(calls, [
+    { channel: '/subscriptions-auth', endpoint: 'autoReview', payload: { sessionId: 'session-7' } },
+    {
+      channel: '/subscriptions-auth',
+      endpoint: 'setAutoReview',
+      payload: { sessionId: 'session-7', reviewer: 'codex' },
+    },
+  ])
+})
+
+test('auto-review composer setter reports RPC failures without changing state itself', async () => {
+  const rpc: AutoReviewRpc = {
+    async call() {
+      return { ok: false, error: { code: 'internal', message: 'offline', details: {} } }
+    },
+  }
+
+  assert.equal(await createAutoReviewSetter(rpc, 'session-8')('none'), false)
+})

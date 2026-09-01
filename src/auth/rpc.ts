@@ -54,6 +54,20 @@ export interface SpeedController {
   setSpeed(sessionId: string, tier: SpeedTier): Promise<void>
 }
 
+/** Per-session automatic reviewer choice exposed by the plugin composition. */
+export type AutoReviewMode = 'none' | 'codex'
+
+/** `autoReview` endpoint value for one session. */
+export interface AutoReviewState {
+  reviewer: AutoReviewMode
+}
+
+/** Per-session automatic-review state behind the composer selector. */
+export interface AutoReviewController {
+  autoReview(sessionId: string): Promise<AutoReviewState>
+  setAutoReview(sessionId: string, reviewer: AutoReviewMode): Promise<void>
+}
+
 /** One logged-in account, as rendered by the Settings page. */
 export interface AccountStatus {
   /** Stable account key (store identity). */
@@ -259,6 +273,15 @@ function readSpeedTier(payload: unknown): SpeedTier {
   return tier
 }
 
+/** Validate the `setAutoReview` endpoint's reviewer. */
+function readAutoReviewMode(payload: unknown): AutoReviewMode {
+  const reviewer = (payload as Record<string, unknown>).reviewer
+  if (reviewer !== 'none' && reviewer !== 'codex') {
+    throw new BadRequest('payload.reviewer must be "none" or "codex"')
+  }
+  return reviewer
+}
+
 /** Validate the `image` endpoint's payload into a full attachment reference. */
 function readImageRef(payload: unknown): ImageAttachmentRef {
   if (typeof payload !== 'object' || payload === null) throw new BadRequest('payload must be an object')
@@ -403,6 +426,7 @@ async function dispatch(
   speed: SpeedController,
   proxy: ProxyConfigController | undefined,
   modelDefaults: ModelDefaultsController | undefined,
+  autoReview: AutoReviewController | undefined,
   endpoint: string,
   payload: unknown,
   signal: AbortSignal,
@@ -449,6 +473,13 @@ async function dispatch(
     case 'setSpeed':
       await speed.setSpeed(readSessionId(payload), readSpeedTier(payload))
       return ok({ ok: true })
+    case 'autoReview':
+      if (autoReview === undefined) throw new BadRequest('auto review is unavailable')
+      return ok(await autoReview.autoReview(readSessionId(payload)))
+    case 'setAutoReview':
+      if (autoReview === undefined) throw new BadRequest('auto review is unavailable')
+      await autoReview.setAutoReview(readSessionId(payload), readAutoReviewMode(payload))
+      return ok({ ok: true })
     case 'proxyGet':
       if (proxy === undefined) throw new BadRequest('proxy configuration is unavailable')
       return ok(await proxy.get())
@@ -487,6 +518,7 @@ export function registerAuthRpc(
   speed: SpeedController,
   proxy: ProxyConfigController | undefined = undefined,
   modelDefaults: ModelDefaultsController | undefined = undefined,
+  autoReview: AutoReviewController | undefined = undefined,
 ): void {
   // `connection` is not in this plugin's inject list (headless compositions
   // lack it), so its startup order is unconstrained: defer registration until
@@ -498,7 +530,7 @@ export function registerAuthRpc(
         SUBSCRIPTIONS_AUTH_CHANNEL,
         async (endpoint, payload, signal) => {
           try {
-            return await dispatch(controller, speed, proxy, modelDefaults, endpoint, payload, signal)
+            return await dispatch(controller, speed, proxy, modelDefaults, autoReview, endpoint, payload, signal)
           } catch (error) {
             return failure(error)
           }

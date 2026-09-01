@@ -24,7 +24,7 @@ interface FakeStore {
 }
 
 /** Mount the plugin with fake llm/connection (and optional attachments); return the RPC handler. */
-async function mount(attachments?: FakeStore): Promise<ConnectionRpcHandler> {
+async function mount(attachments?: FakeStore, autoReview?: 'none' | 'codex'): Promise<ConnectionRpcHandler> {
   let handler: ConnectionRpcHandler | undefined
   const ctx = new Context()
   ctx.provide('llm', { registerAdapter: () => Object.assign(() => {}, { replace: () => {} }) })
@@ -37,7 +37,7 @@ async function mount(attachments?: FakeStore): Promise<ConnectionRpcHandler> {
     },
   })
   if (attachments !== undefined) ctx.provide('attachments', attachments)
-  ctx.plugin(plugin, { providers: ['codex'] })
+  ctx.plugin(plugin, { providers: ['codex'], ...autoReview === undefined ? {} : { autoReview } })
   await new Promise(resolve => setTimeout(resolve, 50))
   assert.ok(handler !== undefined, 'the /subscriptions-auth channel was registered')
   return handler
@@ -178,4 +178,62 @@ test('speed endpoints: per-session tier round trip and payload validation', asyn
       assert.match(result.error.message, pattern)
     }
   }
+})
+
+test('auto-review endpoints: per-session reviewer round trip and payload validation', async () => {
+  const handler = await mount()
+  const signal = new AbortController().signal
+  assert.deepEqual(await handler('autoReview', { sessionId: 's1' }, signal), {
+    ok: true,
+    value: { reviewer: 'none' },
+  })
+  assert.deepEqual(await handler('setAutoReview', { sessionId: 's1', reviewer: 'codex' }, signal), {
+    ok: true,
+    value: { ok: true },
+  })
+  assert.deepEqual(await handler('autoReview', { sessionId: 's1' }, signal), {
+    ok: true,
+    value: { reviewer: 'codex' },
+  })
+  assert.deepEqual(await handler('autoReview', { sessionId: 's2' }, signal), {
+    ok: true,
+    value: { reviewer: 'none' },
+  })
+  await handler('setAutoReview', { sessionId: 's1', reviewer: 'none' }, signal)
+  assert.deepEqual(await handler('autoReview', { sessionId: 's1' }, signal), {
+    ok: true,
+    value: { reviewer: 'none' },
+  })
+
+  const bad = [
+    ['autoReview', {}, /sessionId/],
+    ['setAutoReview', { sessionId: 's1' }, /reviewer/],
+    ['setAutoReview', { sessionId: 's1', reviewer: 'claude' }, /reviewer/],
+  ] as const
+  for (const [endpoint, payload, pattern] of bad) {
+    const result = await handler(endpoint, payload, signal)
+    assert.equal(result.ok, false, JSON.stringify(payload))
+    if (!result.ok) {
+      assert.equal(result.error.code, 'bad-request')
+      assert.match(result.error.message, pattern)
+    }
+  }
+})
+
+test('auto-review session choice overrides the configured default without affecting other sessions', async () => {
+  const handler = await mount(undefined, 'codex')
+  const signal = new AbortController().signal
+  assert.deepEqual(await handler('autoReview', { sessionId: 's1' }, signal), {
+    ok: true,
+    value: { reviewer: 'codex' },
+  })
+  await handler('setAutoReview', { sessionId: 's1', reviewer: 'none' }, signal)
+  assert.deepEqual(await handler('autoReview', { sessionId: 's1' }, signal), {
+    ok: true,
+    value: { reviewer: 'none' },
+  })
+  assert.deepEqual(await handler('autoReview', { sessionId: 's2' }, signal), {
+    ok: true,
+    value: { reviewer: 'codex' },
+  })
 })

@@ -22,6 +22,8 @@
 
 ![速度开关及其标准/快速菜单](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
 
+原生沙箱提权提示也可以使用同一输入框工具行里的 **Auto-Review**。它默认关闭(`None`);选择 `Codex` 后,只有已经进入 DSH 原生审批服务的操作才会使用 Codex Guardian 策略和 `codex-auto-review` 模型进行审核。对话中会先显示 `Auto-Review · Codex · Reviewing...`,再更新为审核结果。审核不可用、结论不确定或失败时,仍会回退到正常的人工审批提示。
+
 `image_generate` 工具生成的图片直接内联显示在对话里:
 
 ![image_generate 内联显示生成的图片](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/image-generate-inline.png)
@@ -128,6 +130,7 @@ GitHub 安装的:重新执行一遍 `add github:V1ki/dsh-plugin-subscriptions` �
   name: dsh-plugin-subscriptions
   config:
     providers: [codex, claude]        # 子集;默认四个全启用
+    autoReview: none                  # none(默认)或 codex;会话可在输入框中单独覆盖
     streamIdleTimeoutMs: 300000
     rateLimit:
       wait: true                       # 等待限流窗口重开(默认开启)

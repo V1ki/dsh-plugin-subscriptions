@@ -30,6 +30,9 @@ import { VideoGenerateToolview, createVideoLoader } from './VideoGenerateToolvie
 import type { VideoGenerateToolviewInjected } from './VideoGenerateToolview.js'
 import { SpeedSelect, createSpeedLoader, createSpeedSetter } from './SpeedSelect.js'
 import type { ModelDirectoriesLike, SpeedSelectInjected } from './SpeedSelect.js'
+import { AutoReviewSelect, createAutoReviewLoader, createAutoReviewSetter } from './AutoReviewSelect.js'
+import type { AutoReviewSelectInjected } from './AutoReviewSelect.js'
+import { registerAutoReviewActivity } from './AutoReviewActivity.js'
 import { en, zh } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
 
@@ -37,6 +40,13 @@ export type { SubscriptionsSectionInjected, SubscriptionsSectionProps } from './
 export type { ImageGenerateToolviewInjected, ImageGenerateToolviewProps } from './ImageGenerateToolview.js'
 export type { VideoGenerateToolviewInjected, VideoGenerateToolviewProps } from './VideoGenerateToolview.js'
 export type { SpeedSelectInjected, SpeedSelectProps, SpeedState, SpeedTier } from './SpeedSelect.js'
+export type {
+  AutoReviewMode,
+  AutoReviewRpc,
+  AutoReviewSelectInjected,
+  AutoReviewSelectProps,
+  AutoReviewState,
+} from './AutoReviewSelect.js'
 export type { SubscriptionsKey } from './locales.js'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -63,6 +73,7 @@ export const inject = ['slots', 'connection', 'locale']
  * @param ctx - client root context.
  */
 export function apply(ctx: ClientContext): void {
+  registerAutoReviewActivity(ctx)
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-plugin-subscriptions: copy dictionaries')
   // Settings-shell nudge: the panel (nav title + header row + section body)
   // sits flush against the panel's top edge; push it down a little to leave
@@ -127,6 +138,19 @@ export function apply(ctx: ClientContext): void {
       setSpeed: createSpeedSetter(connection, sessionId),
     }),
   }, SpeedSelect))
+
+  // Per-session automatic reviewer selector. The node half supplies the
+  // configured default; changing this control overrides only this session.
+  ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
+    name: 'conversation.input.right',
+    id: 'auto-review',
+    order: 1,
+    locale: NS,
+    inject: (sessionId: string): AutoReviewSelectInjected => ({
+      loadAutoReview: createAutoReviewLoader(connection.rpc, sessionId),
+      setAutoReview: createAutoReviewSetter(connection.rpc, sessionId),
+    }),
+  }, AutoReviewSelect))
 
   // The /fast slash command offers the same Standard/Fast choice as a popup.
   // `available` is synchronous and sees only the session id, so the command

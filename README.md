@@ -22,6 +22,8 @@ Codex models whose catalog advertises the fast tier (the codex CLI's fast mode) 
 
 ![Speed toggle with the Standard/Fast menu open](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
 
+Native sandbox escalation prompts can optionally use **Auto-Review** in that same composer row. It is off by default (`None`); selecting `Codex` reviews only actions that have already reached DSH's native approval service, using Codex's Guardian policy and `codex-auto-review` model. The Chat shows `Auto-Review · Codex · Reviewing...` followed by the result. An unavailable, inconclusive, or failed review falls through to the normal manual approval prompt.
+
 The `image_generate` tool renders its result inline in the conversation:
 
 ![image_generate renders the image inline](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/image-generate-inline.png)
@@ -128,6 +130,7 @@ Pick a level to make the session model picker preselect it whenever you switch t
   name: dsh-plugin-subscriptions
   config:
     providers: [codex, claude]        # subset; default all four
+    autoReview: none                  # none (default) or codex; sessions can override this in the composer
     streamIdleTimeoutMs: 300000
     rateLimit:
       wait: true                       # wait out a closed rate-limit window (default)

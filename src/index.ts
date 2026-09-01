@@ -27,6 +27,8 @@ import { readClaudeCodeCredentials, refreshClaudeSynced } from './auth/claude-co
 import { BadRequest, registerAuthRpc } from './auth/rpc.js'
 import type {
   AuthController,
+  AutoReviewController,
+  AutoReviewMode,
   ImageBytesResult,
   LoginMethod,
   ModelDefaultsCatalog,
@@ -110,6 +112,11 @@ import { createXSearchTool } from './tools/x-search.js'
 import { createImageGenerateTool } from './tools/image-generate.js'
 import { createVideoGenerateTool, videosDirectory } from './tools/video-generate.js'
 import { proxiedFetch, proxyGetConfig, proxySetConfig, proxyTestConnection } from './http.js'
+import {
+  ApprovalReviewRouter,
+  installAutoReview,
+  type ApprovalReviewer,
+} from './auto-review.js'
 
 export type { ModelEntry, ProviderUsage, UsageWindow } from './providers/common.js'
 export type { RateLimitConfig, RateLimitWait } from './providers/rate-limit.js'
@@ -130,6 +137,8 @@ export { withTimeout } from './providers/common.js'
 export interface Config {
   /** Provider routes to register; defaults to all four. */
   providers?: ProviderId[]
+  /** Reviewer for sandbox-boundary escalation requests; `none` keeps manual approvals only. */
+  autoReview?: AutoReviewMode
   /** Maximum provider idle time while one stream read is outstanding (default five minutes). */
   streamIdleTimeoutMs?: number
   /** Whether and how long a route waits out a closed rate-limit window. */
@@ -178,6 +187,12 @@ const poolMemberSchema: z<PoolMemberRef> = z.object({
 
 export const Config: z<Config> = z.object({
   providers: z.array(providerIdSchema).default(['codex', 'claude', 'grok', 'copilot']),
+  autoReview: z.union([
+    z.const('none').description('None'),
+    z.const('codex').description('Codex'),
+  ])
+    .default('none')
+    .description('Automatic reviewer for sandbox escalation requests. None uses manual approvals only.'),
   streamIdleTimeoutMs: z.number().min(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   rateLimit: z.object({
     wait: z.boolean().default(true),
@@ -582,6 +597,9 @@ export function apply(ctx: Context, config: Config): void {
   const handles = new Map<string, AdapterRegistrationHandle>()
   // The constructed adapters, for the pool route to fail over between.
   const adapters = new Map<ProviderId, AccountAwareAdapter>()
+  // Provider-owned approval reviewers. Adding another implementation means
+  // registering it here; the approval hook and router remain unchanged.
+  const approvalReviewers: ApprovalReviewer[] = []
   // Per-provider account token managers; also the pool's account lists.
   const accountTokens = new Map<ProviderId, AccountTokenManager<StoredSession>>()
   // Pool state, assigned when the pool route registers below; read here so an
@@ -619,6 +637,7 @@ export function apply(ctx: Context, config: Config): void {
   // restores standard routing), gated per request on the model's discovered
   // fast-tier support so a stale choice cannot leak onto a plain model.
   const speedBySession = new Map<string, SpeedTier>()
+  const autoReviewBySession = new Map<string, AutoReviewMode>()
   let codexAdapter: CodexAdapter | undefined
   // Dropped on every copilot auth transition so replay state (captured
   // reasoning) never survives an account switch in memory.
@@ -660,6 +679,7 @@ export function apply(ctx: Context, config: Config): void {
             && adapter.supportsFastTier(model),
         })
         codexAdapter = adapter
+        approvalReviewers.push(adapter)
         adapters.set('codex', adapter)
         handles.set('codex', ctx.llm.registerAdapter(['codex'], adapter))
         break
@@ -861,6 +881,16 @@ export function apply(ctx: Context, config: Config): void {
       else speedBySession.set(sessionId, tier)
     },
   }
+  const defaultAutoReview = config.autoReview ?? 'none'
+  const autoReview: AutoReviewController = {
+    async autoReview(sessionId) {
+      return { reviewer: autoReviewBySession.get(sessionId) ?? defaultAutoReview }
+    },
+    async setAutoReview(sessionId, reviewer) {
+      if (reviewer === defaultAutoReview) autoReviewBySession.delete(sessionId)
+      else autoReviewBySession.set(sessionId, reviewer)
+    },
+  }
   // Per-model default effort overrides (the Settings page's model pickers).
   // The catalog re-reads the live model info per model — same source as the
   // session model picker, so the offered effort levels match the picker
@@ -944,7 +974,7 @@ export function apply(ctx: Context, config: Config): void {
     get: () => proxyGetConfig(),
     set: input => proxySetConfig(input),
     test: payload => proxyTestConnection(payload.url, payload.proxy),
-  }, modelDefaults)
+  }, modelDefaults, autoReview)
 
   // Proactively keep keychain-bound Claude accounts synced with Claude Code's
   // own store (Keychain/file) every 5 minutes, so a session left idle between
@@ -968,9 +998,17 @@ export function apply(ctx: Context, config: Config): void {
 
   // `tools` is optional (headless/minimal compositions may not mount it), so
   // registration waits for the service instead of injecting it at load.
+  // The auto-review hooks stay installed even when the configured default is
+  // None: capture is model-free, and the router runs only if the native
+  // approval service actually asks for a decision.
   // x_search and video_generate follow the grok provider; image_generate
   // prefers the codex provider and falls back to grok.
   ctx.inject(['tools'], (toolsCtx) => {
+    const reviewRouter = new ApprovalReviewRouter(approvalReviewers, (agent) => {
+      const selected = autoReviewBySession.get(agent.id) ?? defaultAutoReview
+      return selected === 'none' ? undefined : selected
+    })
+    installAutoReview(toolsCtx, reviewRouter)
     if (grokTokens !== undefined) {
       toolsCtx.tools.register(createXSearchTool({ tokens: grokTokens }))
       toolsCtx.tools.register(createVideoGenerateTool({ tokens: grokTokens }))
