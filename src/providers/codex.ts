@@ -71,7 +71,7 @@ import type {
   ApprovalReviewAgent,
   ApprovalReviewRequest,
   ApprovalReviewer,
-  AutoReviewDecision,
+  ApprovalReviewDecision,
 } from '../auto-review.js'
 
 export const CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
@@ -719,7 +719,7 @@ interface ParsedCodexReview {
   readonly raw: string
 }
 
-type CodexApprovalDecision = AutoReviewDecision & { readonly decision: 'allow' | 'deny' }
+type CodexApprovalDecision = ApprovalReviewDecision & { readonly decision: 'allow' | 'deny' }
 
 class RetryableCodexReviewError extends Error {}
 
@@ -1204,7 +1204,7 @@ export class CodexAdapter extends LlmAdapter implements ApprovalReviewer {
    * agent are serialized so the reusable transcript cursor and cached reviewer
    * conversation cannot race.
    */
-  reviewApproval(request: ApprovalReviewRequest): Promise<AutoReviewDecision | undefined> {
+  reviewApproval(request: ApprovalReviewRequest): Promise<ApprovalReviewDecision | undefined> {
     let state = this.approvalReviewSessions.get(request.agent)
     if (state === undefined) {
       const identity = request.agent.id
@@ -1231,7 +1231,7 @@ export class CodexAdapter extends LlmAdapter implements ApprovalReviewer {
   private async runApprovalReview(
     request: ApprovalReviewRequest,
     state: CodexApprovalReviewSession,
-  ): Promise<AutoReviewDecision | undefined> {
+  ): Promise<ApprovalReviewDecision | undefined> {
     const signal = AbortSignal.any([request.signal, AbortSignal.timeout(CODEX_REVIEW_TIMEOUT_MS)])
     const { prompt, nodes } = codexReviewPrompt(request, state)
     const userMessage = createUserMessage({

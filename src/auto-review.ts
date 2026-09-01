@@ -4,6 +4,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { PreToolDecision, ToolExecution } from '@deepseek-ai/dsh-tools'
 import { ApprovalRequestId } from '@deepseek-ai/dsh-user-approval'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
+import type { ProviderId } from './auth/store.js'
 
 type DshToolAgent = NonNullable<ToolExecution['agent']>
 
@@ -68,26 +69,33 @@ export interface ApprovalReviewRequest {
 }
 
 /** Closed review result. `ask` delegates the same request to the native human reviewer. */
-export interface AutoReviewDecision {
+export interface ApprovalReviewDecision {
   readonly decision: 'allow' | 'deny' | 'ask'
   readonly reason: string
 }
 
-/** One provider-owned automatic reviewer implementation. */
+/**
+ * One provider-owned automatic reviewer implementation.
+ *
+ * The provider owns classifier policy, transcript projection, transport,
+ * retries, and provider-specific failure semantics. The shared gate only
+ * routes a real DSH approval request and preserves manual approval as its
+ * fallback.
+ */
 export interface ApprovalReviewer {
-  readonly reviewerId: string
-  /** User-facing provider name for review activity; ids are title-cased when omitted. */
-  readonly reviewerLabel?: string
-  reviewApproval(request: ApprovalReviewRequest): Promise<AutoReviewDecision | undefined>
+  readonly reviewerId: ProviderId
+  /** User-facing provider name used by the selector and review activity. */
+  readonly reviewerLabel: string
+  reviewApproval(request: ApprovalReviewRequest): Promise<ApprovalReviewDecision | undefined>
 }
 
 /** Routes one real approval request to the reviewer selected for that session. */
 export class ApprovalReviewRouter {
-  private readonly reviewers = new Map<string, ApprovalReviewer>()
+  private readonly reviewers = new Map<ProviderId, ApprovalReviewer>()
 
   constructor(
     reviewers: Iterable<ApprovalReviewer>,
-    private readonly reviewerFor: (agent: ApprovalReviewAgent) => string | undefined,
+    private readonly reviewerFor: (agent: ApprovalReviewAgent) => ProviderId | undefined,
   ) {
     for (const reviewer of reviewers) {
       if (this.reviewers.has(reviewer.reviewerId)) {
@@ -99,23 +107,15 @@ export class ApprovalReviewRouter {
 
   async review(
     request: ApprovalReviewRequest,
-    onRouted?: (reviewerId: string, reviewerLabel: string) => void,
-  ): Promise<AutoReviewDecision | undefined> {
+    onRouted?: (reviewerId: ProviderId, reviewerLabel: string) => void,
+  ): Promise<ApprovalReviewDecision | undefined> {
     const reviewerId = this.reviewerFor(request.agent)
     if (reviewerId === undefined) return undefined
     const reviewer = this.reviewers.get(reviewerId)
     if (reviewer === undefined) return undefined
-    onRouted?.(reviewerId, reviewer.reviewerLabel ?? reviewerDisplayName(reviewerId))
+    onRouted?.(reviewerId, reviewer.reviewerLabel)
     return reviewer.reviewApproval(request)
   }
-}
-
-function reviewerDisplayName(reviewerId: string): string {
-  return reviewerId
-    .split(/[-_]/u)
-    .filter(Boolean)
-    .map(part => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
-    .join(' ')
 }
 
 export type GatePreToolDecision = PreToolDecision
@@ -173,7 +173,7 @@ export class AutoReviewGate {
 
     const signal = request.signal ?? action.signal
     let reviewId: ReturnType<typeof ApprovalRequestId> | undefined
-    let decision: AutoReviewDecision | undefined
+    let decision: ApprovalReviewDecision | undefined
     try {
       decision = await this.router.review({
         agent: request.agent,

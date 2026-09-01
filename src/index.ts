@@ -134,11 +134,13 @@ export const POOL_USAGE_TIMEOUT_MS = DISCOVERY_TIMEOUT_MS
 export { withTimeout } from './providers/common.js'
 
 /** Plugin config, validated by the same-named schemastery schema. */
+type ConfiguredAutoReviewMode = 'none' | 'codex'
+
 export interface Config {
   /** Provider routes to register; defaults to all four. */
   providers?: ProviderId[]
   /** Reviewer for sandbox-boundary escalation requests; `none` keeps manual approvals only. */
-  autoReview?: AutoReviewMode
+  autoReview?: ConfiguredAutoReviewMode
   /** Maximum provider idle time while one stream read is outstanding (default five minutes). */
   streamIdleTimeoutMs?: number
   /** Whether and how long a route waits out a closed rate-limit window. */
@@ -881,14 +883,30 @@ export function apply(ctx: Context, config: Config): void {
       else speedBySession.set(sessionId, tier)
     },
   }
-  const defaultAutoReview = config.autoReview ?? 'none'
+  const autoReviewOptions = approvalReviewers.map(reviewer => ({
+    reviewer: reviewer.reviewerId,
+    label: reviewer.reviewerLabel,
+  }))
+  const availableAutoReviewers = new Set(autoReviewOptions.map(option => option.reviewer))
+  const configuredAutoReview = config.autoReview ?? 'none'
+  const defaultAutoReview = configuredAutoReview === 'none' || availableAutoReviewers.has(configuredAutoReview)
+    ? configuredAutoReview
+    : 'none'
+  if (configuredAutoReview !== defaultAutoReview) {
+    onWarn(`automatic reviewer "${configuredAutoReview}" is unavailable; using manual approvals`)
+  }
   const autoReview: AutoReviewController = {
     async autoReview(sessionId) {
-      return { reviewer: autoReviewBySession.get(sessionId) ?? defaultAutoReview }
+      return {
+        reviewer: autoReviewBySession.get(sessionId) ?? defaultAutoReview,
+        reviewers: autoReviewOptions,
+      }
     },
     async setAutoReview(sessionId, reviewer) {
+      if (reviewer !== 'none' && !availableAutoReviewers.has(reviewer)) return false
       if (reviewer === defaultAutoReview) autoReviewBySession.delete(sessionId)
       else autoReviewBySession.set(sessionId, reviewer)
+      return true
     },
   }
   // Per-model default effort overrides (the Settings page's model pickers).

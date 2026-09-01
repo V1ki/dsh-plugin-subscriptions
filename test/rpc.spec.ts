@@ -44,6 +44,7 @@ async function mount(attachments?: FakeStore, autoReview?: 'none' | 'codex'): Pr
 }
 
 const REF = { attachmentId: 'att-1', mediaType: 'image/png', bytes: 2, width: 1, height: 1 }
+const CODEX_REVIEWERS = [{ reviewer: 'codex', label: 'Codex' }]
 
 async function call(
   handler: ConnectionRpcHandler,
@@ -185,7 +186,7 @@ test('auto-review endpoints: per-session reviewer round trip and payload validat
   const signal = new AbortController().signal
   assert.deepEqual(await handler('autoReview', { sessionId: 's1' }, signal), {
     ok: true,
-    value: { reviewer: 'none' },
+    value: { reviewer: 'none', reviewers: CODEX_REVIEWERS },
   })
   assert.deepEqual(await handler('setAutoReview', { sessionId: 's1', reviewer: 'codex' }, signal), {
     ok: true,
@@ -193,16 +194,16 @@ test('auto-review endpoints: per-session reviewer round trip and payload validat
   })
   assert.deepEqual(await handler('autoReview', { sessionId: 's1' }, signal), {
     ok: true,
-    value: { reviewer: 'codex' },
+    value: { reviewer: 'codex', reviewers: CODEX_REVIEWERS },
   })
   assert.deepEqual(await handler('autoReview', { sessionId: 's2' }, signal), {
     ok: true,
-    value: { reviewer: 'none' },
+    value: { reviewer: 'none', reviewers: CODEX_REVIEWERS },
   })
   await handler('setAutoReview', { sessionId: 's1', reviewer: 'none' }, signal)
   assert.deepEqual(await handler('autoReview', { sessionId: 's1' }, signal), {
     ok: true,
-    value: { reviewer: 'none' },
+    value: { reviewer: 'none', reviewers: CODEX_REVIEWERS },
   })
 
   const bad = [
@@ -225,15 +226,15 @@ test('auto-review session choice overrides the configured default without affect
   const signal = new AbortController().signal
   assert.deepEqual(await handler('autoReview', { sessionId: 's1' }, signal), {
     ok: true,
-    value: { reviewer: 'codex' },
+    value: { reviewer: 'codex', reviewers: CODEX_REVIEWERS },
   })
   await handler('setAutoReview', { sessionId: 's1', reviewer: 'none' }, signal)
   assert.deepEqual(await handler('autoReview', { sessionId: 's1' }, signal), {
     ok: true,
-    value: { reviewer: 'none' },
+    value: { reviewer: 'none', reviewers: CODEX_REVIEWERS },
   })
   assert.deepEqual(await handler('autoReview', { sessionId: 's2' }, signal), {
     ok: true,
-    value: { reviewer: 'codex' },
+    value: { reviewer: 'codex', reviewers: CODEX_REVIEWERS },
   })
 })

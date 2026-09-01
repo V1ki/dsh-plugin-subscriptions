@@ -74,10 +74,17 @@ function execution(agent: ApprovalReviewHostAgent, callId = 'call-1') {
 }
 
 function reviewer(
-  id: string,
+  id: ApprovalReviewer['reviewerId'],
   review: (request: ApprovalReviewRequest) => ReturnType<ApprovalReviewer['reviewApproval']>,
 ): ApprovalReviewer {
-  return { reviewerId: id, reviewApproval: review }
+  const reviewerLabel = id === 'codex'
+    ? 'Codex'
+    : id === 'claude'
+      ? 'Claude'
+      : id === 'grok'
+        ? 'Grok'
+        : 'GitHub Copilot'
+  return { reviewerId: id, reviewerLabel, reviewApproval: review }
 }
 
 test('the generic router selects the configured provider implementation', async () => {
@@ -88,11 +95,11 @@ test('the generic router selects the configured provider implementation', async 
       calls.push('codex')
       return { decision: 'allow', reason: 'Allowed by Codex.' }
     }),
-    reviewer('fixture', async () => {
-      calls.push('fixture')
-      return { decision: 'deny', reason: 'Denied by fixture.' }
+    reviewer('claude', async () => {
+      calls.push('claude')
+      return { decision: 'deny', reason: 'Denied by Claude.' }
     }),
-  ], candidate => candidate === agent ? 'fixture' : 'codex')
+  ], candidate => candidate === agent ? 'claude' : 'codex')
 
   const decision = await router.review({
     agent,
@@ -101,8 +108,8 @@ test('the generic router selects the configured provider implementation', async 
     signal: new AbortController().signal,
   })
 
-  assert.deepEqual(decision, { decision: 'deny', reason: 'Denied by fixture.' })
-  assert.deepEqual(calls, ['fixture'])
+  assert.deepEqual(decision, { decision: 'deny', reason: 'Denied by Claude.' })
+  assert.deepEqual(calls, ['claude'])
 })
 
 test('pre-execute only captures the action and provider review starts at the real approval request', async () => {

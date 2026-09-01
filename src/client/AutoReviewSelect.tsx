@@ -6,13 +6,21 @@ import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import { callSubscriptionsAuth } from './SubscriptionsSection.js'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
+import type { ProviderId } from '../auth/store.js'
 
 /** Automatic reviewer used for one session. None preserves native approvals. */
-export type AutoReviewMode = 'none' | 'codex'
+export type AutoReviewMode = 'none' | ProviderId
+
+/** One registered provider reviewer returned by the node RPC endpoint. */
+export interface AutoReviewOption {
+  readonly reviewer: ProviderId
+  readonly label: string
+}
 
 /** `autoReview` endpoint value, mirrored from the node half. */
 export interface AutoReviewState {
-  reviewer: AutoReviewMode
+  readonly reviewer: AutoReviewMode
+  readonly reviewers: readonly AutoReviewOption[]
 }
 
 /** Exact RPC capability used by this control, without the rest of ConnectionHandle. */
@@ -50,9 +58,7 @@ function fallbackTranslate(key: SubscriptionsKey): string {
   return en[key]
 }
 
-const REVIEWERS: readonly AutoReviewMode[] = ['none', 'codex']
-
-/** A compact None/Codex menu beside the existing Speed selector. */
+/** A compact provider-backed reviewer menu beside the existing Speed selector. */
 export function AutoReviewSelect({ loadAutoReview, setAutoReview, t }: AutoReviewSelectProps) {
   const translate = t ?? fallbackTranslate
   const [state, setState] = useState<AutoReviewState | null>(null)
@@ -84,11 +90,15 @@ export function AutoReviewSelect({ loadAutoReview, setAutoReview, t }: AutoRevie
 
   if (loadAutoReview === undefined || setAutoReview === undefined || state === null) return null
 
-  const reviewerName = (reviewer: AutoReviewMode): string =>
-    translate(reviewer === 'codex' ? 'autoReviewCodex' : 'autoReviewNone')
-  const reviewerDescription = (reviewer: AutoReviewMode): string =>
-    translate(reviewer === 'codex' ? 'autoReviewCodexDescription' : 'autoReviewNoneDescription')
+  const reviewers: readonly AutoReviewOption[] = state.reviewers
+  const reviewerName = (reviewer: AutoReviewMode): string => reviewer === 'none'
+    ? translate('autoReviewNone')
+    : reviewers.find(option => option.reviewer === reviewer)?.label ?? reviewer
+  const reviewerDescription = (reviewer: AutoReviewMode): string => reviewer === 'none'
+    ? translate('autoReviewNoneDescription')
+    : translate('autoReviewProviderDescription')
   const triggerLabel = `${translate('autoReview')} · ${reviewerName(state.reviewer)}`
+  const choices: readonly AutoReviewMode[] = ['none', ...reviewers.map(option => option.reviewer)]
 
   const choose = (reviewer: AutoReviewMode): void => {
     if (busy) return
@@ -100,7 +110,7 @@ export function AutoReviewSelect({ loadAutoReview, setAutoReview, t }: AutoRevie
     void setAutoReview(reviewer).then((ok) => {
       setBusy(false)
       if (ok) {
-        setState({ reviewer })
+        setState(current => current === null ? current : { ...current, reviewer })
         setOpen(false)
       }
     })
@@ -126,7 +136,7 @@ export function AutoReviewSelect({ loadAutoReview, setAutoReview, t }: AutoRevie
     >
       {open && (
         <div style={styles.menu} role="menu" aria-label={translate('autoReview')}>
-          {REVIEWERS.map(reviewer => (
+          {choices.map(reviewer => (
             <button
               key={reviewer}
               type="button"

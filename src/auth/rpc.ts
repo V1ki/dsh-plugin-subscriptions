@@ -55,17 +55,25 @@ export interface SpeedController {
 }
 
 /** Per-session automatic reviewer choice exposed by the plugin composition. */
-export type AutoReviewMode = 'none' | 'codex'
+export type AutoReviewMode = 'none' | ProviderId
+
+/** One provider implementation available to the automatic-review selector. */
+export interface AutoReviewOption {
+  readonly reviewer: ProviderId
+  readonly label: string
+}
 
 /** `autoReview` endpoint value for one session. */
 export interface AutoReviewState {
-  reviewer: AutoReviewMode
+  readonly reviewer: AutoReviewMode
+  readonly reviewers: readonly AutoReviewOption[]
 }
 
 /** Per-session automatic-review state behind the composer selector. */
 export interface AutoReviewController {
   autoReview(sessionId: string): Promise<AutoReviewState>
-  setAutoReview(sessionId: string, reviewer: AutoReviewMode): Promise<void>
+  /** Returns false when the requested provider has no registered reviewer. */
+  setAutoReview(sessionId: string, reviewer: AutoReviewMode): Promise<boolean>
 }
 
 /** One logged-in account, as rendered by the Settings page. */
@@ -276,10 +284,11 @@ function readSpeedTier(payload: unknown): SpeedTier {
 /** Validate the `setAutoReview` endpoint's reviewer. */
 function readAutoReviewMode(payload: unknown): AutoReviewMode {
   const reviewer = (payload as Record<string, unknown>).reviewer
-  if (reviewer !== 'none' && reviewer !== 'codex') {
-    throw new BadRequest('payload.reviewer must be "none" or "codex"')
+  if (reviewer !== 'none'
+    && (typeof reviewer !== 'string' || !(PROVIDER_IDS as readonly string[]).includes(reviewer))) {
+    throw new BadRequest(`payload.reviewer must be "none" or one of ${PROVIDER_IDS.join(', ')}`)
   }
-  return reviewer
+  return reviewer as AutoReviewMode
 }
 
 /** Validate the `image` endpoint's payload into a full attachment reference. */
@@ -478,7 +487,9 @@ async function dispatch(
       return ok(await autoReview.autoReview(readSessionId(payload)))
     case 'setAutoReview':
       if (autoReview === undefined) throw new BadRequest('auto review is unavailable')
-      await autoReview.setAutoReview(readSessionId(payload), readAutoReviewMode(payload))
+      if (!await autoReview.setAutoReview(readSessionId(payload), readAutoReviewMode(payload))) {
+        throw new BadRequest('payload.reviewer has no registered automatic reviewer')
+      }
       return ok({ ok: true })
     case 'proxyGet':
       if (proxy === undefined) throw new BadRequest('proxy configuration is unavailable')

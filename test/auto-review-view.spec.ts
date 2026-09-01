@@ -39,12 +39,15 @@ test('auto-review composer callbacks bind reads and writes to one session', asyn
     async call(channel: string, endpoint: string, payload: unknown) {
       calls.push({ channel, endpoint, payload })
       return endpoint === 'autoReview'
-        ? { ok: true, value: { reviewer: 'none' } }
+        ? { ok: true, value: { reviewer: 'none', reviewers: [{ reviewer: 'codex', label: 'Codex' }] } }
         : { ok: true, value: { ok: true } }
     },
   }
 
-  assert.deepEqual(await createAutoReviewLoader(rpc, 'session-7')(), { reviewer: 'none' })
+  assert.deepEqual(await createAutoReviewLoader(rpc, 'session-7')(), {
+    reviewer: 'none',
+    reviewers: [{ reviewer: 'codex', label: 'Codex' }],
+  })
   assert.equal(await createAutoReviewSetter(rpc, 'session-7')('codex'), true)
   assert.deepEqual(calls, [
     { channel: '/subscriptions-auth', endpoint: 'autoReview', payload: { sessionId: 'session-7' } },
