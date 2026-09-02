@@ -175,12 +175,15 @@ function sandboxRetryArguments(
   if (exec.name !== 'bash' || result.isError || !isRecord(exec.arguments) || !isRecord(result.value)) {
     return undefined
   }
-  if (exec.arguments.sandbox_permissions !== undefined || exec.arguments.justification !== undefined) {
-    return undefined
-  }
   if (result.value.kind !== 'foreground' || !isRecord(result.value.sandbox)) return undefined
   const sandbox = result.value.sandbox
   if (sandbox.denied !== true) return undefined
+  // A requested mode equal to the mode that actually ran is not a completed
+  // widening. DSH may tolerate that same-mode request as a no-op, and child
+  // models commonly emit it up front. A different requested mode is an
+  // inconsistent result, so leave it to the native flow rather than guess.
+  const requestedMode = exec.arguments.sandbox_permissions
+  if (requestedMode !== undefined && requestedMode !== sandbox.mode) return undefined
   const target = sandbox.mode === 'read-only'
     ? 'workspace-write'
     : sandbox.mode === 'workspace-write'

@@ -335,7 +335,7 @@ test('auto-review installer mounts capture and approval wrappers around a generi
   assert.equal(context.events._hooks['approval/request']?.[0]?.prepend, true)
 })
 
-test('a sandbox denial is retried inside the original Bash call when automatic review is active', async () => {
+test('a same-mode sandbox denial is retried inside the original Bash call', async () => {
   const context = new Context()
   const agent = fixtureAgent()
   const retries: Array<{ callId: unknown; rootCallId: unknown; name: string; arguments: unknown; parent: unknown }> = []
@@ -373,6 +373,8 @@ test('a sandbox denial is retried inside the original Bash call when automatic r
     arguments: {
       command: 'rm -rf /tmp/requested-smoke-test',
       description: 'Remove requested smoke test directory',
+      sandbox_permissions: 'workspace-write',
+      justification: 'Remove the requested directory outside the session workspace.',
     },
     rootCallId: callId,
     token,
