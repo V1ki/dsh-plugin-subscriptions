@@ -26,9 +26,10 @@ interface FakeStore {
 /** Mount the plugin with fake llm/connection (and optional attachments); return the RPC handler. */
 async function mount(
   attachments?: FakeStore,
-  autoReview?: 'none' | 'codex',
+  autoReview?: 'none' | 'codex' | 'grok',
   parentSessions: Readonly<Record<string, string>> = {},
   onMounted?: (ctx: Context) => void,
+  providers: Array<'codex' | 'grok'> = ['codex'],
 ): Promise<ConnectionRpcHandler> {
   let handler: ConnectionRpcHandler | undefined
   const ctx = new Context()
@@ -48,7 +49,7 @@ async function mount(
     }),
   })
   if (attachments !== undefined) ctx.provide('attachments', attachments)
-  ctx.plugin(plugin, { providers: ['codex'], ...autoReview === undefined ? {} : { autoReview } })
+  ctx.plugin(plugin, { providers, ...autoReview === undefined ? {} : { autoReview } })
   await new Promise(resolve => setTimeout(resolve, 50))
   assert.ok(handler !== undefined, 'the /subscriptions-auth channel was registered')
   onMounted?.(ctx)
@@ -368,6 +369,20 @@ test('a delegated subagent keeps approvals disabled when no automatic reviewer i
   assert.deepEqual(await handler('autoReview', { sessionId: 'child' }, new AbortController().signal), {
     ok: true,
     value: { reviewer: 'none', reviewers: CODEX_REVIEWERS },
+  })
+})
+
+test('a logged-out Grok default is omitted from Auto-Review RPC instead of looking like None', async () => {
+  rmSync(AUTO_REVIEW_SETTINGS_PATH, { force: true })
+  const handler = await mount(undefined, 'grok', {}, undefined, ['grok'])
+  const signal = new AbortController().signal
+  assert.deepEqual(await handler('autoReviewDefault', {}, signal), {
+    ok: true,
+    value: { reviewer: 'none', reviewers: [] },
+  })
+  assert.deepEqual(await handler('autoReview', { sessionId: 's1' }, signal), {
+    ok: true,
+    value: { reviewer: 'none', reviewers: [] },
   })
 })
 

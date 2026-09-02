@@ -13,13 +13,14 @@ import {
   type ApprovalReviewer,
 } from '../src/auto-review.js'
 
-test('auto-review is disabled by default and exposes the Codex reviewer choice', () => {
+test('auto-review is disabled by default and exposes the Codex and Grok reviewer choices', () => {
   const config = Config({})
 
   assert.equal(config.autoReview, 'none')
   assert.equal(Config({ autoReview: 'codex' }).autoReview, 'codex')
+  assert.equal(Config({ autoReview: 'grok' }).autoReview, 'grok')
   assert.throws(() => Config({ autoReview: 'claude' as 'codex' }), /expected/)
-  assert.deepEqual(Config.dict?.autoReview?.list?.map(option => option.meta.description), ['None', 'Codex'])
+  assert.deepEqual(Config.dict?.autoReview?.list?.map(option => option.meta.description), ['None', 'Codex', 'Grok'])
 })
 
 let agentSequence = 0
@@ -84,6 +85,7 @@ function execution(agent: ApprovalReviewHostAgent, callId = 'call-1') {
 function reviewer(
   id: ApprovalReviewer['reviewerId'],
   review: (request: ApprovalReviewRequest) => ReturnType<ApprovalReviewer['reviewApproval']>,
+  failClosed = false,
 ): ApprovalReviewer {
   const reviewerLabel = id === 'codex'
     ? 'Codex'
@@ -92,7 +94,12 @@ function reviewer(
       : id === 'grok'
         ? 'Grok'
         : 'GitHub Copilot'
-  return { reviewerId: id, reviewerLabel, reviewApproval: review }
+  return {
+    reviewerId: id,
+    reviewerLabel,
+    ...failClosed ? { failClosed: true } : {},
+    reviewApproval: review,
+  }
 }
 
 test('the generic router awaits a persisted reviewer selection', async () => {
@@ -321,6 +328,112 @@ test('an allowed tool can be reviewed if it asks for escalation during execute',
     toolName: 'bash',
   }, async () => 'rejected'), 'allowed-once')
   assert.equal(reviews, 1)
+})
+
+test('a fail-closed reviewer never falls through to a human prompt', async () => {
+  const events: ApprovalReviewSessionEvent[] = []
+  const agent = fixtureAgent(events)
+  let manual = 0
+  const gate = new AutoReviewGate(new ApprovalReviewRouter([
+    reviewer('grok', async () => { throw new Error('offline') }, true),
+  ], () => 'grok'))
+
+  await gate.preExecute(execution(agent, 'fail-closed'), async () => ({ kind: 'ask' }))
+  const outcome = await gate.answerApproval({
+    agent,
+    callId: toolCallId('fail-closed'),
+    toolName: 'bash',
+  }, async () => {
+    manual += 1
+    return 'allowed-once'
+  })
+
+  assert.equal(outcome, 'rejected')
+  assert.equal(manual, 0)
+  const audit = events.findLast(event => event.type === 'approval/decided')
+  assert.equal(audit?.data.outcome, 'unavailable')
+})
+
+test('a fail-closed reviewer does not fall through to a human when correlation is missing', async () => {
+  const agent = fixtureAgent()
+  let manual = 0
+  const gate = new AutoReviewGate(new ApprovalReviewRouter([
+    reviewer('grok', async () => ({ decision: 'allow', reason: 'should not run' }), true),
+  ], () => 'grok'))
+
+  await gate.preExecute(execution(agent, 'correlated'), async () => ({ kind: 'ask' }))
+  assert.equal(await gate.answerApproval({
+    agent,
+    toolName: 'bash',
+  }, async () => {
+    manual += 1
+    return 'allowed-once'
+  }), 'rejected')
+  assert.equal(await gate.answerApproval({
+    agent,
+    callId: toolCallId('other'),
+    toolName: 'bash',
+  }, async () => {
+    manual += 1
+    return 'allowed-once'
+  }), 'rejected')
+  assert.equal(await gate.answerApproval({
+    agent,
+    callId: toolCallId('correlated'),
+    toolName: 'write_file',
+  }, async () => {
+    manual += 1
+    return 'allowed-once'
+  }), 'rejected')
+  assert.equal(manual, 0)
+})
+
+test('a fail-closed reviewer does not fall through after the 64-call eviction window', async () => {
+  const agent = fixtureAgent()
+  let reviews = 0
+  let manual = 0
+  const gate = new AutoReviewGate(new ApprovalReviewRouter([
+    reviewer('grok', async () => {
+      reviews += 1
+      return { decision: 'allow', reason: 'Scoped.' }
+    }, true),
+  ], () => 'grok'))
+
+  await gate.preExecute(execution(agent, 'oldest'), async () => ({ kind: 'ask' }))
+  for (let index = 0; index < 64; index += 1) {
+    await gate.preExecute(execution(agent, `kept-${index}`), async () => ({ kind: 'ask' }))
+  }
+  assert.equal(await gate.answerApproval({
+    agent,
+    callId: toolCallId('oldest'),
+    toolName: 'bash',
+  }, async () => {
+    manual += 1
+    return 'allowed-once'
+  }), 'rejected')
+  assert.equal(reviews, 0)
+  assert.equal(manual, 0)
+})
+
+test('a fail-closed abort is cancelled rather than denied', async () => {
+  const events: ApprovalReviewSessionEvent[] = []
+  const agent = fixtureAgent(events)
+  const signal = AbortSignal.abort()
+  const gate = new AutoReviewGate(new ApprovalReviewRouter([
+    reviewer('grok', async () => { throw new Error('aborted') }, true),
+  ], () => 'grok'))
+
+  await gate.preExecute({ ...execution(agent, 'fail-closed-abort'), signal }, async () => ({ kind: 'ask' }))
+  const outcome = await gate.answerApproval({
+    agent,
+    callId: toolCallId('fail-closed-abort'),
+    toolName: 'bash',
+    signal,
+  }, async () => 'allowed-once')
+
+  assert.equal(outcome, 'cancelled')
+  const audit = events.findLast(event => event.type === 'approval/decided')
+  assert.equal(audit?.data.outcome, 'cancelled')
 })
 
 test('auto-review installer mounts capture and approval wrappers around a generic router', () => {

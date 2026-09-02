@@ -4,12 +4,25 @@
  * Responses-style endpoint.
  */
 
-import { attributionHeaders, EMPTY_RESPONSE_CODE, errorChain, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { createHash } from 'node:crypto'
+import {
+  attributionHeaders,
+  BlockAssembler,
+  createAssistantMessage,
+  createUserMessage,
+  EMPTY_RESPONSE_CODE,
+  errorChain,
+  LlmAdapter,
+  LlmError,
+  ReasoningEffortId,
+} from '@deepseek-ai/dsh-llm'
 import type {
+  ContentBlock,
   GenerateOptions,
   LlmModelInfo,
   LlmProviderInfo,
   LlmResolvedModelInfo,
+  Message,
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import { decodeJwtPayload } from '../auth/jwt.js'
@@ -51,10 +64,19 @@ import {
   subscriptionRetryPolicy,
 } from './rate-limit.js'
 import type { RateLimitResetReader, RateLimitWait } from './rate-limit.js'
+import { GROK_ESCALATION_POLICY } from './grok-auto-policy.js'
+import type {
+  ApprovalReviewAgent,
+  ApprovalReviewDecision,
+  ApprovalReviewRequest,
+  ApprovalReviewer,
+} from '../auto-review.js'
 
 export const GROK_CLIENT_ID = 'b1a00492-073a-47ea-816f-4c329264a828'
 export const GROK_DISCOVERY_URL = 'https://auth.x.ai/.well-known/openid-configuration'
 export const GROK_API_URL = 'https://api.x.ai/v1/responses'
+/** Cheap dedicated reviewer; never inherit the session model or effort. */
+export const GROK_AUTO_REVIEW_MODEL = 'grok-4-fast-reasoning'
 const GROK_SCOPE = 'openid profile email offline_access grok-cli:access api:access'
 const GROK_CALLBACK_PATH = '/callback'
 const GROK_CONTEXT_WINDOW = 256_000
@@ -583,6 +605,8 @@ export interface GrokAdapterOptions {
   onWarn?: (message: string) => void
   /** Fetch implementation for discovery (defaults to global fetch). */
   fetchFn?: FetchFn
+  /** Approval-review transport seam for deterministic provider tests. */
+  reviewFetchFn?: FetchFn
   /** Resolve the attachment service per request; absent means image requests fail loudly. */
   resolveAttachments?: () => AttachmentStore | undefined
   /** Durable catalog store seeding capability metadata across restarts. */
@@ -597,13 +621,386 @@ export interface GrokAdapterOptions {
   rateLimit?: RateLimitWait
 }
 
+const GROK_REVIEW_TIMEOUT_MS = 90_000
+const GROK_REVIEW_MAX_ATTEMPTS = 3
+const GROK_REVIEW_MAX_OUTPUT_TOKENS = 2_048
+const GROK_REVIEW_MAX_CONSECUTIVE_DENIALS = 3
+const GROK_REVIEW_RETRY_INITIAL_DELAY_MS = 250
+const GROK_REVIEW_HISTORY_MAX_MESSAGES = 16
+/**
+ * Mirror Codex Guardian budgets: one token is four UTF-8 bytes, 10k per
+ * transcript lane, 2k per user entry, 1k per tool entry, 16k for the action,
+ * 512 for the approval reason, and 40 recent tool rows.
+ */
+const GROK_REVIEW_APPROX_BYTES_PER_TOKEN = 4
+const GROK_REVIEW_MESSAGE_BUDGET_BYTES = 10_000 * GROK_REVIEW_APPROX_BYTES_PER_TOKEN
+const GROK_REVIEW_TOOL_BUDGET_BYTES = 10_000 * GROK_REVIEW_APPROX_BYTES_PER_TOKEN
+const GROK_REVIEW_MESSAGE_ENTRY_BYTES = 2_000 * GROK_REVIEW_APPROX_BYTES_PER_TOKEN
+const GROK_REVIEW_TOOL_ENTRY_BYTES = 1_000 * GROK_REVIEW_APPROX_BYTES_PER_TOKEN
+const GROK_REVIEW_ACTION_BYTES = 16_000 * GROK_REVIEW_APPROX_BYTES_PER_TOKEN
+const GROK_REVIEW_APPROVAL_REASON_BYTES = 512 * GROK_REVIEW_APPROX_BYTES_PER_TOKEN
+const GROK_REVIEW_RECENT_TOOL_LIMIT = 40
+const GROK_REVIEW_SHELL_HEADS = new Set(['sh', 'bash', 'zsh', 'dash', 'fish'])
+const GROK_REVIEW_WRAPPER_HEADS = new Set(['sudo', 'env', 'command', 'nice', 'nohup'])
+const GROK_REVIEW_OUTCOMES = ['allow', 'deny'] as const
+const GROK_REVIEW_OUTPUT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    thinking: { type: 'string' },
+    outcome: { type: 'string', enum: GROK_REVIEW_OUTCOMES },
+    reason: { type: 'string' },
+  },
+  required: ['outcome'],
+} as const
+
+class RetryableGrokReviewError extends Error {}
+
+type GrokApprovalDecision = ApprovalReviewDecision & { readonly decision: 'allow' | 'deny' }
+
+interface GrokTranscriptEntry {
+  readonly kind: 'user' | 'tool'
+  readonly text: string
+}
+
+interface GrokApprovalReviewSession {
+  readonly promptCacheKey: string
+  readonly messages: Message[]
+  surfaceNodes: number[]
+  tail: Promise<void>
+  denialTurnId?: string
+  consecutiveDenials: number
+  interruptionScheduled: boolean
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function grokReviewCacheKey(parentId: string): string {
+  const direct = `grok-review:${parentId}`
+  if (direct.length <= 64) return direct
+  return `grok-review:${createHash('sha256').update(parentId).digest('hex').slice(0, 51)}`
+}
+
+function approvalTurnId(agent: ApprovalReviewAgent): string {
+  for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {
+    const event = agent.session.events[index]
+    if (event?.type === 'turn/start') return String(event.data.turn)
+  }
+  return '<unknown-turn>'
+}
+
+function utf8Prefix(text: string, maxBytes: number): string {
+  let end = Math.min(text.length, maxBytes)
+  while (end > 0 && Buffer.byteLength(text.slice(0, end), 'utf8') > maxBytes) end -= 1
+  return text.slice(0, end)
+}
+
+function utf8Suffix(text: string, maxBytes: number): string {
+  let start = Math.max(0, text.length - maxBytes)
+  while (start < text.length && Buffer.byteLength(text.slice(start), 'utf8') > maxBytes) start += 1
+  return text.slice(start)
+}
+
+function bounded(text: string, maxBytes: number): string {
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text
+  const marker = '\n[truncated]\n'
+  const retainedBytes = Math.max(0, maxBytes - Buffer.byteLength(marker, 'utf8'))
+  const prefixBytes = Math.ceil(retainedBytes / 2)
+  return `${utf8Prefix(text, prefixBytes)}${marker}${utf8Suffix(text, retainedBytes - prefixBytes)}`
+}
+
+function neutralizeTranscriptLine(line: string): string {
+  const heading = line.trimStart()
+  if (heading.startsWith('#') || /^(USER|TOOL):/i.test(heading)) {
+    return `${line.slice(0, line.length - heading.length)}\\${heading}`
+  }
+  return line
+}
+
+function formatLabeledEntry(kind: GrokTranscriptEntry['kind'], text: string): string {
+  const label = kind === 'user' ? 'USER' : 'TOOL'
+  const lines = text.split('\n').map(neutralizeTranscriptLine)
+  return [`${label}: ${lines[0] ?? ''}`, ...lines.slice(1).map(line => `  ${line}`)].join('\n')
+}
+
+async function waitForGrokReviewRetry(attempt: number, signal: AbortSignal): Promise<void> {
+  const delayMs = GROK_REVIEW_RETRY_INITIAL_DELAY_MS * (2 ** (attempt - 1))
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }, delayMs)
+    const onAbort = (): void => {
+      clearTimeout(timer)
+      reject(signal.reason instanceof Error ? signal.reason : new Error('aborted'))
+    }
+    if (signal.aborted) {
+      onAbort()
+      return
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+function shellWords(segment: string): string[] {
+  return segment.trim().split(/\s+/).filter(word => word.length > 0)
+}
+
+function commandHead(word: string): string {
+  const base = word.split(/[/\\]/).pop() ?? word
+  return base.toLowerCase()
+}
+
+function unquoteWord(word: string): string {
+  if (word.length >= 2) {
+    const start = word[0]
+    const end = word[word.length - 1]
+    if ((start === '"' && end === '"') || (start === "'" && end === "'")) return word.slice(1, -1)
+  }
+  return word
+}
+
+function skipCommandWrappers(words: readonly string[]): string[] {
+  let index = 0
+  while (index < words.length && GROK_REVIEW_WRAPPER_HEADS.has(commandHead(words[index] ?? ''))) {
+    index += 1
+  }
+  return words.slice(index)
+}
+
+function isRootRm(segment: string): boolean {
+  const words = skipCommandWrappers(shellWords(segment))
+  if (words.length === 0 || commandHead(words[0] ?? '') !== 'rm') return false
+  return words.slice(1).some(word => {
+    const target = unquoteWord(word)
+    return target === '/' || target === '/*'
+  })
+}
+
+function isShellSubstitutedDownload(command: string): boolean {
+  const words = skipCommandWrappers(shellWords(command))
+  if (words.length === 0 || !GROK_REVIEW_SHELL_HEADS.has(commandHead(words[0] ?? ''))) return false
+  if (!words.includes('-c')) return false
+  return /(?:\$\(|`)\s*(?:sudo\s+)?(?:curl|wget)\b/i.test(command)
+}
+
+function isDownloaderToShell(command: string): boolean {
+  if (/\b(curl|wget)\b/i.test(command) && /<\(/.test(command)) return true
+  if (isShellSubstitutedDownload(command)) return true
+  const pieces = command.split('|')
+  let sawDownloader = false
+  for (const piece of pieces) {
+    const head = commandHead(skipCommandWrappers(shellWords(piece))[0] ?? '')
+    if (head === 'curl' || head === 'wget') sawDownloader = true
+    if (sawDownloader && GROK_REVIEW_SHELL_HEADS.has(head)) return true
+  }
+  return false
+}
+
+function hardDeniedCommand(command: string): boolean {
+  const blob = command.toLowerCase()
+  if (blob.includes('mkfs') || blob.includes('dd if=') || blob.includes(':(){ :|:& };:')) return true
+  if (isDownloaderToShell(command)) return true
+  for (const segment of command.split(/(?:&&|\|\||;|\n)/)) {
+    for (const piece of segment.split('|')) {
+      if (isRootRm(piece)) return true
+    }
+  }
+  return false
+}
+
+function actionCommand(request: ApprovalReviewRequest): string {
+  if (!isRecord(request.action.arguments)) return ''
+  const command = request.action.arguments.command
+  return typeof command === 'string' ? command : ''
+}
+
+function sandboxMode(request: ApprovalReviewRequest): string {
+  if (!isRecord(request.action.arguments)) return 'unspecified'
+  const mode = request.action.arguments.sandbox_permissions
+  return typeof mode === 'string' && mode.length > 0 ? mode : 'unspecified'
+}
+
+function recordedDecisions(agent: ApprovalReviewAgent): string[] {
+  const records: string[] = []
+  for (const event of agent.session.events) {
+    if (event.type !== 'approval/decided') continue
+    const id = String(event.data.id)
+    if (id.startsWith('auto-review-')) continue
+    records.push(JSON.stringify({
+      id,
+      decision: event.data.outcome,
+    }))
+  }
+  return records
+}
+
+function grokTranscriptSnapshot(agent: ApprovalReviewAgent, startNode = 0): {
+  nodes: number[]
+  entries: GrokTranscriptEntry[]
+} {
+  const nodes = [...agent.session.surface.nodes]
+  const entries: GrokTranscriptEntry[] = []
+  for (const node of nodes.slice(startNode)) {
+    const event = agent.session.events[node]
+    if (event === undefined) continue
+    if (event.type === 'user/message') {
+      if (event.data.source.kind !== 'user') continue
+      const text = event.data.content
+        .filter((block): block is ContentBlock & { type: 'text' } => block.type === 'text')
+        .map(block => block.text.trim())
+        .filter(part => part.length > 0)
+        .join('\n')
+      if (text.length > 0) entries.push({ kind: 'user', text })
+      continue
+    }
+    if (event.type !== 'assistant/message') continue
+    for (const block of event.data.message.content) {
+      if (block.type !== 'tool-call') continue
+      entries.push({
+        kind: 'tool',
+        text: `${block.name}(${block.arguments})`,
+      })
+    }
+  }
+  return { nodes, entries }
+}
+
+function isNodePrefix(prefix: readonly number[], nodes: readonly number[]): boolean {
+  return prefix.length <= nodes.length && prefix.every((node, index) => nodes[index] === node)
+}
+
+function selectGrokTranscript(entries: readonly GrokTranscriptEntry[]): string[] {
+  const rendered = entries.map(entry => {
+    const cap = entry.kind === 'tool' ? GROK_REVIEW_TOOL_ENTRY_BYTES : GROK_REVIEW_MESSAGE_ENTRY_BYTES
+    const text = formatLabeledEntry(entry.kind, bounded(entry.text, cap))
+    return { entry, text, size: Buffer.byteLength(text, 'utf8') }
+  })
+  const included = new Set<number>()
+  let messageBytes = 0
+  let toolBytes = 0
+  const users = rendered
+    .map((item, index) => ({ ...item, index }))
+    .filter(item => item.entry.kind === 'user')
+  const includeUser = (item: typeof users[number] | undefined): void => {
+    if (item === undefined || included.has(item.index)) return
+    if (messageBytes + item.size > GROK_REVIEW_MESSAGE_BUDGET_BYTES) return
+    included.add(item.index)
+    messageBytes += item.size
+  }
+  includeUser(users[0])
+  includeUser(users.at(-1))
+  for (const user of [...users].reverse()) includeUser(user)
+
+  let recentTools = 0
+  for (let index = rendered.length - 1; index >= 0; index -= 1) {
+    const item = rendered[index]
+    if (item === undefined || item.entry.kind !== 'tool' || recentTools >= GROK_REVIEW_RECENT_TOOL_LIMIT) {
+      continue
+    }
+    if (toolBytes + item.size > GROK_REVIEW_TOOL_BUDGET_BYTES) continue
+    included.add(index)
+    recentTools += 1
+    toolBytes += item.size
+  }
+  return rendered.filter((_item, index) => included.has(index)).map(item => item.text)
+}
+
+function safeActionJson(request: ApprovalReviewRequest): string {
+  let serialized: string
+  try {
+    serialized = JSON.stringify({
+      tool: request.action.name,
+      call_id: request.action.callId,
+      arguments: request.action.arguments,
+      ...request.reason === undefined
+        ? {}
+        : { approval_reason: bounded(request.reason, GROK_REVIEW_APPROVAL_REASON_BYTES) },
+    }, null, 2)
+  } catch {
+    serialized = JSON.stringify({
+      tool: request.action.name,
+      call_id: request.action.callId,
+      arguments: '[unserializable arguments]',
+      ...request.reason === undefined
+        ? {}
+        : { approval_reason: bounded(request.reason, GROK_REVIEW_APPROVAL_REASON_BYTES) },
+    }, null, 2)
+  }
+  return bounded(serialized, GROK_REVIEW_ACTION_BYTES)
+}
+
+function grokReviewPrompt(
+  request: ApprovalReviewRequest,
+  state: GrokApprovalReviewSession,
+): { prompt: string; nodes: number[] } {
+  const current = grokTranscriptSnapshot(request.agent)
+  const delta = state.messages.length > 0 && isNodePrefix(state.surfaceNodes, current.nodes)
+  const snapshot = delta ? grokTranscriptSnapshot(request.agent, state.surfaceNodes.length) : current
+  const transcript = selectGrokTranscript(snapshot.entries)
+  const decisions = recordedDecisions(request.agent)
+  return {
+    nodes: current.nodes,
+    prompt: [
+      decisions.length > 0
+        ? `Harness-recorded permission decisions (trusted):\n${decisions.join('\n')}`
+        : '',
+      '## Recent conversation',
+      delta ? 'New transcript entries since the previous approval review follow.' : '',
+      transcript.length > 0 ? transcript.join('\n') : '<no new retained transcript entries>',
+      '## End conversation',
+      '## Trusted harness findings',
+      `- sandbox_escalation: this action already reached native approval after a sandbox boundary. requested_mode=${sandboxMode(request)}. Evaluate the unsandboxed action, not the retry event.`,
+      '## Proposed action',
+      safeActionJson(request),
+    ].filter(part => part.length > 0).join('\n'),
+  }
+}
+
+/** Parse Grok escalation JSON. Never infer allow from a loose shouldBlock substring. */
+export function parseGrokApprovalReview(raw: string): GrokApprovalDecision | undefined {
+  const trimmed = raw.trim()
+  if (trimmed.length === 0) return undefined
+  let value: unknown
+  try {
+    value = JSON.parse(trimmed)
+  } catch {
+    const start = trimmed.indexOf('{')
+    const end = trimmed.lastIndexOf('}')
+    if (start < 0 || end <= start) return undefined
+    try {
+      value = JSON.parse(trimmed.slice(start, end + 1))
+    } catch {
+      return undefined
+    }
+  }
+  if (!isRecord(value)) return undefined
+  const outcome = value.outcome
+  if (outcome !== 'allow' && outcome !== 'deny') return undefined
+  const reason = typeof value.reason === 'string' ? value.reason.trim() : ''
+  return {
+    decision: outcome,
+    reason: reason.length > 0
+      ? reason
+      : outcome === 'allow'
+        ? 'Auto-review allowed this sandbox escalation.'
+        : 'Auto-review denied this sandbox escalation.',
+  }
+}
+
 /** Grok wire adapter: one instance serves the `grok` provider route. */
-export class GrokAdapter extends LlmAdapter {
+export class GrokAdapter extends LlmAdapter implements ApprovalReviewer {
+  readonly reviewerId = 'grok'
+  readonly reviewerLabel = 'Grok'
+  readonly failClosed = true
   private readonly catalog: ModelCatalogCache
   /** In-memory catalogs for non-default accounts (the persisted cache is the default's). */
   private readonly accountCatalogs = new Map<string, ModelCatalogCache>()
   /** Account whose snapshot currently lives in {@link catalog}; cleared on default change. */
   private catalogOwner: string | undefined
+  private readonly approvalReviewSessions = new WeakMap<ApprovalReviewAgent, GrokApprovalReviewSession>()
 
   constructor(private readonly options: GrokAdapterOptions) {
     super()
@@ -777,6 +1174,205 @@ export class GrokAdapter extends LlmAdapter {
       defaultMaxTokens: configured?.maxTokens ?? GROK_DEFAULT_MAX_TOKENS,
       ...reasoning === undefined ? {} : { reasoning },
     }
+  }
+
+  /** Hide Grok from the selector when no account is logged in. */
+  isAvailable(): Promise<boolean> {
+    return this.options.tokens.hasSession()
+  }
+
+  /**
+   * Review one native approval request. Transport, parse, and login failures
+   * throw so the gate can record `unavailable` without a human prompt.
+   */
+  reviewApproval(request: ApprovalReviewRequest): Promise<ApprovalReviewDecision | undefined> {
+    let state = this.approvalReviewSessions.get(request.agent)
+    if (state === undefined) {
+      state = {
+        promptCacheKey: grokReviewCacheKey(request.agent.id),
+        messages: [],
+        surfaceNodes: [],
+        tail: Promise.resolve(),
+        consecutiveDenials: 0,
+        interruptionScheduled: false,
+      }
+      this.approvalReviewSessions.set(request.agent, state)
+    }
+    const review = state.tail.then(() => this.runApprovalReview(request, state))
+    state.tail = review.then(() => undefined, () => undefined)
+    return review.catch((error: unknown) => {
+      if (!request.signal.aborted) {
+        this.options.onWarn?.(
+          `grok auto-review unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+      throw error
+    })
+  }
+
+  private async runApprovalReview(
+    request: ApprovalReviewRequest,
+    state: GrokApprovalReviewSession,
+  ): Promise<GrokApprovalDecision> {
+    if (hardDeniedCommand(actionCommand(request))) {
+      const denied = {
+        decision: 'deny' as const,
+        reason: 'Hard-denied a known-dangerous command pattern.',
+      }
+      this.recordApprovalReviewDecision(request, state, 'deny')
+      return denied
+    }
+    const signal = AbortSignal.any([request.signal, AbortSignal.timeout(GROK_REVIEW_TIMEOUT_MS)])
+    const { prompt, nodes } = grokReviewPrompt(request, state)
+    const userMessage = createUserMessage({
+      source: { kind: 'plugin', plugin: 'dsh-plugin-subscriptions' },
+      content: [{ type: 'text', text: prompt }],
+    })
+    const messages = [...state.messages, userMessage]
+    let parsed: { decision: GrokApprovalDecision; raw: string } | undefined
+    let lastError: unknown
+    for (let attempt = 1; attempt <= GROK_REVIEW_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        parsed = await this.performApprovalReview(messages, state, signal)
+        break
+      } catch (error) {
+        lastError = error
+        if (signal.aborted || attempt === GROK_REVIEW_MAX_ATTEMPTS
+          || (!(error instanceof RetryableGrokReviewError) && !(error instanceof TypeError))) {
+          throw error
+        }
+        await waitForGrokReviewRetry(attempt, signal)
+      }
+    }
+    if (parsed === undefined) {
+      throw lastError ?? new Error('Grok approval review failed')
+    }
+    state.messages.push(
+      userMessage,
+      createAssistantMessage({
+        source: { provider: 'grok', model: GROK_AUTO_REVIEW_MODEL },
+        content: [{ type: 'text', text: parsed.raw }],
+      }),
+    )
+    while (state.messages.length > GROK_REVIEW_HISTORY_MAX_MESSAGES) {
+      state.messages.splice(0, 2)
+    }
+    state.surfaceNodes = nodes
+    this.recordApprovalReviewDecision(request, state, parsed.decision.decision)
+    return parsed.decision
+  }
+
+  private recordApprovalReviewDecision(
+    request: ApprovalReviewRequest,
+    state: GrokApprovalReviewSession,
+    decision: GrokApprovalDecision['decision'],
+  ): void {
+    const turnId = approvalTurnId(request.agent)
+    if (state.denialTurnId !== turnId) {
+      state.denialTurnId = turnId
+      state.consecutiveDenials = 0
+      state.interruptionScheduled = false
+    }
+    const denied = decision === 'deny'
+    state.consecutiveDenials = denied ? state.consecutiveDenials + 1 : 0
+    if (!denied || state.interruptionScheduled
+      || state.consecutiveDenials < GROK_REVIEW_MAX_CONSECUTIVE_DENIALS) return
+    state.interruptionScheduled = true
+    const cancel = request.agent.cancel
+    setTimeout(() => {
+      try {
+        Reflect.apply(cancel, request.agent, [{
+          kind: 'hook',
+          reason: 'Automatic approval review rejected too many requests in this turn.',
+        }])
+      } catch {
+        // A disappearing agent must not turn a valid denial into a prompt.
+      }
+    }, 0)
+  }
+
+  private async performApprovalReview(
+    messages: Message[],
+    state: GrokApprovalReviewSession,
+    signal: AbortSignal,
+  ): Promise<{ decision: GrokApprovalDecision; raw: string }> {
+    let session = await this.options.tokens.session()
+    let response = await this.requestApprovalReview(messages, session, state, signal)
+    if (response.status === 401) {
+      session = await this.options.tokens.session(undefined, true)
+      response = await this.requestApprovalReview(messages, session, state, signal)
+    }
+    if (!response.ok) {
+      const error = await httpLlmError(response, 'grok approval review API', {
+        rateLimitReset: grokRateLimitReset,
+        ...this.options.onWarn === undefined ? {} : { onWarn: this.options.onWarn },
+      })
+      if (response.status === 408 || response.status === 429 || response.status >= 500) {
+        throw new RetryableGrokReviewError(error.message)
+      }
+      throw error
+    }
+    if (response.body === null) throw new RetryableGrokReviewError('grok approval review API returned no response body')
+    const assembler = new BlockAssembler()
+    try {
+      for await (const chunk of streamResponses(response.body)) assembler.push(chunk)
+    } catch (error) {
+      throw new RetryableGrokReviewError(error instanceof Error ? error.message : String(error))
+    }
+    const finish = assembler.finish
+    if (finish.kind === 'error' || finish.kind === 'aborted') {
+      throw new RetryableGrokReviewError(finish.failure.message)
+    }
+    if (finish.kind === 'max-tokens') {
+      throw new RetryableGrokReviewError('grok approval review API exhausted its output limit')
+    }
+    const raw = assembler.blocks()
+      .filter(block => block.type === 'text')
+      .map(block => block.type === 'text' ? block.text : '')
+      .join('')
+      .trim()
+    const decision = parseGrokApprovalReview(raw)
+    if (decision === undefined) throw new RetryableGrokReviewError('grok approval review API returned malformed JSON')
+    return { decision, raw }
+  }
+
+  private requestApprovalReview(
+    messages: Message[],
+    session: GrokSession,
+    state: GrokApprovalReviewSession,
+    signal: AbortSignal,
+  ): Promise<Response> {
+    const { instructions, input } = toResponsesInput(messages, GROK_ESCALATION_POLICY)
+    const body = {
+      model: GROK_AUTO_REVIEW_MODEL,
+      ...instructions === undefined ? {} : { instructions },
+      input,
+      parallel_tool_calls: false,
+      prompt_cache_key: state.promptCacheKey,
+      max_output_tokens: GROK_REVIEW_MAX_OUTPUT_TOKENS,
+      text: {
+        format: {
+          type: 'json_schema',
+          // Optional thinking/reason fields; strict mode 400s on some Responses paths.
+          strict: false,
+          name: 'grok_escalation_review',
+          schema: GROK_REVIEW_OUTPUT_SCHEMA,
+        },
+      },
+      store: false,
+      stream: true,
+    }
+    return (this.options.reviewFetchFn ?? proxiedFetch)(GROK_API_URL, {
+      method: 'POST',
+      headers: {
+        'authorization': `Bearer ${session.accessToken}`,
+        'accept': 'text/event-stream',
+        'content-type': 'application/json',
+        ...attributionHeaders(),
+      },
+      body: JSON.stringify(body),
+      signal,
+    })
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {

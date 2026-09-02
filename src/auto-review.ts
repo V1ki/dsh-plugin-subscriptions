@@ -95,6 +95,13 @@ export interface ApprovalReviewer {
   readonly reviewerId: ProviderId
   /** User-facing provider name used by the selector and review activity. */
   readonly reviewerLabel: string
+  /**
+   * When true, an unavailable or failed review stays denied and must not
+   * fall through to a human prompt. Codex leaves this unset.
+   */
+  readonly failClosed?: boolean
+  /** False when the provider has no usable login; the selector omits it. */
+  isAvailable?(): Promise<boolean>
   reviewApproval(request: ApprovalReviewRequest): Promise<ApprovalReviewDecision | undefined>
 }
 
@@ -118,20 +125,24 @@ export class ApprovalReviewRouter {
 
   async review(
     request: ApprovalReviewRequest,
-    onRouted?: (reviewerId: ProviderId, reviewerLabel: string) => void,
+    onRouted?: (reviewerId: ProviderId, reviewerLabel: string, failClosed: boolean) => void,
   ): Promise<ApprovalReviewDecision | undefined> {
-    const reviewerId = await this.reviewerFor(request.agent)
-    if (reviewerId === undefined) return undefined
-    const reviewer = this.reviewers.get(reviewerId)
+    const reviewer = await this.selectedReviewer(request.agent)
     if (reviewer === undefined) return undefined
-    onRouted?.(reviewerId, reviewer.reviewerLabel)
+    onRouted?.(reviewer.reviewerId, reviewer.reviewerLabel, reviewer.failClosed === true)
     return reviewer.reviewApproval(request)
+  }
+
+  /** The registered reviewer this agent currently selects, if any. */
+  async selectedReviewer(agent: ApprovalReviewAgent): Promise<ApprovalReviewer | undefined> {
+    const reviewerId = await this.reviewerFor(agent)
+    if (reviewerId === undefined) return undefined
+    return this.reviewers.get(reviewerId)
   }
 
   /** Whether this agent currently selects one registered machine reviewer. */
   async hasReviewer(agent: ApprovalReviewAgent): Promise<boolean> {
-    const reviewerId = await this.reviewerFor(agent)
-    return reviewerId !== undefined && this.reviewers.has(reviewerId)
+    return (await this.selectedReviewer(agent)) !== undefined
   }
 }
 
@@ -223,7 +234,10 @@ export class AutoReviewGate {
     request: GateApprovalRequest,
     next: () => Promise<GateApprovalOutcome>,
   ): Promise<GateApprovalOutcome> {
+    const selected = await this.router.selectedReviewer(request.agent)
+    const failClosedSelected = selected?.failClosed === true
     const fallback = (): Promise<GateApprovalOutcome> => request.agent.session.header?.origin === 'subagent'
+      || failClosedSelected
       ? Promise.resolve(request.signal?.aborted ? 'cancelled' : 'rejected')
       : next()
     if (request.callId === undefined) return fallback()
@@ -234,14 +248,22 @@ export class AutoReviewGate {
 
     const signal = request.signal ?? action.signal
     let reviewId: ReturnType<typeof ApprovalRequestId> | undefined
+    let failClosed = false
     let decision: ApprovalReviewDecision | undefined
+    const closeOrAsk = (): Promise<GateApprovalOutcome> => {
+      if (request.agent.session.header?.origin === 'subagent' || failClosed) {
+        return Promise.resolve(signal.aborted ? 'cancelled' : 'rejected')
+      }
+      return fallback()
+    }
     try {
       decision = await this.router.review({
         agent: request.agent,
         action: { name: action.name, callId: action.callId, arguments: action.arguments },
         ...request.reason === undefined ? {} : { reason: request.reason },
         signal,
-      }, (reviewerId, reviewerLabel) => {
+      }, (reviewerId, reviewerLabel, closed) => {
+        failClosed = closed
         reviewId = ApprovalRequestId(`auto-review-${String(callId)}`)
         request.agent.session.append('approval/asked', {
           id: reviewId,
@@ -257,7 +279,7 @@ export class AutoReviewGate {
           outcome: signal.aborted ? 'cancelled' : 'unavailable',
         })
       }
-      return fallback()
+      return closeOrAsk()
     }
     if (reviewId !== undefined) {
       request.agent.session.append('approval/decided', {
@@ -271,7 +293,7 @@ export class AutoReviewGate {
     }
     if (decision?.decision === 'allow') return 'allowed-once'
     if (decision?.decision === 'deny') return 'rejected'
-    return fallback()
+    return closeOrAsk()
   }
 
   /** Collapse a denied Bash call and its sanctioned escalation into one model-visible call. */

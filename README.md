@@ -22,7 +22,7 @@ Codex models whose catalog advertises the fast tier (the codex CLI's fast mode) 
 
 ![Speed toggle with the Standard/Fast menu open](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
 
-Native sandbox escalation prompts can optionally use **Auto-Review**. Its global default is configured in **Settings → Subscriptions** and is off by default (`None`); the composer selector can override it for one session, and subagents inherit the nearest parent session's choice. Selecting `Codex` reviews only actions that have already reached DSH's native approval service, using Codex's Guardian policy and `codex-auto-review` model. After a foreground Bash call reports a structured sandbox denial, sanctioned escalation retries run inside that original tool call, so Chat keeps one Bash card while still grounding each review in a real denial. The Chat shows `Auto-Review · Codex · Reviewing...` followed by the result. An unavailable, inconclusive, or failed review falls through to the normal manual approval prompt in a top-level session. Delegated subagents never create a hidden human prompt: without an available reviewer they keep DSH's `never` policy, and a reviewer failure resolves fail-closed. The Settings choice is stored in `~/.dsh/plugins/subscriptions/auto-review.json` and survives restarts.
+Native sandbox escalation prompts can optionally use **Auto-Review**. Its global default is configured in **Settings → Subscriptions** and is off by default (`None`); the composer selector can override it for one session, and subagents inherit the nearest parent session's choice. Selecting `Codex` reviews only actions that have already reached DSH's native approval service, using Codex's Guardian policy and `codex-auto-review` model. Selecting `Grok` uses `grok-4-fast-reasoning` (not the session model) as an allow/deny judge of that same already-escalated action; a Grok deny, timeout, or parse failure stays denied and does not fall through to a human prompt. Logging out of the selected reviewer returns the selector to `None` and stops routing reviews until a logged-in reviewer is chosen again. After a foreground Bash call reports a structured sandbox denial, sanctioned escalation retries run inside that original tool call, so Chat keeps one Bash card while still grounding each review in a real denial. The Chat shows `Auto-Review · Codex · Reviewing...` or `Auto-Review · Grok · Reviewing...` followed by the result. An unavailable, inconclusive, or failed **Codex** review falls through to the normal manual approval prompt in a top-level session. Delegated subagents never create a hidden human prompt: without an available reviewer they keep DSH's `never` policy, and a reviewer failure resolves fail-closed. The Settings choice is stored in `~/.dsh/plugins/subscriptions/auto-review.json` and survives restarts.
 
 The `image_generate` tool renders its result inline in the conversation:
 
@@ -130,7 +130,7 @@ Pick a level to make the session model picker preselect it whenever you switch t
   name: dsh-plugin-subscriptions
   config:
     providers: [codex, claude]        # subset; default all four
-    autoReview: none                  # bootstrap default until Settings saves none/codex; composer overrides per session
+    autoReview: none                  # bootstrap default until Settings saves none/codex/grok; composer overrides per session
     streamIdleTimeoutMs: 300000
     rateLimit:
       wait: true                       # wait out a closed rate-limit window (default)

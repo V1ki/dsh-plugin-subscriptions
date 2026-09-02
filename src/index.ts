@@ -136,7 +136,7 @@ export const POOL_USAGE_TIMEOUT_MS = DISCOVERY_TIMEOUT_MS
 export { withTimeout } from './providers/common.js'
 
 /** Plugin config, validated by the same-named schemastery schema. */
-type ConfiguredAutoReviewMode = 'none' | 'codex'
+type ConfiguredAutoReviewMode = 'none' | 'codex' | 'grok'
 
 export interface Config {
   /** Provider routes to register; defaults to all four. */
@@ -194,6 +194,7 @@ export const Config: z<Config> = z.object({
   autoReview: z.union([
     z.const('none').description('None'),
     z.const('codex').description('Codex'),
+    z.const('grok').description('Grok'),
   ])
     .default('none')
     .description('Automatic reviewer for sandbox escalation requests. None uses manual approvals only.'),
@@ -762,6 +763,7 @@ export function apply(ctx: Context, config: Config): void {
           defaultEffortOf: (model: string) => defaultEffortOf('grok', model),
           pool: () => poolAdapter,
         })
+        approvalReviewers.push(adapter)
         adapters.set('grok', adapter)
         handles.set('grok', ctx.llm.registerAdapter(['grok'], adapter))
         break
@@ -895,11 +897,15 @@ export function apply(ctx: Context, config: Config): void {
       if (tier !== (sessionSetting(speedBySession, sessionId) ?? 'standard')) speedBySession.set(sessionId, tier)
     },
   }
-  const autoReviewOptions = approvalReviewers.map(reviewer => ({
-    reviewer: reviewer.reviewerId,
-    label: reviewer.reviewerLabel,
-  }))
-  const availableAutoReviewers = new Set(autoReviewOptions.map(option => option.reviewer))
+  const availableAutoReviewers = new Set(approvalReviewers.map(reviewer => reviewer.reviewerId))
+  const listAutoReviewOptions = async (): Promise<Array<{ reviewer: ProviderId; label: string }>> => {
+    const options: Array<{ reviewer: ProviderId; label: string }> = []
+    for (const reviewer of approvalReviewers) {
+      if (reviewer.isAvailable !== undefined && !await reviewer.isAvailable()) continue
+      options.push({ reviewer: reviewer.reviewerId, label: reviewer.reviewerLabel })
+    }
+    return options
+  }
   const configuredAutoReview = config.autoReview ?? 'none'
   const defaultAutoReview = configuredAutoReview === 'none' || availableAutoReviewers.has(configuredAutoReview)
     ? configuredAutoReview
@@ -951,15 +957,29 @@ export function apply(ctx: Context, config: Config): void {
     }
     return assembled
   }, { global: true, prepend: true })
+  const listedAutoReview = (
+    reviewer: AutoReviewMode,
+    reviewers: Array<{ reviewer: ProviderId; label: string }>,
+  ): AutoReviewMode => reviewer === 'none' || reviewers.some(option => option.reviewer === reviewer)
+    ? reviewer
+    : 'none'
   const autoReview: AutoReviewController = {
     async autoReview(sessionId) {
+      const reviewers = await listAutoReviewOptions()
       return {
-        reviewer: sessionSetting(autoReviewBySession, sessionId) ?? await autoReviewDefault.get(),
-        reviewers: autoReviewOptions,
+        reviewer: listedAutoReview(
+          sessionSetting(autoReviewBySession, sessionId) ?? await autoReviewDefault.get(),
+          reviewers,
+        ),
+        reviewers,
       }
     },
     async setAutoReview(sessionId, reviewer) {
-      if (reviewer !== 'none' && !availableAutoReviewers.has(reviewer)) return false
+      if (reviewer !== 'none') {
+        const impl = approvalReviewers.find(item => item.reviewerId === reviewer)
+        if (impl === undefined) return false
+        if (impl.isAvailable !== undefined && !await impl.isAvailable()) return false
+      }
       autoReviewBySession.delete(sessionId)
       if (reviewer !== (sessionSetting(autoReviewBySession, sessionId) ?? await autoReviewDefault.get())) {
         autoReviewBySession.set(sessionId, reviewer)
@@ -967,12 +987,17 @@ export function apply(ctx: Context, config: Config): void {
       return true
     },
     async autoReviewDefault() {
-      return { reviewer: await autoReviewDefault.get(), reviewers: autoReviewOptions }
+      const reviewers = await listAutoReviewOptions()
+      return { reviewer: listedAutoReview(await autoReviewDefault.get(), reviewers), reviewers }
     },
     async setAutoReviewDefault(reviewer) {
-      if (reviewer !== 'none' && !availableAutoReviewers.has(reviewer)) return undefined
+      if (reviewer !== 'none') {
+        const impl = approvalReviewers.find(item => item.reviewerId === reviewer)
+        if (impl === undefined) return undefined
+        if (impl.isAvailable !== undefined && !await impl.isAvailable()) return undefined
+      }
       await autoReviewDefault.set(reviewer)
-      return { reviewer, reviewers: autoReviewOptions }
+      return { reviewer, reviewers: await listAutoReviewOptions() }
     },
   }
   // Per-model default effort overrides (the Settings page's model pickers).
@@ -1090,7 +1115,11 @@ export function apply(ctx: Context, config: Config): void {
   ctx.inject(['tools'], (toolsCtx) => {
     const reviewRouter = new ApprovalReviewRouter(approvalReviewers, async (agent) => {
       const selected = sessionSetting(autoReviewBySession, agent.id) ?? await autoReviewDefault.get()
-      return selected === 'none' ? undefined : selected
+      if (selected === 'none') return undefined
+      const impl = approvalReviewers.find(item => item.reviewerId === selected)
+      if (impl === undefined) return undefined
+      if (impl.isAvailable !== undefined && !await impl.isAvailable()) return undefined
+      return selected
     })
     installAutoReview(toolsCtx, reviewRouter)
     if (grokTokens !== undefined) {

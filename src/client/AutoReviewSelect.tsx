@@ -23,6 +23,14 @@ export interface AutoReviewState {
   readonly reviewers: readonly AutoReviewOption[]
 }
 
+/** Hide a persisted reviewer that is no longer in the live option list (logout). */
+export function displayedAutoReview(state: AutoReviewState): AutoReviewMode {
+  if (state.reviewer === 'none') return 'none'
+  return state.reviewers.some(option => option.reviewer === state.reviewer)
+    ? state.reviewer
+    : 'none'
+}
+
 /** Exact RPC capability used by this control, without the rest of ConnectionHandle. */
 export type AutoReviewRpc = ConnectionHandle['rpc']
 
@@ -91,13 +99,14 @@ export function AutoReviewSelect({ loadAutoReview, setAutoReview, t }: AutoRevie
   if (loadAutoReview === undefined || setAutoReview === undefined || state === null) return null
 
   const reviewers: readonly AutoReviewOption[] = state.reviewers
+  const selectedReviewer = displayedAutoReview(state)
   const reviewerName = (reviewer: AutoReviewMode): string => reviewer === 'none'
     ? translate('autoReviewNone')
     : reviewers.find(option => option.reviewer === reviewer)?.label ?? reviewer
   const reviewerDescription = (reviewer: AutoReviewMode): string => reviewer === 'none'
     ? translate('autoReviewNoneDescription')
     : translate('autoReviewProviderDescription')
-  const triggerLabel = `${translate('autoReview')} · ${reviewerName(state.reviewer)}`
+  const triggerLabel = `${translate('autoReview')} · ${reviewerName(selectedReviewer)}`
   const choices: readonly AutoReviewMode[] = ['none', ...reviewers.map(option => option.reviewer)]
 
   const choose = (reviewer: AutoReviewMode): void => {
@@ -141,12 +150,12 @@ export function AutoReviewSelect({ loadAutoReview, setAutoReview, t }: AutoRevie
               key={reviewer}
               type="button"
               role="menuitemradio"
-              aria-checked={reviewer === state.reviewer}
+              aria-checked={reviewer === selectedReviewer}
               style={styles.item}
               disabled={busy}
               onClick={() => { choose(reviewer) }}
             >
-              <span style={styles.itemCheck}>{reviewer === state.reviewer ? '✓' : ''}</span>
+              <span style={styles.itemCheck}>{reviewer === selectedReviewer ? '✓' : ''}</span>
               <span style={styles.itemText}>
                 <span style={styles.itemName}>{reviewerName(reviewer)}</span>
                 <span style={styles.itemDescription}>{reviewerDescription(reviewer)}</span>

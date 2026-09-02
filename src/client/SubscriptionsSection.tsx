@@ -17,7 +17,7 @@ import type { CSSProperties } from 'react'
 import type { ConnectionHandle, RpcResult } from '@deepseek-ai/dsh-api-remotes/client'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
-import type { AutoReviewMode, AutoReviewState } from './AutoReviewSelect.js'
+import { displayedAutoReview, type AutoReviewMode, type AutoReviewState } from './AutoReviewSelect.js'
 
 /** Logical RPC channel served by the node half of this plugin. */
 const SUBSCRIPTIONS_AUTH_CHANNEL = '/subscriptions-auth'
@@ -1054,7 +1054,8 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
         <div style={styles.cardHeader}>
           <span style={{
             ...styles.dot,
-            background: autoReviewDefault?.reviewer !== undefined && autoReviewDefault.reviewer !== 'none'
+            background: autoReviewDefault !== undefined
+              && displayedAutoReview(autoReviewDefault) !== 'none'
               ? 'var(--dsw-alias-state-success-primary)'
               : 'var(--dsw-alias-label-dimmed)',
           }} />
@@ -1062,7 +1063,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
           <select
             style={{ ...styles.defaultEffortSelect, marginLeft: 'auto' }}
             aria-label={t('autoReviewDefaultTitle')}
-            value={autoReviewDefault?.reviewer ?? 'none'}
+            value={autoReviewDefault === undefined ? 'none' : displayedAutoReview(autoReviewDefault)}
             disabled={autoReviewDefault === undefined || autoReviewDefaultSaving}
             onChange={(event) => { void saveAutoReviewDefault(event.target.value as AutoReviewMode) }}
           >

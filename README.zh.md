@@ -22,7 +22,7 @@
 
 ![速度开关及其标准/快速菜单](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
 
-原生沙箱提权提示也可以使用 **Auto-Review**。全局默认值在 **设置 → 订阅** 中配置,默认关闭(`None`);输入框选择器可按会话覆盖,子代理继承最近父会话的选择。选择 `Codex` 后,只有已经进入 DSH 原生审批服务的操作才会使用 Codex Guardian 策略和 `codex-auto-review` 模型进行审核。前台 Bash 调用报告结构化沙箱拒绝后,合规的提权重试会在原工具调用内部执行,因此对话只保留一张 Bash 卡片,同时每次审核仍以真实拒绝为依据。对话中会先显示 `Auto-Review · Codex · Reviewing...`,再更新为审核结果。顶层会话中的审核不可用、结论不确定或失败时,仍会回退到正常的人工审批提示。委派子代理绝不会创建隐藏的人工提示:没有可用 reviewer 时保留 DSH 的 `never` 策略,reviewer 失败时则以 fail-closed 结束。设置保存在 `~/.dsh/plugins/subscriptions/auto-review.json`,重启后仍然有效。
+原生沙箱提权提示也可以使用 **Auto-Review**。全局默认值在 **设置 → 订阅** 中配置,默认关闭(`None`);输入框选择器可按会话覆盖,子代理继承最近父会话的选择。选择 `Codex` 后,只有已经进入 DSH 原生审批服务的操作才会使用 Codex Guardian 策略和 `codex-auto-review` 模型进行审核。选择 `Grok` 后,使用 `grok-4-fast-reasoning`(而不是当前会话模型)对该同一已提权动作做 allow/deny 判定;Grok 拒绝、超时或解析失败会保持拒绝,不会回退到人工审批。登出当前 reviewer 后选择器回到 `None`,在重新登录并选中可用 reviewer 之前不再自动审核。前台 Bash 调用报告结构化沙箱拒绝后,合规的提权重试会在原工具调用内部执行,因此对话只保留一张 Bash 卡片,同时每次审核仍以真实拒绝为依据。对话中会先显示 `Auto-Review · Codex · Reviewing...` 或 `Auto-Review · Grok · Reviewing...`,再更新为审核结果。顶层会话中 **Codex** 审核不可用、结论不确定或失败时,仍会回退到正常的人工审批提示。委派子代理绝不会创建隐藏的人工提示:没有可用 reviewer 时保留 DSH 的 `never` 策略,reviewer 失败时则以 fail-closed 结束。设置保存在 `~/.dsh/plugins/subscriptions/auto-review.json`,重启后仍然有效。
 
 `image_generate` 工具生成的图片直接内联显示在对话里:
 

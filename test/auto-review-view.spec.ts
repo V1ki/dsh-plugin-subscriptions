@@ -3,7 +3,9 @@ import assert from 'node:assert/strict'
 import {
   createAutoReviewLoader,
   createAutoReviewSetter,
+  displayedAutoReview,
   type AutoReviewRpc,
+  type AutoReviewState,
 } from '../src/client/AutoReviewSelect.js'
 import {
   createAutoReviewDefaultLoader,
@@ -35,6 +37,8 @@ test('auto-review chat activity names the provider and visible review result', a
   assert.equal(loaded.formatAutoReviewActivity('Codex', 'allowed-once'), 'Auto-Review · Codex · Allowed')
   assert.equal(loaded.formatAutoReviewActivity('Codex', 'rejected'), 'Auto-Review · Codex · Denied')
   assert.equal(loaded.formatAutoReviewActivity('Codex', 'unavailable'), 'Auto-Review · Codex · Manual approval')
+  assert.equal(loaded.formatAutoReviewActivity('Grok', 'unavailable'), 'Auto-Review · Grok · Unavailable')
+  assert.equal(loaded.formatAutoReviewActivity('Grok', 'rejected'), 'Auto-Review · Grok · Denied')
 })
 
 test('auto-review composer callbacks bind reads and writes to one session', async () => {
@@ -71,6 +75,15 @@ test('auto-review composer setter reports RPC failures without changing state it
   }
 
   assert.equal(await createAutoReviewSetter(rpc, 'session-8')('none'), false)
+})
+
+test('Settings and composer hide a logged-out default reviewer as None', () => {
+  const state: AutoReviewState = { reviewer: 'grok', reviewers: [] }
+  assert.equal(displayedAutoReview(state), 'none')
+  assert.equal(displayedAutoReview({
+    reviewer: 'grok',
+    reviewers: [{ reviewer: 'grok', label: 'Grok' }],
+  }), 'grok')
 })
 
 test('Settings Auto-Review callbacks read and persist the global default', async () => {
