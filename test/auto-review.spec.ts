@@ -112,6 +112,29 @@ test('the generic router selects the configured provider implementation', async 
   assert.deepEqual(calls, ['claude'])
 })
 
+test('the generic router awaits a persisted reviewer selection', async () => {
+  const agent = fixtureAgent()
+  const calls: string[] = []
+  const router = new ApprovalReviewRouter([
+    reviewer('codex', async () => {
+      calls.push('codex')
+      return { decision: 'allow', reason: 'Allowed by persisted Settings.' }
+    }),
+  ], async (): Promise<'codex'> => {
+    await Promise.resolve()
+    return 'codex'
+  })
+
+  const decision = await router.review({
+    agent,
+    action: execution(agent),
+    signal: new AbortController().signal,
+  })
+
+  assert.deepEqual(decision, { decision: 'allow', reason: 'Allowed by persisted Settings.' })
+  assert.deepEqual(calls, ['codex'])
+})
+
 test('pre-execute only captures the action and provider review starts at the real approval request', async () => {
   const agent = fixtureAgent()
   const requests: ApprovalReviewRequest[] = []

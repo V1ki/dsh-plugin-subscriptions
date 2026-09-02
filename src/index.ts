@@ -117,6 +117,8 @@ import {
   installAutoReview,
   type ApprovalReviewer,
 } from './auto-review.js'
+import { AutoReviewDefaultStore } from './auto-review-default.js'
+import { inheritedSessionSetting } from './session-settings.js'
 
 export type { ModelEntry, ProviderUsage, UsageWindow } from './providers/common.js'
 export type { RateLimitConfig, RateLimitWait } from './providers/rate-limit.js'
@@ -640,6 +642,16 @@ export function apply(ctx: Context, config: Config): void {
   // fast-tier support so a stale choice cannot leak onto a plain model.
   const speedBySession = new Map<string, SpeedTier>()
   const autoReviewBySession = new Map<string, AutoReviewMode>()
+  interface SessionLineageRegistry {
+    get(id: string): { readonly session: { readonly header?: { readonly parentSession?: string } } } | undefined
+  }
+  const parentSessionOf = (sessionId: string): string | undefined => {
+    const agents = ctx.get('agents') as SessionLineageRegistry | undefined
+    const parent = agents?.get(sessionId)?.session.header?.parentSession
+    return parent === undefined ? undefined : String(parent)
+  }
+  const sessionSetting = <T>(values: ReadonlyMap<string, T>, sessionId: string): T | undefined =>
+    inheritedSessionSetting(values, sessionId, parentSessionOf)
   let codexAdapter: CodexAdapter | undefined
   // Dropped on every copilot auth transition so replay state (captured
   // reasoning) never survives an account switch in memory.
@@ -677,7 +689,7 @@ export function apply(ctx: Context, config: Config): void {
           pool: () => poolAdapter,
           speedFor: (sessionId: string | undefined, model: string): boolean | Promise<boolean> =>
             sessionId !== undefined
-            && speedBySession.get(sessionId) === 'fast'
+            && sessionSetting(speedBySession, sessionId) === 'fast'
             && adapter.supportsFastTier(model),
         })
         codexAdapter = adapter
@@ -874,13 +886,13 @@ export function apply(ctx: Context, config: Config): void {
   const speed: SpeedController = {
     async speed(sessionId) {
       return {
-        tier: speedBySession.get(sessionId) ?? 'standard',
+        tier: sessionSetting(speedBySession, sessionId) ?? 'standard',
         fastModels: await codexAdapter?.fastCapableModels() ?? [],
       }
     },
     async setSpeed(sessionId, tier) {
-      if (tier === 'standard') speedBySession.delete(sessionId)
-      else speedBySession.set(sessionId, tier)
+      speedBySession.delete(sessionId)
+      if (tier !== (sessionSetting(speedBySession, sessionId) ?? 'standard')) speedBySession.set(sessionId, tier)
     },
   }
   const autoReviewOptions = approvalReviewers.map(reviewer => ({
@@ -895,18 +907,33 @@ export function apply(ctx: Context, config: Config): void {
   if (configuredAutoReview !== defaultAutoReview) {
     onWarn(`automatic reviewer "${configuredAutoReview}" is unavailable; using manual approvals`)
   }
+  const autoReviewDefault = new AutoReviewDefaultStore(
+    defaultAutoReview,
+    reviewer => reviewer === 'none' || availableAutoReviewers.has(reviewer),
+    onWarn,
+  )
   const autoReview: AutoReviewController = {
     async autoReview(sessionId) {
       return {
-        reviewer: autoReviewBySession.get(sessionId) ?? defaultAutoReview,
+        reviewer: sessionSetting(autoReviewBySession, sessionId) ?? await autoReviewDefault.get(),
         reviewers: autoReviewOptions,
       }
     },
     async setAutoReview(sessionId, reviewer) {
       if (reviewer !== 'none' && !availableAutoReviewers.has(reviewer)) return false
-      if (reviewer === defaultAutoReview) autoReviewBySession.delete(sessionId)
-      else autoReviewBySession.set(sessionId, reviewer)
+      autoReviewBySession.delete(sessionId)
+      if (reviewer !== (sessionSetting(autoReviewBySession, sessionId) ?? await autoReviewDefault.get())) {
+        autoReviewBySession.set(sessionId, reviewer)
+      }
       return true
+    },
+    async autoReviewDefault() {
+      return { reviewer: await autoReviewDefault.get(), reviewers: autoReviewOptions }
+    },
+    async setAutoReviewDefault(reviewer) {
+      if (reviewer !== 'none' && !availableAutoReviewers.has(reviewer)) return undefined
+      await autoReviewDefault.set(reviewer)
+      return { reviewer, reviewers: autoReviewOptions }
     },
   }
   // Per-model default effort overrides (the Settings page's model pickers).
@@ -1022,8 +1049,8 @@ export function apply(ctx: Context, config: Config): void {
   // x_search and video_generate follow the grok provider; image_generate
   // prefers the codex provider and falls back to grok.
   ctx.inject(['tools'], (toolsCtx) => {
-    const reviewRouter = new ApprovalReviewRouter(approvalReviewers, (agent) => {
-      const selected = autoReviewBySession.get(agent.id) ?? defaultAutoReview
+    const reviewRouter = new ApprovalReviewRouter(approvalReviewers, async (agent) => {
+      const selected = sessionSetting(autoReviewBySession, agent.id) ?? await autoReviewDefault.get()
       return selected === 'none' ? undefined : selected
     })
     installAutoReview(toolsCtx, reviewRouter)

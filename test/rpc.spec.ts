@@ -7,7 +7,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -24,7 +24,11 @@ interface FakeStore {
 }
 
 /** Mount the plugin with fake llm/connection (and optional attachments); return the RPC handler. */
-async function mount(attachments?: FakeStore, autoReview?: 'none' | 'codex'): Promise<ConnectionRpcHandler> {
+async function mount(
+  attachments?: FakeStore,
+  autoReview?: 'none' | 'codex',
+  parentSessions: Readonly<Record<string, string>> = {},
+): Promise<ConnectionRpcHandler> {
   let handler: ConnectionRpcHandler | undefined
   const ctx = new Context()
   ctx.provide('llm', { registerAdapter: () => Object.assign(() => {}, { replace: () => {} }) })
@@ -36,6 +40,12 @@ async function mount(attachments?: FakeStore, autoReview?: 'none' | 'codex'): Pr
       },
     },
   })
+  ctx.provide('agents', {
+    get: (id: string) => ({
+      id,
+      session: { header: { parentSession: parentSessions[id] } },
+    }),
+  })
   if (attachments !== undefined) ctx.provide('attachments', attachments)
   ctx.plugin(plugin, { providers: ['codex'], ...autoReview === undefined ? {} : { autoReview } })
   await new Promise(resolve => setTimeout(resolve, 50))
@@ -45,6 +55,12 @@ async function mount(attachments?: FakeStore, autoReview?: 'none' | 'codex'): Pr
 
 const REF = { attachmentId: 'att-1', mediaType: 'image/png', bytes: 2, width: 1, height: 1 }
 const CODEX_REVIEWERS = [{ reviewer: 'codex', label: 'Codex' }]
+const AUTO_REVIEW_SETTINGS_PATH = join(
+  process.env.DSH_HOME as string,
+  'plugins',
+  'subscriptions',
+  'auto-review.json',
+)
 
 async function call(
   handler: ConnectionRpcHandler,
@@ -181,6 +197,21 @@ test('speed endpoints: per-session tier round trip and payload validation', asyn
   }
 })
 
+test('a subagent inherits the nearest ancestor Speed choice', async () => {
+  const handler = await mount(undefined, undefined, { child: 'parent', grandchild: 'child' })
+  const signal = new AbortController().signal
+  await handler('setSpeed', { sessionId: 'parent', tier: 'fast' }, signal)
+  assert.deepEqual(await handler('speed', { sessionId: 'grandchild' }, signal), {
+    ok: true,
+    value: { tier: 'fast', fastModels: [] },
+  })
+  await handler('setSpeed', { sessionId: 'child', tier: 'standard' }, signal)
+  assert.deepEqual(await handler('speed', { sessionId: 'grandchild' }, signal), {
+    ok: true,
+    value: { tier: 'standard', fastModels: [] },
+  })
+})
+
 test('auto-review endpoints: per-session reviewer round trip and payload validation', async () => {
   const handler = await mount()
   const signal = new AbortController().signal
@@ -237,4 +268,43 @@ test('auto-review session choice overrides the configured default without affect
     ok: true,
     value: { reviewer: 'codex', reviewers: CODEX_REVIEWERS },
   })
+})
+
+test('a subagent inherits the nearest ancestor Auto-Review choice', async () => {
+  const handler = await mount(undefined, 'none', { child: 'parent', grandchild: 'child' })
+  const signal = new AbortController().signal
+  await handler('setAutoReview', { sessionId: 'parent', reviewer: 'codex' }, signal)
+  assert.deepEqual(await handler('autoReview', { sessionId: 'grandchild' }, signal), {
+    ok: true,
+    value: { reviewer: 'codex', reviewers: CODEX_REVIEWERS },
+  })
+  await handler('setAutoReview', { sessionId: 'child', reviewer: 'none' }, signal)
+  assert.deepEqual(await handler('autoReview', { sessionId: 'grandchild' }, signal), {
+    ok: true,
+    value: { reviewer: 'none', reviewers: CODEX_REVIEWERS },
+  })
+})
+
+test('Settings global Auto-Review default persists over the YAML bootstrap value', async () => {
+  rmSync(AUTO_REVIEW_SETTINGS_PATH, { force: true })
+  const signal = new AbortController().signal
+  try {
+    const first = await mount(undefined, 'codex')
+    assert.deepEqual(await first('autoReviewDefault', {}, signal), {
+      ok: true,
+      value: { reviewer: 'codex', reviewers: CODEX_REVIEWERS },
+    })
+    assert.deepEqual(await first('setAutoReviewDefault', { reviewer: 'none' }, signal), {
+      ok: true,
+      value: { reviewer: 'none', reviewers: CODEX_REVIEWERS },
+    })
+
+    const restarted = await mount(undefined, 'codex')
+    assert.deepEqual(await restarted('autoReviewDefault', {}, signal), {
+      ok: true,
+      value: { reviewer: 'none', reviewers: CODEX_REVIEWERS },
+    })
+  } finally {
+    rmSync(AUTO_REVIEW_SETTINGS_PATH, { force: true })
+  }
 })

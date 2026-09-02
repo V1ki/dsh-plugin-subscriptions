@@ -5,6 +5,10 @@ import {
   createAutoReviewSetter,
   type AutoReviewRpc,
 } from '../src/client/AutoReviewSelect.js'
+import {
+  createAutoReviewDefaultLoader,
+  createAutoReviewDefaultSetter,
+} from '../src/client/SubscriptionsSection.js'
 import { en } from '../src/client/locales.js'
 
 interface ActivityFormatterModule {
@@ -67,4 +71,27 @@ test('auto-review composer setter reports RPC failures without changing state it
   }
 
   assert.equal(await createAutoReviewSetter(rpc, 'session-8')('none'), false)
+})
+
+test('Settings Auto-Review callbacks read and persist the global default', async () => {
+  const calls: Array<{ endpoint: string; payload: unknown }> = []
+  const rpc: AutoReviewRpc = {
+    async call(_channel: string, endpoint: string, payload: unknown) {
+      calls.push({ endpoint, payload })
+      return {
+        ok: true,
+        value: {
+          reviewer: endpoint === 'setAutoReviewDefault' ? 'none' : 'codex',
+          reviewers: [{ reviewer: 'codex', label: 'Codex' }],
+        },
+      }
+    },
+  }
+
+  assert.equal((await createAutoReviewDefaultLoader(rpc)()).reviewer, 'codex')
+  assert.equal((await createAutoReviewDefaultSetter(rpc)('none')).reviewer, 'none')
+  assert.deepEqual(calls, [
+    { endpoint: 'autoReviewDefault', payload: {} },
+    { endpoint: 'setAutoReviewDefault', payload: { reviewer: 'none' } },
+  ])
 })

@@ -74,6 +74,10 @@ export interface AutoReviewController {
   autoReview(sessionId: string): Promise<AutoReviewState>
   /** Returns false when the requested provider has no registered reviewer. */
   setAutoReview(sessionId: string, reviewer: AutoReviewMode): Promise<boolean>
+  /** Effective global default selected in Settings, with YAML as bootstrap. */
+  autoReviewDefault(): Promise<AutoReviewState>
+  /** Persist a global default; returns undefined for an unavailable reviewer. */
+  setAutoReviewDefault(reviewer: AutoReviewMode): Promise<AutoReviewState | undefined>
 }
 
 /** One logged-in account, as rendered by the Settings page. */
@@ -491,6 +495,15 @@ async function dispatch(
         throw new BadRequest('payload.reviewer has no registered automatic reviewer')
       }
       return ok({ ok: true })
+    case 'autoReviewDefault':
+      if (autoReview === undefined) throw new BadRequest('auto review is unavailable')
+      return ok(await autoReview.autoReviewDefault())
+    case 'setAutoReviewDefault': {
+      if (autoReview === undefined) throw new BadRequest('auto review is unavailable')
+      const state = await autoReview.setAutoReviewDefault(readAutoReviewMode(payload))
+      if (state === undefined) throw new BadRequest('payload.reviewer has no registered automatic reviewer')
+      return ok(state)
+    }
     case 'proxyGet':
       if (proxy === undefined) throw new BadRequest('proxy configuration is unavailable')
       return ok(await proxy.get())

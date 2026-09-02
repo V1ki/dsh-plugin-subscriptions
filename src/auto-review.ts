@@ -95,7 +95,9 @@ export class ApprovalReviewRouter {
 
   constructor(
     reviewers: Iterable<ApprovalReviewer>,
-    private readonly reviewerFor: (agent: ApprovalReviewAgent) => ProviderId | undefined,
+    private readonly reviewerFor: (
+      agent: ApprovalReviewAgent,
+    ) => ProviderId | undefined | Promise<ProviderId | undefined>,
   ) {
     for (const reviewer of reviewers) {
       if (this.reviewers.has(reviewer.reviewerId)) {
@@ -109,7 +111,7 @@ export class ApprovalReviewRouter {
     request: ApprovalReviewRequest,
     onRouted?: (reviewerId: ProviderId, reviewerLabel: string) => void,
   ): Promise<ApprovalReviewDecision | undefined> {
-    const reviewerId = this.reviewerFor(request.agent)
+    const reviewerId = await this.reviewerFor(request.agent)
     if (reviewerId === undefined) return undefined
     const reviewer = this.reviewers.get(reviewerId)
     if (reviewer === undefined) return undefined

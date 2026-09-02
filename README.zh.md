@@ -18,11 +18,11 @@
 
 ![推理等级选择器](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/model-effort.png)
 
-目录声明了 fast tier(即 codex CLI 的 fast 模式)的 Codex 模型,会在输入框工具行(模型选择器旁)多出一个**速度**开关 —— 标准 / 快速(`service_tier: priority`),按会话生效。`/fast` 斜杠命令提供同样的弹窗选择;当前模型不支持快速档时会提示原因。
+目录声明了 fast tier(即 codex CLI 的 fast 模式)的 Codex 模型,会在输入框工具行(模型选择器旁)多出一个**速度**开关 —— 标准 / 快速(`service_tier: priority`),按会话生效。`/fast` 斜杠命令提供同样的弹窗选择;当前模型不支持快速档时会提示原因。子代理继承最近父会话的速度选择,同时仍按自身所选模型是否支持 fast tier 进行限制。
 
 ![速度开关及其标准/快速菜单](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
 
-原生沙箱提权提示也可以使用同一输入框工具行里的 **Auto-Review**。它默认关闭(`None`);选择 `Codex` 后,只有已经进入 DSH 原生审批服务的操作才会使用 Codex Guardian 策略和 `codex-auto-review` 模型进行审核。对话中会先显示 `Auto-Review · Codex · Reviewing...`,再更新为审核结果。审核不可用、结论不确定或失败时,仍会回退到正常的人工审批提示。
+原生沙箱提权提示也可以使用 **Auto-Review**。全局默认值在 **设置 → 订阅** 中配置,默认关闭(`None`);输入框选择器可按会话覆盖,子代理继承最近父会话的选择。选择 `Codex` 后,只有已经进入 DSH 原生审批服务的操作才会使用 Codex Guardian 策略和 `codex-auto-review` 模型进行审核。对话中会先显示 `Auto-Review · Codex · Reviewing...`,再更新为审核结果。审核不可用、结论不确定或失败时,仍会回退到正常的人工审批提示。设置保存在 `~/.dsh/plugins/subscriptions/auto-review.json`,重启后仍然有效。
 
 `image_generate` 工具生成的图片直接内联显示在对话里:
 
@@ -130,7 +130,7 @@ GitHub 安装的:重新执行一遍 `add github:V1ki/dsh-plugin-subscriptions` �
   name: dsh-plugin-subscriptions
   config:
     providers: [codex, claude]        # 子集;默认四个全启用
-    autoReview: none                  # none(默认)或 codex;会话可在输入框中单独覆盖
+    autoReview: none                  # Settings 保存前的启动默认值;输入框可按会话覆盖
     streamIdleTimeoutMs: 300000
     rateLimit:
       wait: true                       # 等待限流窗口重开(默认开启)

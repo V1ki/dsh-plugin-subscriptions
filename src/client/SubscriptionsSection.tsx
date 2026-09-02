@@ -17,6 +17,7 @@ import type { CSSProperties } from 'react'
 import type { ConnectionHandle, RpcResult } from '@deepseek-ai/dsh-api-remotes/client'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
+import type { AutoReviewMode, AutoReviewState } from './AutoReviewSelect.js'
 
 /** Logical RPC channel served by the node half of this plugin. */
 const SUBSCRIPTIONS_AUTH_CHANNEL = '/subscriptions-auth'
@@ -161,6 +162,20 @@ export async function callSubscriptionsAuth<T>(rpc: ConnectionHandle['rpc'], end
   }
   if (!result.ok) throw new SubscriptionsAuthError(result.error.message)
   return result.value as T
+}
+
+/** Bind the Settings page to the effective global Auto-Review default. */
+export function createAutoReviewDefaultLoader(
+  rpc: ConnectionHandle['rpc'],
+): () => Promise<AutoReviewState> {
+  return () => callSubscriptionsAuth<AutoReviewState>(rpc, 'autoReviewDefault', {})
+}
+
+/** Persist one global Auto-Review default from Settings. */
+export function createAutoReviewDefaultSetter(
+  rpc: ConnectionHandle['rpc'],
+): (reviewer: AutoReviewMode) => Promise<AutoReviewState> {
+  return reviewer => callSubscriptionsAuth<AutoReviewState>(rpc, 'setAutoReviewDefault', { reviewer })
 }
 
 /** Human text of an action failure, SubscriptionsAuthError or not. */
@@ -546,6 +561,10 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [proxyTesting, setProxyTesting] = useState(false)
   const [proxyMessage, setProxyMessage] = useState<{ tone: 'success' | 'error'; text: string } | undefined>(undefined)
   const [proxyTestResult, setProxyTestResult] = useState<ProxyTestResult | undefined>(undefined)
+  /** Global Auto-Review default as last answered by Settings RPC. */
+  const [autoReviewDefault, setAutoReviewDefaultState] = useState<AutoReviewState | undefined>(undefined)
+  const [autoReviewDefaultSaving, setAutoReviewDefaultSaving] = useState(false)
+  const [autoReviewDefaultError, setAutoReviewDefaultError] = useState<string | undefined>(undefined)
   /** Per-model default-effort picker state as answered by `modelDefaults`. */
   const [modelDefaults, setModelDefaults] = useState<Partial<Record<SubscriptionProvider, ModelDefaultsCatalog>>>({})
   const [modelDefaultsLoading, setModelDefaultsLoading] = useState(false)
@@ -897,6 +916,34 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     }).catch(() => undefined)
   }, [])
 
+  // Global Auto-Review default: YAML bootstraps it; Settings owns the durable
+  // runtime choice after the first save.
+  useEffect(() => {
+    if (rpc === undefined) return
+    let alive = true
+    void createAutoReviewDefaultLoader(rpc)().then((state) => {
+      if (!alive) return
+      setAutoReviewDefaultState(state)
+      setAutoReviewDefaultError(undefined)
+    }).catch((error) => {
+      if (alive) setAutoReviewDefaultError(messageOf(error))
+    })
+    return () => { alive = false }
+  }, [rpc])
+
+  const saveAutoReviewDefault = useCallback(async (reviewer: AutoReviewMode): Promise<void> => {
+    if (rpc === undefined || autoReviewDefaultSaving) return
+    setAutoReviewDefaultSaving(true)
+    setAutoReviewDefaultError(undefined)
+    try {
+      setAutoReviewDefaultState(await createAutoReviewDefaultSetter(rpc)(reviewer))
+    } catch (error) {
+      setAutoReviewDefaultError(messageOf(error))
+    } finally {
+      setAutoReviewDefaultSaving(false)
+    }
+  }, [rpc, autoReviewDefaultSaving])
+
   // Proxy configuration: load once on mount; the dialog drives proxySet/proxyTest.
   useEffect(() => {
     if (rpc === undefined) return
@@ -984,6 +1031,43 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   return (
     <div style={styles.section}>
       <p style={styles.intro}>{t('intro')}</p>
+      <div style={styles.proxyCard}>
+        <div style={styles.cardHeader}>
+          <span style={{
+            ...styles.dot,
+            background: autoReviewDefault?.reviewer !== undefined && autoReviewDefault.reviewer !== 'none'
+              ? 'var(--dsw-alias-state-success-primary)'
+              : 'var(--dsw-alias-label-dimmed)',
+          }} />
+          <span style={styles.name}>{t('autoReviewDefaultTitle')}</span>
+          <select
+            style={{ ...styles.defaultEffortSelect, marginLeft: 'auto' }}
+            aria-label={t('autoReviewDefaultTitle')}
+            value={autoReviewDefault?.reviewer ?? 'none'}
+            disabled={autoReviewDefault === undefined || autoReviewDefaultSaving}
+            onChange={(event) => { void saveAutoReviewDefault(event.target.value as AutoReviewMode) }}
+          >
+            <option value="none">{t('autoReviewNone')}</option>
+            {(autoReviewDefault?.reviewers ?? []).map(option => (
+              <option key={option.reviewer} value={option.reviewer}>{option.label}</option>
+            ))}
+          </select>
+        </div>
+        <p style={styles.statusLine}>
+          {autoReviewDefaultSaving
+            ? t('autoReviewDefaultSaving')
+            : autoReviewDefault === undefined && autoReviewDefaultError === undefined
+              ? t('autoReviewDefaultLoading')
+              : t('autoReviewDefaultHint')}
+        </p>
+        {autoReviewDefaultError !== undefined && (
+          <p style={styles.errorLine} role="alert">
+            {t(autoReviewDefault === undefined ? 'autoReviewDefaultLoadFailed' : 'autoReviewDefaultSaveFailed', {
+              message: autoReviewDefaultError,
+            })}
+          </p>
+        )}
+      </div>
       <div style={styles.proxyCard}>
         <div style={styles.cardHeader}>
           <span style={{

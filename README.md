@@ -18,11 +18,11 @@ Models that advertise reasoning levels get an **Effort** selector in the same me
 
 ![Reasoning effort selector](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/model-effort.png)
 
-Codex models whose catalog advertises the fast tier (the codex CLI's fast mode) get a **Speed** toggle in the composer's tool row, next to the model selector — Standard or Fast (`service_tier: priority`), per session. The `/fast` slash command offers the same choice as a popup; it errors with an explanation when the current model has no fast tier.
+Codex models whose catalog advertises the fast tier (the codex CLI's fast mode) get a **Speed** toggle in the composer's tool row, next to the model selector — Standard or Fast (`service_tier: priority`), per session. The `/fast` slash command offers the same choice as a popup; it errors with an explanation when the current model has no fast tier. Subagents inherit the nearest parent session's Speed choice, still gated on their own selected model's fast-tier support.
 
 ![Speed toggle with the Standard/Fast menu open](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
 
-Native sandbox escalation prompts can optionally use **Auto-Review** in that same composer row. It is off by default (`None`); selecting `Codex` reviews only actions that have already reached DSH's native approval service, using Codex's Guardian policy and `codex-auto-review` model. The Chat shows `Auto-Review · Codex · Reviewing...` followed by the result. An unavailable, inconclusive, or failed review falls through to the normal manual approval prompt.
+Native sandbox escalation prompts can optionally use **Auto-Review**. Its global default is configured in **Settings → Subscriptions** and is off by default (`None`); the composer selector can override it for one session, and subagents inherit the nearest parent session's choice. Selecting `Codex` reviews only actions that have already reached DSH's native approval service, using Codex's Guardian policy and `codex-auto-review` model. The Chat shows `Auto-Review · Codex · Reviewing...` followed by the result. An unavailable, inconclusive, or failed review falls through to the normal manual approval prompt. The Settings choice is stored in `~/.dsh/plugins/subscriptions/auto-review.json` and survives restarts.
 
 The `image_generate` tool renders its result inline in the conversation:
 
@@ -130,7 +130,7 @@ Pick a level to make the session model picker preselect it whenever you switch t
   name: dsh-plugin-subscriptions
   config:
     providers: [codex, claude]        # subset; default all four
-    autoReview: none                  # none (default) or codex; sessions can override this in the composer
+    autoReview: none                  # bootstrap default until Settings saves none/codex; composer overrides per session
     streamIdleTimeoutMs: 300000
     rateLimit:
       wait: true                       # wait out a closed rate-limit window (default)
