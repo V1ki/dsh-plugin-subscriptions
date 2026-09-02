@@ -1,7 +1,13 @@
 /** Provider-neutral routing for automatic reviews of native approval requests. */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { PreToolDecision, ToolExecution } from '@deepseek-ai/dsh-tools'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
+import type {
+  PostToolDecision,
+  PreToolDecision,
+  ToolExecution,
+  ToolExecutionResult,
+} from '@deepseek-ai/dsh-tools'
 import { ApprovalRequestId } from '@deepseek-ai/dsh-user-approval'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import type { ProviderId } from './auth/store.js'
@@ -29,6 +35,9 @@ export interface ApprovalReviewAgent {
   readonly id: string
   readonly session: {
     readonly events: readonly ApprovalReviewSessionEvent[]
+    readonly header?: {
+      readonly origin?: 'subagent'
+    }
     readonly surface: {
       readonly nodes: readonly number[]
     }
@@ -118,6 +127,12 @@ export class ApprovalReviewRouter {
     onRouted?.(reviewerId, reviewer.reviewerLabel)
     return reviewer.reviewApproval(request)
   }
+
+  /** Whether this agent currently selects one registered machine reviewer. */
+  async hasReviewer(agent: ApprovalReviewAgent): Promise<boolean> {
+    const reviewerId = await this.reviewerFor(agent)
+    return reviewerId !== undefined && this.reviewers.has(reviewerId)
+  }
 }
 
 export type GatePreToolDecision = PreToolDecision
@@ -125,6 +140,13 @@ export type GatePreToolDecision = PreToolDecision
 export type GateApprovalOutcome = ApprovalOutcome
 
 export type GateExecution = ApprovalExecutionFields
+
+interface GateRetryExecution {
+  readonly callId: ToolExecution['callId']
+  readonly name: ToolExecution['name']
+  readonly arguments: ToolExecution['arguments']
+  readonly signal: ToolExecution['signal']
+}
 
 export interface GateApprovalRequest {
   readonly agent: ApprovalReviewHostAgent
@@ -140,6 +162,37 @@ export interface GateApprovalRequest {
  * `approval/request`; an evicted call simply uses native manual approval.
  */
 const MAX_RECENT_CANDIDATES = 64
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Build the single narrowest retry sanctioned by a structured Bash denial. */
+function sandboxRetryArguments(
+  exec: GateExecution,
+  result: Readonly<ToolExecutionResult>,
+): Record<string, unknown> | undefined {
+  if (exec.name !== 'bash' || result.isError || !isRecord(exec.arguments) || !isRecord(result.value)) {
+    return undefined
+  }
+  if (exec.arguments.sandbox_permissions !== undefined || exec.arguments.justification !== undefined) {
+    return undefined
+  }
+  if (result.value.kind !== 'foreground' || !isRecord(result.value.sandbox)) return undefined
+  const sandbox = result.value.sandbox
+  if (sandbox.denied !== true) return undefined
+  const target = sandbox.mode === 'read-only'
+    ? 'workspace-write'
+    : sandbox.mode === 'workspace-write'
+      ? 'danger-full-access'
+      : undefined
+  if (target === undefined) return undefined
+  return {
+    ...exec.arguments,
+    sandbox_permissions: target,
+    justification: `The sandbox denied this exact command under ${sandbox.mode}; retry it once with ${target}.`,
+  }
+}
 
 /**
  * Bridges the tool lifecycle to the native approval waterfall. Capturing is
@@ -167,10 +220,13 @@ export class AutoReviewGate {
     request: GateApprovalRequest,
     next: () => Promise<GateApprovalOutcome>,
   ): Promise<GateApprovalOutcome> {
-    if (request.callId === undefined) return next()
+    const fallback = (): Promise<GateApprovalOutcome> => request.agent.session.header?.origin === 'subagent'
+      ? Promise.resolve(request.signal?.aborted ? 'cancelled' : 'rejected')
+      : next()
+    if (request.callId === undefined) return fallback()
     const callId = request.callId
     const action = this.candidates.get(request.agent)?.get(callId)
-    if (action === undefined || action.name !== request.toolName) return next()
+    if (action === undefined || action.name !== request.toolName) return fallback()
     this.consume(request.agent, callId)
 
     const signal = request.signal ?? action.signal
@@ -198,7 +254,7 @@ export class AutoReviewGate {
           outcome: signal.aborted ? 'cancelled' : 'unavailable',
         })
       }
-      return next()
+      return fallback()
     }
     if (reviewId !== undefined) {
       request.agent.session.append('approval/decided', {
@@ -212,7 +268,45 @@ export class AutoReviewGate {
     }
     if (decision?.decision === 'allow') return 'allowed-once'
     if (decision?.decision === 'deny') return 'rejected'
-    return next()
+    return fallback()
+  }
+
+  /** Collapse a denied Bash call and its sanctioned escalation into one model-visible call. */
+  async postExecute(
+    exec: GateExecution,
+    result: Readonly<ToolExecutionResult>,
+    next: () => Promise<PostToolDecision>,
+    retry: (execution: GateRetryExecution) => Promise<ToolExecutionResult>,
+  ): Promise<PostToolDecision> {
+    const retryArguments = sandboxRetryArguments(exec, result)
+    if (retryArguments === undefined || exec.agent === undefined) return next()
+    try {
+      if (!await this.router.hasReviewer(exec.agent)) return next()
+      // This completed denial will not ask for approval itself; only its nested
+      // escalation can do so, and that call receives its own correlation id.
+      this.consume(exec.agent, exec.callId)
+      const retried = await retry({
+        callId: ToolCallId(`${String(exec.callId)}:auto-review-retry`),
+        name: exec.name,
+        arguments: retryArguments,
+        signal: exec.signal,
+      })
+      if (retried.isError) {
+        return {
+          kind: 'block',
+          feedback: retried.content,
+          ...retried.additionalContexts === undefined ? {} : { additionalContexts: retried.additionalContexts },
+        }
+      }
+      return {
+        kind: 'accept',
+        value: retried.value,
+        ...retried.additionalContexts === undefined ? {} : { additionalContexts: retried.additionalContexts },
+      }
+    } catch {
+      // A retry plumbing failure must not hide the original structured denial.
+      return next()
+    }
   }
 
   private remember(agent: ApprovalReviewHostAgent, exec: GateExecution): void {
@@ -244,5 +338,16 @@ export function installAutoReview(
 ): void {
   const gate = new AutoReviewGate(router)
   context.on('tools/pre-execute', (exec, next) => gate.preExecute(exec, next), { prepend: true })
+  context.on('tools/post-execute', (exec, result, next) => gate.postExecute(
+    exec,
+    result,
+    next,
+    retry => context.tools.execute({
+      ...retry,
+      rootCallId: exec.rootCallId,
+      parent: exec.token,
+      ...exec.agent === undefined ? {} : { agent: exec.agent },
+    }),
+  ), { prepend: true })
   context.on('approval/request', (request, next) => gate.answerApproval(request, next), { prepend: true })
 }

@@ -1,6 +1,7 @@
 /** Durable global Auto-Review default selected from Settings. */
 
-import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
+import { chmod, mkdir, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import type { ProviderId } from './auth/store.js'
@@ -35,7 +36,6 @@ async function atomicPersist(value: AutoReviewSettingsFile, path: string): Promi
  */
 export class AutoReviewDefaultStore {
   private current: StoredAutoReviewMode
-  private readonly ready: Promise<void>
   private writeChain: Promise<void> = Promise.resolve()
 
   constructor(
@@ -45,19 +45,22 @@ export class AutoReviewDefaultStore {
     private readonly path: string = autoReviewSettingsFilePath(),
   ) {
     this.current = fallback
-    this.ready = this.load()
+    this.load()
   }
 
-  /** Current value after the one startup read settles. */
+  /** Current value. */
   async get(): Promise<StoredAutoReviewMode> {
-    await this.ready
+    return this.current
+  }
+
+  /** Synchronous snapshot used at DSH's synchronous session-publication boundary. */
+  currentValue(): StoredAutoReviewMode {
     return this.current
   }
 
   /** Persist a Settings choice, then publish it to live sessions. */
   set(reviewer: StoredAutoReviewMode): Promise<void> {
     const run = this.writeChain.then(async () => {
-      await this.ready
       await atomicPersist({ reviewer }, this.path)
       this.current = reviewer
     })
@@ -65,10 +68,10 @@ export class AutoReviewDefaultStore {
     return run
   }
 
-  private async load(): Promise<void> {
+  private load(): void {
     let text: string
     try {
-      text = await readFile(this.path, 'utf8')
+      text = readFileSync(this.path, 'utf8')
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
       this.onWarn(`cannot read Auto-Review settings; using configured default: ${String(error)}`)

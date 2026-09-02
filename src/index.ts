@@ -912,6 +912,45 @@ export function apply(ctx: Context, config: Config): void {
     reviewer => reviewer === 'none' || availableAutoReviewers.has(reviewer),
     onWarn,
   )
+  // DSH deliberately pins in-process children to approval policy `never` so
+  // they cannot create an unattended human prompt. When this plugin supplies
+  // a machine reviewer, snapshot the parent's effective choice onto the child
+  // at the synchronous session-publication boundary and reopen only the native
+  // approval waterfall. `None` keeps DSH's fail-closed pin intact.
+  ctx.on('session/created', (session) => {
+    const childId = String(session.id)
+    const parentId = session.header.origin === 'subagent' && session.header.parentSession !== undefined
+      ? String(session.header.parentSession)
+      : undefined
+    if (parentId === undefined) return
+    const inheritedReviewer = sessionSetting(autoReviewBySession, parentId) ?? autoReviewDefault.currentValue()
+    const reviewer = inheritedReviewer !== 'none' && availableAutoReviewers.has(inheritedReviewer)
+      ? inheritedReviewer
+      : 'none'
+    autoReviewBySession.set(childId, reviewer)
+    const policy = reviewer === 'none' ? 'never' : 'ask'
+    for (let index = session.events.length - 1; index >= 0; index -= 1) {
+      const event = session.events[index]
+      if (event?.type !== 'approval/policy') continue
+      if (event.data.policy === policy) return
+      break
+    }
+    session.append('approval/policy', { policy, source: 'delegation' })
+  }, { global: true })
+  ctx.on('system-prompt/assemble', async (assembly, context, next) => {
+    const assembled = await next()
+    const agent = context.agent
+    if (agent?.session.header.origin !== 'subagent') return assembled
+    const childReviewer = autoReviewBySession.get(String(agent.id))
+    if (childReviewer === undefined || childReviewer === 'none') return assembled
+    const delegation = assembled.contexts.find(entry => entry.name === 'subagent:delegation')
+    if (delegation !== undefined) {
+      delegation.text = 'Automatic approval review is enabled for this delegated subagent. Operations that require '
+        + 'approval may request it through the configured reviewer; no human prompt is available, and a denied or '
+        + 'unavailable review remains denied.'
+    }
+    return assembled
+  }, { global: true, prepend: true })
   const autoReview: AutoReviewController = {
     async autoReview(sessionId) {
       return {

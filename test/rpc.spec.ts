@@ -28,6 +28,7 @@ async function mount(
   attachments?: FakeStore,
   autoReview?: 'none' | 'codex',
   parentSessions: Readonly<Record<string, string>> = {},
+  onMounted?: (ctx: Context) => void,
 ): Promise<ConnectionRpcHandler> {
   let handler: ConnectionRpcHandler | undefined
   const ctx = new Context()
@@ -50,6 +51,7 @@ async function mount(
   ctx.plugin(plugin, { providers: ['codex'], ...autoReview === undefined ? {} : { autoReview } })
   await new Promise(resolve => setTimeout(resolve, 50))
   assert.ok(handler !== undefined, 'the /subscriptions-auth channel was registered')
+  onMounted?.(ctx)
   return handler
 }
 
@@ -280,6 +282,90 @@ test('a subagent inherits the nearest ancestor Auto-Review choice', async () => 
   })
   await handler('setAutoReview', { sessionId: 'child', reviewer: 'none' }, signal)
   assert.deepEqual(await handler('autoReview', { sessionId: 'grandchild' }, signal), {
+    ok: true,
+    value: { reviewer: 'none', reviewers: CODEX_REVIEWERS },
+  })
+})
+
+test('a delegated subagent routes approvals through its inherited automatic reviewer', async () => {
+  let context: Context | undefined
+  const handler = await mount(undefined, 'none', { child: 'parent' }, (ctx) => { context = ctx })
+  const signal = new AbortController().signal
+  await handler('setAutoReview', { sessionId: 'parent', reviewer: 'codex' }, signal)
+
+  const events: Array<{ type: string; data: Record<string, unknown> }> = [{
+    type: 'approval/policy',
+    data: { policy: 'never', source: 'delegation' },
+  }]
+  const childSession = {
+    id: 'child',
+    header: { id: 'child', parentSession: 'parent', origin: 'subagent' },
+    events,
+    append(type: string, data: Record<string, unknown>) {
+      events.push({ type, data })
+    },
+  }
+
+  const hook = context?.events._hooks['session/created']?.find(candidate => candidate.ctx !== context)
+    ?? context?.events._hooks['session/created']?.[0]
+  assert.ok(hook !== undefined, 'the plugin must observe delegated session creation')
+  assert.equal(hook.callback(childSession), undefined, 'the delegation snapshot must be synchronous')
+  assert.deepEqual(events.at(-1), {
+    type: 'approval/policy',
+    data: { policy: 'ask', source: 'delegation' },
+  })
+  const promptHook = context?.events._hooks['system-prompt/assemble']?.[0]
+  assert.ok(promptHook !== undefined, 'the plugin must correct the delegated permission context')
+  const assembly = {
+    sections: [],
+    contexts: [{
+      name: 'subagent:delegation',
+      text: 'Operations that require approval are rejected automatically.',
+    }],
+    tools: [],
+    variables: {},
+  }
+  const assembled = await promptHook.callback(
+    assembly,
+    { agent: { id: 'child', session: childSession } },
+    async () => assembly,
+  ) as typeof assembly
+  assert.equal(
+    assembled.contexts[0]?.text,
+    'Automatic approval review is enabled for this delegated subagent. Operations that require approval '
+      + 'may request it through the configured reviewer; no human prompt is available, and a denied or '
+      + 'unavailable review remains denied.',
+  )
+  assert.deepEqual(await handler('autoReview', { sessionId: 'child' }, signal), {
+    ok: true,
+    value: { reviewer: 'codex', reviewers: CODEX_REVIEWERS },
+  })
+})
+
+test('a delegated subagent keeps approvals disabled when no automatic reviewer is selected', async () => {
+  let context: Context | undefined
+  const handler = await mount(undefined, 'none', { child: 'parent' }, (ctx) => { context = ctx })
+  const events: Array<{ type: string; data: Record<string, unknown> }> = [{
+    type: 'approval/policy',
+    data: { policy: 'never', source: 'delegation' },
+  }]
+  const childSession = {
+    id: 'child',
+    header: { id: 'child', parentSession: 'parent', origin: 'subagent' },
+    events,
+    append(type: string, data: Record<string, unknown>) {
+      events.push({ type, data })
+    },
+  }
+
+  const hook = context?.events._hooks['session/created']?.[0]
+  assert.ok(hook !== undefined, 'the plugin must observe delegated session creation')
+  assert.equal(hook.callback(childSession), undefined)
+  assert.deepEqual(events, [{
+    type: 'approval/policy',
+    data: { policy: 'never', source: 'delegation' },
+  }])
+  assert.deepEqual(await handler('autoReview', { sessionId: 'child' }, new AbortController().signal), {
     ok: true,
     value: { reviewer: 'none', reviewers: CODEX_REVIEWERS },
   })

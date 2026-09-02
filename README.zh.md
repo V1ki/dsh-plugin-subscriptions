@@ -22,7 +22,7 @@
 
 ![速度开关及其标准/快速菜单](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
 
-原生沙箱提权提示也可以使用 **Auto-Review**。全局默认值在 **设置 → 订阅** 中配置,默认关闭(`None`);输入框选择器可按会话覆盖,子代理继承最近父会话的选择。选择 `Codex` 后,只有已经进入 DSH 原生审批服务的操作才会使用 Codex Guardian 策略和 `codex-auto-review` 模型进行审核。对话中会先显示 `Auto-Review · Codex · Reviewing...`,再更新为审核结果。审核不可用、结论不确定或失败时,仍会回退到正常的人工审批提示。设置保存在 `~/.dsh/plugins/subscriptions/auto-review.json`,重启后仍然有效。
+原生沙箱提权提示也可以使用 **Auto-Review**。全局默认值在 **设置 → 订阅** 中配置,默认关闭(`None`);输入框选择器可按会话覆盖,子代理继承最近父会话的选择。选择 `Codex` 后,只有已经进入 DSH 原生审批服务的操作才会使用 Codex Guardian 策略和 `codex-auto-review` 模型进行审核。前台 Bash 调用报告结构化沙箱拒绝后,合规的单级提权重试会在原工具调用内部执行,因此对话只保留一张 Bash 卡片,同时审核仍以真实拒绝为依据。对话中会先显示 `Auto-Review · Codex · Reviewing...`,再更新为审核结果。顶层会话中的审核不可用、结论不确定或失败时,仍会回退到正常的人工审批提示。委派子代理绝不会创建隐藏的人工提示:没有可用 reviewer 时保留 DSH 的 `never` 策略,reviewer 失败时则以 fail-closed 结束。设置保存在 `~/.dsh/plugins/subscriptions/auto-review.json`,重启后仍然有效。
 
 `image_generate` 工具生成的图片直接内联显示在对话里:
 
