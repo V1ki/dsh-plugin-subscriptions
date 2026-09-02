@@ -2,7 +2,8 @@
  * Unit tests for the `/subscriptions-auth` `image` endpoint: payload
  * validation, the base64 round trip through a fake attachment store, and the
  * no-service / read-failure error results. Drives the real plugin wiring with
- * a fake host connection; DSH_HOME is redirected to a temp dir.
+ * a fake host connection; DSH_HOME is redirected to a temp dir. Also covers
+ * the `status` endpoint degrading per provider when one store entry is corrupt.
  */
 
 import { test } from 'node:test'
@@ -178,4 +179,26 @@ test('speed endpoints: per-session tier round trip and payload validation', asyn
       assert.match(result.error.message, pattern)
     }
   }
+})
+
+test('status endpoint: one corrupt provider entry degrades alone, others still report', async () => {
+  // The exact corruption seen in the wild: empty tokens under a claude key.
+  // Before the fix this rejected the WHOLE status call and the UI sat on
+  // "Checking…" forever with every provider blind.
+  const { mkdirSync: mkDir } = await import('node:fs')
+  const home = process.env.DSH_HOME as string
+  mkDir(join(home, 'plugins', 'subscriptions'), { recursive: true })
+  writeFileSync(join(home, 'plugins', 'subscriptions', 'auth.json'), JSON.stringify({
+    codex: { default: 'acct-1', accounts: { 'acct-1': {
+      accessToken: 'at', refreshToken: 'rt', expiresAt: Date.now() + 3600_000, accountId: 'acct-1',
+    } } },
+    claude: { default: 'corrupt', accounts: { corrupt: { accessToken: '', refreshToken: '', expiresAt: 0 } } },
+  }), { mode: 0o600 })
+  const handler = await mount()
+  const result = await handler('status', {}, new AbortController().signal)
+  assert.ok(result.ok, 'the status call itself must succeed')
+  if (!result.ok) return
+  const providers = (result.value as { providers: Record<string, { accounts: unknown[]; detail?: string }> }).providers
+  assert.equal(providers.codex.accounts.length, 1, 'codex still reports its account')
+  assert.equal(providers.claude.accounts.length, 0, 'the corrupt claude entry is skipped')
 })

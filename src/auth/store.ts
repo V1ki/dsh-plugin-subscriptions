@@ -203,7 +203,15 @@ export async function loadStore(path = authFilePath()): Promise<SessionMap> {
   return parseStore(text, path)
 }
 
-/** Parse, validate, and migrate store JSON read from `path`. */
+/**
+ * Parse and migrate store JSON read from `path`. An ACCOUNT entry whose shape
+ * is invalid (empty or missing tokens — corruption seen in the wild from a
+ * broken keychain import) is SKIPPED instead of rejected: one bad entry must
+ * not blind every provider's status read, and a session without tokens is
+ * unusable by definition, so nothing of value is discarded. The next write
+ * persists the store without the skipped entry. Structural failures (invalid
+ * JSON, a non-object file) still throw — those say the file itself is broken.
+ */
 function parseStore(text: string, path: string): SessionMap {
   let parsed: unknown
   try {
@@ -220,12 +228,16 @@ function parseStore(text: string, path: string): SessionMap {
     const entry = raw[provider]
     if (entry === undefined) continue
     if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
-      throw new Error(`subscriptions auth store: entry "${provider}" is not an object; fix or delete the store file`)
+      console.warn(`subscriptions auth store: entry "${provider}" is not an object; skipped`)
+      continue
     }
     const record = entry as Record<string, unknown>
     if (typeof record.accessToken === 'string') {
       // Single-account format: wrap the bare session, preserving every field.
-      assertSessionShape(provider, '(legacy)', record)
+      if (!isValidSessionShape(record)) {
+        console.warn(`subscriptions auth store: legacy entry "${provider}" has no usable tokens; skipped`)
+        continue
+      }
       const session = record as unknown as StoredSession
       const key = accountKeyOf(provider, session)
       ;(store as Record<string, unknown>)[provider] = { default: key, accounts: { [key]: session } }
@@ -233,19 +245,39 @@ function parseStore(text: string, path: string): SessionMap {
     }
     const accounts = record.accounts
     if (typeof accounts !== 'object' || accounts === null || Array.isArray(accounts)) {
-      throw new Error(
-        `subscriptions auth store: entry "${provider}" has no accounts map; fix or delete the store file`,
-      )
+      console.warn(`subscriptions auth store: entry "${provider}" has no accounts map; skipped`)
+      continue
     }
     if (record.default !== undefined && typeof record.default !== 'string') {
-      throw new Error(`subscriptions auth store: entry "${provider}" default is not a string; fix or delete the store file`)
+      console.warn(`subscriptions auth store: entry "${provider}" default is not a string; skipped`)
+      continue
     }
+    const kept: Record<string, StoredSession> = {}
     for (const [account, session] of Object.entries(accounts)) {
-      assertSessionShape(provider, account, session)
+      if (isValidSessionShape(session)) {
+        kept[account] = session as StoredSession
+      } else {
+        console.warn(
+          `subscriptions auth store: entry "${provider}/${account}" has no usable accessToken/refreshToken/expiresAt; skipped`,
+        )
+      }
     }
-    ;(store as Record<string, unknown>)[provider] = record
+    if (Object.keys(kept).length === 0) continue
+    const validDefault = record.default === undefined || record.default in kept
+      ? record.default as string | undefined
+      : Object.keys(kept)[0]
+    ;(store as Record<string, unknown>)[provider] = { ...record, default: validDefault, accounts: kept }
   }
   return store
+}
+
+/** Whether a value carries the fields every stored session needs (non-empty tokens). */
+function isValidSessionShape(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false
+  const entry = value as Record<string, unknown>
+  return typeof entry.accessToken === 'string' && entry.accessToken.length > 0
+    && typeof entry.refreshToken === 'string' && entry.refreshToken.length > 0
+    && typeof entry.expiresAt === 'number' && Number.isFinite(entry.expiresAt)
 }
 
 /** Persist the whole store atomically with owner-only permissions. */
@@ -335,10 +367,15 @@ export async function getAccountSession<K extends ProviderId>(
 /**
  * Write one account's session, preserving the others. The first account of a
  * provider becomes its default.
+ *
+ * The session is validated before it lands: a corrupt entry written here
+ * would fail every later read of the whole store (one bad entry breaks all
+ * providers' status), so the write path must be as strict as the read path.
  * @param provider - the provider route.
  * @param account - the account key (see {@link accountKeyOf}).
  * @param session - the fresh session from a login or refresh.
  * @param path - store file path; defaults to {@link authFilePath}.
+ * @throws when the session is missing accessToken/refreshToken/expiresAt.
  */
 export async function saveAccountSession<K extends ProviderId>(
   provider: K,
@@ -346,6 +383,7 @@ export async function saveAccountSession<K extends ProviderId>(
   session: SessionOf<K>,
   path = authFilePath(),
 ): Promise<void> {
+  assertSessionShape(provider, account, session)
   return serialize(path, async () => {
     const store = await loadStore(path)
     const entry = store[provider] as ProviderAccounts<SessionOf<K>> | undefined
