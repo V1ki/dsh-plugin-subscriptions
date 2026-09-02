@@ -1035,6 +1035,25 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
         <div style={styles.cardHeader}>
           <span style={{
             ...styles.dot,
+            background: proxy?.enabled === true
+              ? 'var(--dsw-alias-state-success-primary)'
+              : 'var(--dsw-alias-label-dimmed)',
+          }} />
+          <span style={styles.name}>{t('proxyTitle')}</span>
+          <button
+            type="button"
+            style={{ ...styles.button, marginLeft: 'auto', flexShrink: 0 }}
+            onClick={openProxyDialog}
+          >
+            {t('proxyConfigure')}
+          </button>
+        </div>
+        <p style={styles.statusLine}>{proxyStatusText(t, proxy, proxyLoadError)}</p>
+      </div>
+      <div style={styles.proxyCard}>
+        <div style={styles.cardHeader}>
+          <span style={{
+            ...styles.dot,
             background: autoReviewDefault?.reviewer !== undefined && autoReviewDefault.reviewer !== 'none'
               ? 'var(--dsw-alias-state-success-primary)'
               : 'var(--dsw-alias-label-dimmed)',
@@ -1067,25 +1086,6 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
             })}
           </p>
         )}
-      </div>
-      <div style={styles.proxyCard}>
-        <div style={styles.cardHeader}>
-          <span style={{
-            ...styles.dot,
-            background: proxy?.enabled === true
-              ? 'var(--dsw-alias-state-success-primary)'
-              : 'var(--dsw-alias-label-dimmed)',
-          }} />
-          <span style={styles.name}>{t('proxyTitle')}</span>
-          <button
-            type="button"
-            style={{ ...styles.button, marginLeft: 'auto', flexShrink: 0 }}
-            onClick={openProxyDialog}
-          >
-            {t('proxyConfigure')}
-          </button>
-        </div>
-        <p style={styles.statusLine}>{proxyStatusText(t, proxy, proxyLoadError)}</p>
       </div>
       <div style={styles.separator} />
       {PROVIDERS.map(({ id, name }) => {
