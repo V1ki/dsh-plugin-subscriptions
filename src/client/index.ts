@@ -33,6 +33,8 @@ import type { ModelDirectoriesLike, SpeedSelectInjected } from './SpeedSelect.js
 import { AutoReviewSelect, createAutoReviewLoader, createAutoReviewSetter } from './AutoReviewSelect.js'
 import type { AutoReviewSelectInjected } from './AutoReviewSelect.js'
 import { registerAutoReviewActivity } from './AutoReviewActivity.js'
+import { SubscriptionUsageBadge } from './SubscriptionUsageBadge.js'
+import type { SubscriptionUsageBadgeInjected } from './SubscriptionUsageBadge.js'
 import { en, zh } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
 
@@ -47,6 +49,7 @@ export type {
   AutoReviewSelectProps,
   AutoReviewState,
 } from './AutoReviewSelect.js'
+export type { SubscriptionUsageBadgeInjected, SubscriptionUsageBadgeProps } from './SubscriptionUsageBadge.js'
 export type { SubscriptionsKey } from './locales.js'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -151,6 +154,16 @@ export function apply(ctx: ClientContext): void {
       setAutoReview: createAutoReviewSetter(connection.rpc, sessionId),
     }),
   }, AutoReviewSelect))
+
+  // The subscription usage badge renders a compact readout in the composer's
+  // stats strip (conversation.composer.dock) — e.g. "Claude 5h 45% · Wk 23%".
+  // A fresh id means it appears beside the shipped StatsLine, never replacing it.
+  ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
+    name: 'conversation.composer.dock',
+    id: 'subscription-usage',
+    order: 10,
+    inject: (): SubscriptionUsageBadgeInjected => ({ rpc: connection.rpc }),
+  }, SubscriptionUsageBadge))
 
   // The /fast slash command offers the same Standard/Fast choice as a popup.
   // `available` is synchronous and sees only the session id, so the command

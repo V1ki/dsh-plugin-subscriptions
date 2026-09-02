@@ -53,6 +53,11 @@ interface SnapshotEntry {
  * promise ever reached `entries`. For an endpoint that rate-limits
  * progressively (each hit within the window pushes the next one further
  * out), that retry storm is a permanent lockout, not a transient blip.
+ *
+ * `lastSnapshot` carries forward the most recent successful fetch, when one
+ * exists, so a member/display that was showing real data before this
+ * failure keeps showing it (stale, but not blank) through the cooldown
+ * instead of falling back to the zero-urgency/no-data degraded state.
  */
 interface FailureEntry {
   snapshot?: undefined
@@ -60,6 +65,8 @@ interface FailureEntry {
   at: number
   /** Overrides `ttlMs` — the endpoint's own `retry-after` when it sent one. */
   cooldownMs: number
+  /** The last successful snapshot before this failure, when one exists. */
+  lastSnapshot?: ProviderUsage
 }
 
 type CacheEntry = SnapshotEntry | FailureEntry
@@ -86,6 +93,14 @@ export class PoolUsageTracker {
    * stale one answers immediately while the refresh serves the NEXT call
    * (member selection must never block on the network mid-conversation). A
    * failure still cooling down degrades immediately with no network call.
+   *
+   * Deliberately does NOT fall back to `lastSnapshot` the way
+   * {@link snapshotFor} does: scoring routing decisions off data that is
+   * known to be stale-and-unrefreshable risks steering traffic by a urgency
+   * number the endpoint itself is no longer vouching for, whereas
+   * `snapshotFor`'s stale-display concern (the Settings page, the composer
+   * badge) has no such downside — showing an old percentage beats showing
+   * nothing.
    * @param member - the pool member to score (account resolved).
    * @returns availability plus the urgency score.
    */
@@ -131,11 +146,26 @@ export class PoolUsageTracker {
     if (entry !== undefined && Date.now() - entry.at < (entry.cooldownMs ?? this.ttlMs)) {
       if (entry.snapshot !== undefined) {
         if (!force) return entry.snapshot
+      } else if (entry.lastSnapshot !== undefined) {
+        // A stale-but-real snapshot beats surfacing the cooldown error to
+        // every display surface — this is what was previously showing, so
+        // keep showing it (even through a forced refresh: retrying past the
+        // cooldown is exactly the retry storm `cooldownMs` exists to avoid).
+        return entry.lastSnapshot
       } else {
         throw entry.error
       }
     }
-    return this.refresh(key, fetcher)
+    try {
+      return await this.refresh(key, fetcher)
+    } catch (error: unknown) {
+      // Same fallback as the already-cooling-down branch above, for the
+      // fetch that just failed on THIS call: `refresh` recorded whatever
+      // snapshot was on record before it ran onto the new failure entry.
+      const failed = this.entries.get(key)
+      if (failed?.snapshot === undefined && failed?.lastSnapshot !== undefined) return failed.lastSnapshot
+      throw error
+    }
   }
 
   /** Drop cached snapshots: one account, or a whole provider when `account` is omitted. */
@@ -160,6 +190,9 @@ export class PoolUsageTracker {
   private refresh(key: string, fetcher: () => Promise<ProviderUsage>): Promise<ProviderUsage> {
     let pending = this.inflight.get(key)
     if (pending === undefined) {
+      // Captured before the fetch starts: whichever real snapshot is on
+      // record right now is what a failure below should fall back to.
+      const lastSnapshot = this.entries.get(key)?.snapshot
       pending = fetcher().then(
         (snapshot) => {
           this.entries.set(key, { snapshot, at: Date.now() })
@@ -167,7 +200,12 @@ export class PoolUsageTracker {
         },
         (error: unknown) => {
           if (!isMissingOrInvalidCredential(error)) {
-            this.entries.set(key, { error, at: Date.now(), cooldownMs: cooldownFor(error, this.ttlMs) })
+            this.entries.set(key, {
+              error,
+              at: Date.now(),
+              cooldownMs: cooldownFor(error, this.ttlMs),
+              ...lastSnapshot === undefined ? {} : { lastSnapshot },
+            })
           }
           throw error
         },

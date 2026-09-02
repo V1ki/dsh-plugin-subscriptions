@@ -99,3 +99,38 @@ test('snapshotFor: a provider without a usage fetcher answers supported:false', 
   const usage = await tracker.snapshotFor('grok', 'a1')
   assert.deepEqual(usage, { supported: false })
 })
+
+test('snapshotFor: a rate limit after a prior success serves the stale snapshot instead of throwing', async () => {
+  let rateLimited = false
+  const { tracker, calls } = trackerOf(() => {
+    if (rateLimited) {
+      return Promise.reject(new OAuthEndpointError('claude usage token endpoint error (HTTP 429)', 429, undefined, 60_000))
+    }
+    return Promise.resolve(OK_USAGE)
+  }, 10)
+
+  const first = await tracker.snapshotFor('claude', 'a1')
+  assert.deepEqual(first, OK_USAGE)
+
+  // Past the 10ms TTL, so the next call re-fetches instead of serving the
+  // fresh-cache fast path.
+  await new Promise(resolve => setTimeout(resolve, 20))
+  rateLimited = true
+  const second = await tracker.snapshotFor('claude', 'a1')
+  assert.deepEqual(second, OK_USAGE, 'a rate-limited refresh should serve the last-known snapshot, not throw')
+  assert.equal(calls.count, 2)
+
+  // Still cooling down: repeat calls (forced or not) keep serving the
+  // stale snapshot rather than re-hitting the endpoint or throwing.
+  const third = await tracker.snapshotFor('claude', 'a1')
+  const forced = await tracker.snapshotFor('claude', 'a1', true)
+  assert.deepEqual(third, OK_USAGE)
+  assert.deepEqual(forced, OK_USAGE)
+  assert.equal(calls.count, 2, 'the live cooldown must not be bypassed even by a forced call')
+})
+
+test('snapshotFor: a rate limit with no prior success still throws (nothing to fall back to)', async () => {
+  const error = new OAuthEndpointError('claude usage token endpoint error (HTTP 429)', 429, undefined, 60_000)
+  const { tracker } = trackerOf(() => Promise.reject(error))
+  await assert.rejects(tracker.snapshotFor('claude', 'a1'), error)
+})
