@@ -64,7 +64,7 @@ export function formatAutoReviewActivity(provider: string, outcome?: string): st
       : outcome === 'rejected'
         ? 'Denied'
         : outcome === 'unavailable'
-          ? 'Manual approval'
+          ? 'Unavailable'
           : outcome === 'cancelled'
             ? 'Cancelled'
             : 'Completed'

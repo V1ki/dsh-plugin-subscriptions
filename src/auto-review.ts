@@ -77,7 +77,7 @@ export interface ApprovalReviewRequest {
   readonly signal: AbortSignal
 }
 
-/** Closed review result. `ask` delegates the same request to the native human reviewer. */
+/** Closed review result. `ask` is inconclusive and stays denied while a reviewer is selected. */
 export interface ApprovalReviewDecision {
   readonly decision: 'allow' | 'deny' | 'ask'
   readonly reason: string
@@ -87,9 +87,9 @@ export interface ApprovalReviewDecision {
  * One provider-owned automatic reviewer implementation.
  *
  * The provider owns classifier policy, transcript projection, transport,
- * retries, and provider-specific failure semantics. The shared gate only
- * routes a real DSH approval request and preserves manual approval as its
- * fallback.
+ * retries, and provider-specific failure semantics. The shared gate routes a
+ * real DSH approval request; with a reviewer selected it fail-closes instead
+ * of falling through to a human prompt.
  */
 export interface ApprovalReviewer {
   readonly reviewerId: ProviderId
@@ -159,7 +159,7 @@ export interface GateApprovalRequest {
 /**
  * Local safeguard, not a Codex constant. Sixty-four is above a plausible
  * parallel approval burst while bounding orphaned `ask` calls that never reach
- * `approval/request`; an evicted call simply uses native manual approval.
+ * `approval/request`. An evicted call stays denied while a reviewer is selected.
  */
 const MAX_RECENT_CANDIDATES = 64
 
@@ -223,13 +223,15 @@ export class AutoReviewGate {
     request: GateApprovalRequest,
     next: () => Promise<GateApprovalOutcome>,
   ): Promise<GateApprovalOutcome> {
-    const fallback = (): Promise<GateApprovalOutcome> => request.agent.session.header?.origin === 'subagent'
-      ? Promise.resolve(request.signal?.aborted ? 'cancelled' : 'rejected')
+    const machineReview = await this.router.hasReviewer(request.agent)
+    const failClosed = machineReview || request.agent.session.header?.origin === 'subagent'
+    const fallback = (signal?: AbortSignal): Promise<GateApprovalOutcome> => failClosed
+      ? Promise.resolve(signal?.aborted ? 'cancelled' : 'rejected')
       : next()
-    if (request.callId === undefined) return fallback()
+    if (request.callId === undefined) return fallback(request.signal)
     const callId = request.callId
     const action = this.candidates.get(request.agent)?.get(callId)
-    if (action === undefined || action.name !== request.toolName) return fallback()
+    if (action === undefined || action.name !== request.toolName) return fallback(request.signal)
     this.consume(request.agent, callId)
 
     const signal = request.signal ?? action.signal
@@ -257,7 +259,7 @@ export class AutoReviewGate {
           outcome: signal.aborted ? 'cancelled' : 'unavailable',
         })
       }
-      return fallback()
+      return fallback(signal)
     }
     if (reviewId !== undefined) {
       request.agent.session.append('approval/decided', {
@@ -271,7 +273,7 @@ export class AutoReviewGate {
     }
     if (decision?.decision === 'allow') return 'allowed-once'
     if (decision?.decision === 'deny') return 'rejected'
-    return fallback()
+    return fallback(signal)
   }
 
   /** Collapse a denied Bash call and its sanctioned escalation into one model-visible call. */

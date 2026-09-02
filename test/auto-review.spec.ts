@@ -208,34 +208,31 @@ test('one captured action can be reviewed only once', async () => {
   }), 'allowed-once')
   assert.equal(await gate.answerApproval({ agent, callId: toolCallId('call-1'), toolName: 'bash' }, async () => {
     manualApprovals += 1
-    return 'rejected'
+    return 'allowed-once'
   }), 'rejected')
   assert.equal(reviews, 1)
-  assert.equal(manualApprovals, 1)
+  assert.equal(manualApprovals, 0)
 })
 
-test('deny rejects while ask, missing reviewer, and provider failure use native manual approval', async () => {
+test('deny, ask, and provider failure stay rejected while a reviewer is selected', async () => {
   const cases = [
     {
       id: 'deny',
       implementation: reviewer('codex', async () => ({ decision: 'deny', reason: 'Unsafe.' })),
       expected: 'rejected',
       audit: 'rejected',
-      manual: 0,
     },
     {
       id: 'ask',
       implementation: reviewer('codex', async () => ({ decision: 'ask', reason: 'Ambiguous.' })),
-      expected: 'allowed-once',
+      expected: 'rejected',
       audit: 'unavailable',
-      manual: 1,
     },
     {
       id: 'failure',
       implementation: reviewer('codex', async () => { throw new Error('offline') }),
-      expected: 'allowed-once',
+      expected: 'rejected',
       audit: 'unavailable',
-      manual: 1,
     },
   ] as const
 
@@ -250,7 +247,7 @@ test('deny rejects while ask, missing reviewer, and provider failure use native 
       return 'allowed-once'
     })
     assert.equal(outcome, item.expected)
-    assert.equal(manual, item.manual)
+    assert.equal(manual, 0)
     const audit = events.findLast(event => event.type === 'approval/decided')
     assert.equal(audit?.data.outcome, item.audit)
   }
@@ -292,6 +289,7 @@ test('a delegated subagent fails closed when its automatic reviewer is unavailab
 test('an approval cannot consume another tool or call id', async () => {
   const agent = fixtureAgent()
   let reviews = 0
+  let manual = 0
   const gate = new AutoReviewGate(new ApprovalReviewRouter([
     reviewer('codex', async () => {
       reviews += 1
@@ -300,9 +298,84 @@ test('an approval cannot consume another tool or call id', async () => {
   ], () => 'codex'))
   await gate.preExecute(execution(agent), async () => ({ kind: 'ask' }))
 
-  assert.equal(await gate.answerApproval({ agent, callId: toolCallId('other'), toolName: 'bash' }, async () => 'rejected'), 'rejected')
-  assert.equal(await gate.answerApproval({ agent, callId: toolCallId('call-1'), toolName: 'write_file' }, async () => 'rejected'), 'rejected')
+  assert.equal(await gate.answerApproval({ agent, callId: toolCallId('other'), toolName: 'bash' }, async () => {
+    manual += 1
+    return 'allowed-once'
+  }), 'rejected')
+  assert.equal(await gate.answerApproval({ agent, callId: toolCallId('call-1'), toolName: 'write_file' }, async () => {
+    manual += 1
+    return 'allowed-once'
+  }), 'rejected')
   assert.equal(reviews, 0)
+  assert.equal(manual, 0)
+})
+
+test('a selected reviewer does not fall through when correlation is missing', async () => {
+  const agent = fixtureAgent()
+  let reviews = 0
+  let manual = 0
+  const gate = new AutoReviewGate(new ApprovalReviewRouter([
+    reviewer('codex', async () => {
+      reviews += 1
+      return { decision: 'allow', reason: 'Scoped.' }
+    }),
+  ], () => 'codex'))
+  await gate.preExecute(execution(agent), async () => ({ kind: 'ask' }))
+  const outcome = await gate.answerApproval({ agent, toolName: 'bash' }, async () => {
+    manual += 1
+    return 'allowed-once'
+  })
+  assert.equal(outcome, 'rejected')
+  assert.equal(reviews, 0)
+  assert.equal(manual, 0)
+})
+
+test('a selected reviewer does not fall through after the 64-call eviction window', async () => {
+  const agent = fixtureAgent()
+  let reviews = 0
+  let manual = 0
+  const gate = new AutoReviewGate(new ApprovalReviewRouter([
+    reviewer('codex', async () => {
+      reviews += 1
+      return { decision: 'allow', reason: 'Scoped.' }
+    }),
+  ], () => 'codex'))
+  await gate.preExecute(execution(agent, 'evicted'), async () => ({ kind: 'ask' }))
+  for (let index = 0; index < 64; index += 1) {
+    await gate.preExecute(execution(agent, `keep-${index}`), async () => ({ kind: 'ask' }))
+  }
+  const outcome = await gate.answerApproval({
+    agent,
+    callId: toolCallId('evicted'),
+    toolName: 'bash',
+  }, async () => {
+    manual += 1
+    return 'allowed-once'
+  })
+  assert.equal(outcome, 'rejected')
+  assert.equal(reviews, 0)
+  assert.equal(manual, 0)
+})
+
+test('a selected-reviewer abort is cancelled rather than denied', async () => {
+  const agent = fixtureAgent()
+  let manual = 0
+  const gate = new AutoReviewGate(new ApprovalReviewRouter([
+    reviewer('codex', async () => { throw new Error('offline') }),
+  ], () => 'codex'))
+  const signal = AbortSignal.abort()
+  await gate.preExecute(execution(agent, 'aborted'), async () => ({ kind: 'ask' }))
+  const outcome = await gate.answerApproval({
+    agent,
+    callId: toolCallId('aborted'),
+    toolName: 'bash',
+    signal,
+  }, async () => {
+    manual += 1
+    return 'allowed-once'
+  })
+  assert.equal(outcome, 'cancelled')
+  assert.equal(manual, 0)
 })
 
 test('an allowed tool can be reviewed if it asks for escalation during execute', async () => {

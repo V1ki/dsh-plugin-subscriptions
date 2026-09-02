@@ -34,7 +34,7 @@ test('auto-review chat activity names the provider and visible review result', a
   assert.equal(loaded.formatAutoReviewActivity('Codex'), 'Auto-Review · Codex · Reviewing...')
   assert.equal(loaded.formatAutoReviewActivity('Codex', 'allowed-once'), 'Auto-Review · Codex · Allowed')
   assert.equal(loaded.formatAutoReviewActivity('Codex', 'rejected'), 'Auto-Review · Codex · Denied')
-  assert.equal(loaded.formatAutoReviewActivity('Codex', 'unavailable'), 'Auto-Review · Codex · Manual approval')
+  assert.equal(loaded.formatAutoReviewActivity('Codex', 'unavailable'), 'Auto-Review · Codex · Unavailable')
 })
 
 test('auto-review composer callbacks bind reads and writes to one session', async () => {
