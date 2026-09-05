@@ -353,12 +353,15 @@ export async function fetchGrokUsage(
   const payload = await response.json() as { config?: GrokBillingConfig | null; subscriptionTier?: string }
   const config = typeof payload.config === 'object' && payload.config !== null ? payload.config : {}
   const windows: UsageWindow[] = []
-  if (typeof config.creditUsagePercent === 'number' && Number.isFinite(config.creditUsagePercent)) {
+  if (config.currentPeriod || (typeof config.creditUsagePercent === 'number' && Number.isFinite(config.creditUsagePercent))) {
     const kind: UsageWindow['kind'] = config.currentPeriod?.type === 'USAGE_PERIOD_TYPE_WEEKLY'
       ? 'weekly'
       : 'other'
     const resetsAt = grokResetsAt(config.currentPeriod?.end)
-    windows.push({ kind, usedPercent: config.creditUsagePercent, ...resetsAt === undefined ? {} : { resetsAt } })
+    const usedPercent = typeof config.creditUsagePercent === 'number' && Number.isFinite(config.creditUsagePercent)
+      ? config.creditUsagePercent
+      : 0
+    windows.push({ kind, usedPercent, ...resetsAt === undefined ? {} : { resetsAt } })
   } else if (typeof config.monthlyLimit?.val === 'number' && config.monthlyLimit.val > 0) {
     const used = typeof config.used?.val === 'number' ? config.used.val : 0
     const resetsAt = grokResetsAt(config.billingPeriodEnd)
