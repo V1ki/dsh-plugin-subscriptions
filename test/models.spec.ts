@@ -10,7 +10,7 @@ import assert from 'node:assert/strict'
 import './keep-alive.js'
 import { MessageId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { Message } from '@deepseek-ai/dsh-llm'
-import { CodexAdapter, codexRequestBody, fetchCodexModels } from '../src/providers/codex.js'
+import { CODEX_CLIENT_VERSION, CODEX_MODELS_URL, CodexAdapter, codexRequestBody, fetchCodexModels } from '../src/providers/codex.js'
 import { GrokAdapter } from '../src/providers/grok.js'
 import { ClaudeAdapter, claudeRequestBody } from '../src/providers/claude.js'
 import { CopilotAdapter, fetchCopilotModels } from '../src/providers/copilot.js'
@@ -23,6 +23,17 @@ import { withTimeout } from '../src/providers/common.js'
 const STATIC_CODEX = [{ id: 'gpt-5.1-codex', name: 'GPT-5.1 Codex' }]
 const STATIC_CLAUDE = [{ id: 'claude-opus-4-5', name: 'Claude Opus 4.5' }]
 const STATIC_GROK = [{ id: 'grok-4', name: 'Grok 4' }]
+
+test('Codex discovery sends the current client version', async () => {
+  let requestedUrl = ''
+  const fetchFn: FetchFn = ((url: string) => {
+    requestedUrl = url
+    return Promise.resolve(new Response(JSON.stringify({ models: [{ slug: 'model' }] })))
+  }) as FetchFn
+  await fetchCodexModels(codexSession, fetchFn)
+  assert.equal(requestedUrl, `${CODEX_MODELS_URL}?client_version=${CODEX_CLIENT_VERSION}`)
+  assert.equal(CODEX_CLIENT_VERSION, '0.153.4')
+})
 
 const codexSession: CodexSession = {
   accessToken: 'at',

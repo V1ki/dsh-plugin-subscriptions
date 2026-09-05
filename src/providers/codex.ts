@@ -393,7 +393,7 @@ export const CODEX_MODELS_URL = 'https://chatgpt.com/backend-api/codex/models'
  * list, while current codex CLI releases get the full catalog — keep this in
  * the range of current codex CLI releases.
  */
-export const CODEX_CLIENT_VERSION = '0.147.0'
+export const CODEX_CLIENT_VERSION = '0.153.4'
 
 /** The codex `/models` entry shape this plugin reads (subset of codex-rs `ModelInfo`). */
 interface CodexWireModel {
