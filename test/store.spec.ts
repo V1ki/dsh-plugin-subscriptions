@@ -153,3 +153,46 @@ test('a single-account store migrates on read, preserving every field', async ()
   const onDisk = JSON.parse(readFileSync(path, 'utf8')) as Record<string, { accounts?: unknown }>
   assert.ok(onDisk.codex?.accounts !== undefined, 'the file now uses the accounts shape')
 })
+
+test('saveAccountSession rejects an empty-token session before it can poison the store', async () => {
+  const path = storePath()
+  await saveAccountSession('codex', 'acct-1', CODEX, path)
+  const corrupt = { ...CLAUDE, accessToken: '', refreshToken: '', expiresAt: 0 }
+  await saveAccountSession('claude', 'corrupt', corrupt, path).then(
+    () => assert.fail('saving an empty-token session must throw'),
+    (error: unknown) => assert.match(String(error), /missing accessToken\/refreshToken\/expiresAt/),
+  )
+  // The store survives intact: the earlier valid account is still readable.
+  assert.equal((await getAccountSession('codex', undefined, path))?.accessToken, CODEX.accessToken)
+})
+
+test('one corrupt provider entry does not blind the other providers', async () => {
+  const path = storePath()
+  // The exact corruption seen in the wild: empty tokens under a claude key.
+  writeFileSync(path, JSON.stringify({
+    codex: { default: 'acct-1', accounts: { 'acct-1': CODEX } },
+    claude: { default: 'corrupt', accounts: { corrupt: { accessToken: '', refreshToken: '', expiresAt: 0 } } },
+  }), { mode: 0o600 })
+  // Codex keeps its account; the corrupt claude entry is skipped, not fatal.
+  assert.equal((await listAccounts('codex', path)).length, 1)
+  assert.equal((await listAccounts('claude', path)).length, 0)
+  // …and the next write persists the store without the corrupt entry.
+  await saveAccountSession('codex', 'acct-1', CODEX, path)
+  const onDisk = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
+  assert.equal(onDisk.claude, undefined, 'the corrupt entry is dropped on the next write')
+})
+
+test('a valid account survives alongside a corrupt sibling of the same provider', async () => {
+  const path = storePath()
+  writeFileSync(path, JSON.stringify({
+    codex: {
+      default: 'acct-1',
+      accounts: {
+        'acct-1': CODEX,
+        corrupt: { accessToken: '', refreshToken: '', expiresAt: 0 },
+      },
+    },
+  }), { mode: 0o600 })
+  const entries = await listAccounts('codex', path)
+  assert.deepEqual(entries.map((entry) => entry.key), ['acct-1'], 'only the valid account is listed')
+})

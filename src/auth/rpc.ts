@@ -409,8 +409,15 @@ async function dispatch(
 ): Promise<RpcResult<unknown>> {
   switch (endpoint) {
     case 'status': {
+      // One provider's failure (a corrupt store entry, a broken flow) must not
+      // blind the whole page: it degrades to an error detail on that provider
+      // while the others still report their real status.
       const entries = await Promise.all(PROVIDER_IDS.map(
-        async provider => [provider, await controller.status(provider)] as const,
+        async provider => [provider, await controller.status(provider).catch((error: unknown) => ({
+          busy: false,
+          accounts: [],
+          detail: error instanceof Error ? error.message : String(error),
+        }) satisfies ProviderStatus)] as const,
       ))
       return ok({ providers: Object.fromEntries(entries) })
     }

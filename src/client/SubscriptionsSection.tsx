@@ -589,13 +589,18 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     let response: StatusResponse
     try {
       response = await callSubscriptionsAuth<StatusResponse>(rpc, 'status', {})
-    } catch {
+    } catch (error) {
       // A failed poll must not kill the page; busy providers keep polling and
-      // the action paths report their own errors.
+      // the action paths report their own errors. But staying silent turns a
+      // persistent failure into an endless "Checking…" — show it instead.
+      const message = error instanceof Error ? error.message : String(error)
+      for (const { id } of PROVIDERS) setProviderError(id, message)
       return
     }
     if (!mountedRef.current) return
     setStatuses(response.providers)
+    // The poll recovered: drop any error line a previous failed poll left.
+    for (const { id } of PROVIDERS) setProviderError(id, undefined)
     for (const { id } of PROVIDERS) {
       const status = response.providers[id]
       if (status.accounts.length > 0 || !status.busy) {
@@ -609,7 +614,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
         })
       }
     }
-  }, [rpc, stopPolling])
+  }, [rpc, stopPolling, setProviderError])
 
   const startPolling = useCallback((provider: SubscriptionProvider): void => {
     if (pollersRef.current.has(provider)) return
