@@ -11,7 +11,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
+import type { ConnectionFetchRoute, ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
 import type { RpcResult } from '../src/compat.js'
 
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'router-rpc-test-'))
@@ -178,4 +178,38 @@ test('speed endpoints: per-session tier round trip and payload validation', asyn
       assert.match(result.error.message, pattern)
     }
   }
+})
+
+test('fetch-route hosts: endpoints ride /api/subscriptions-auth and the legacy channel stays unmounted', async () => {
+  const routes: ConnectionFetchRoute[] = []
+  let channels = 0
+  const ctx = new Context()
+  ctx.provide('llm', { registerAdapter: () => Object.assign(() => {}, { replace: () => {} }) })
+  ctx.provide('connection', {
+    rpc: { handle: () => { channels++; return () => Promise.resolve() } },
+    fetch: { register: (route: ConnectionFetchRoute) => { routes.push(route); return () => Promise.resolve() } },
+  })
+  ctx.plugin(plugin, { providers: ['codex'] })
+  await new Promise(resolve => setTimeout(resolve, 50))
+  assert.equal(channels, 0, 'rpc.handle is never called when the Fetch registry exists (it throws on 0.1.5)')
+  assert.equal(routes.length, 1)
+  const [route] = routes
+  assert.deepEqual(
+    [route.path, route.methods, (route as { requestBody?: string }).requestBody],
+    ['/api/subscriptions-auth', ['POST'], 'buffered'],
+  )
+
+  const post = async (inner: unknown) => {
+    const response = await route.fetch(new Request('http://dsh.internal/api/subscriptions-auth', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'client-request', rpcId: 'r1', method: 'subscriptions-auth', payload: inner }),
+    }))
+    return (await response.json() as { result: RpcResult<unknown> }).result
+  }
+  assert.deepEqual(await post({ endpoint: 'setSpeed', payload: { sessionId: 's1', tier: 'fast' } }), { ok: true, value: { ok: true } })
+  assert.deepEqual(await post({ endpoint: 'speed', payload: { sessionId: 's1' } }), { ok: true, value: { tier: 'fast', fastModels: [] } })
+  const unknown = await post({ endpoint: 'nope', payload: {} })
+  assert.equal(unknown.ok, false)
+  if (!unknown.ok) assert.equal(unknown.error.code, 'bad-request')
 })

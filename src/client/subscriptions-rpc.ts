@@ -6,6 +6,31 @@ const SUBSCRIPTIONS_AUTH_CHANNEL = '/subscriptions-auth'
 export class SubscriptionsAuthError extends Error {}
 
 /**
+ * Point the handle's `/subscriptions-auth` calls at the transport the node half
+ * registered. Hosts since dsh 0.1.2-alpha.1 carry exact `/api` Fetch routes and
+ * the node half serves the endpoints there (0.1.5 can no longer mount the
+ * legacy channel), so each call becomes `rpc.call('/api', 'subscriptions-auth',
+ * { endpoint, payload })`. rc.2 has no Fetch routes; it is recognised by its
+ * `.api` face, which 0.1.2-alpha.1 removed, and keeps the legacy channel.
+ * Keying on the frozen rc.2 face rather than a newer member keeps future hosts
+ * on the Fetch route.
+ * @param connection - the client connection handle.
+ * @returns the RPC face this plugin consumes, with `/subscriptions-auth` calls routed.
+ */
+export function routeSubscriptionsAuth(connection: Pick<ConnectionHandle, 'rpc'>): Pick<ConnectionHandle, 'rpc'> {
+  const rpc = connection.rpc
+  if ('api' in connection) return { rpc }
+  return {
+    rpc: {
+      ...rpc,
+      call: (channel, endpoint, payload, signal) => channel === SUBSCRIPTIONS_AUTH_CHANNEL
+        ? rpc.call('/api', 'subscriptions-auth', { endpoint, payload }, signal)
+        : rpc.call(channel, endpoint, payload, signal),
+    },
+  }
+}
+
+/**
  * Call one `/subscriptions-auth` endpoint and unwrap the business result.
  * Shared by the settings section and the composer Speed toggle.
  * @param rpc - Connection RPC caller.

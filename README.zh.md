@@ -266,7 +266,7 @@ pnpm test      # 编译后跑 node --test 单测
 ## 目录结构
 
 - `src/index.ts` —— 插件入口:配置 schema、adapter 注册、登录态变更通告、RPC 接线
-- `src/auth/` —— PKCE/JWT 工具、token 存储、OAuth 流程引擎(临时本地回调服务)、Claude Code 凭据读取器(Keychain/文件)、`/subscriptions-auth` RPC 通道
+- `src/auth/` —— PKCE/JWT 工具、token 存储、OAuth 流程引擎(临时本地回调服务)、Claude Code 凭据读取器(Keychain/文件)、`/subscriptions-auth` 端点（DSH v0.1.2-alpha.1 起走 `/api/subscriptions-auth` Fetch 路由，v0.1.1-rc.2 走 RPC 通道）
 - `src/providers/` —— 各 provider 的 OAuth 常量/换发/刷新 + `LlmAdapter` 实现，多账号 token 管理（`accounts.ts`），模型池（`pool.ts` + `pool-health.ts` / `pool-usage.ts` / `pool-family.ts`），以及 `rate-limit.ts`（限流重开时刻解析 + 重试策略）
 - `src/translate/` —— dsh `Message[]` 与 OpenAI Responses / Anthropic Messages 格式互转,SSE → `StreamChunk`
 - `src/tools/` —— `x_search`、`image_generate` 与 `video_generate`

@@ -23,6 +23,7 @@ import type { CommandUiContract } from '@deepseek-ai/dsh-client-ui-commands/clie
 // allowImportingTsExtensions/rewriteRelativeImportExtensions pair; under
 // nodenext the .js specifier resolves to the .tsx source (see README note).
 import { SubscriptionsSection } from './SubscriptionsSection.js'
+import { routeSubscriptionsAuth } from './subscriptions-rpc.js'
 import type { SubscriptionsSectionInjected } from './SubscriptionsSection.js'
 import { ImageGenerateToolview, createImageLoader } from './ImageGenerateToolview.js'
 import type { ImageGenerateToolviewInjected } from './ImageGenerateToolview.js'
@@ -79,8 +80,9 @@ export function apply(ctx: ClientContext): void {
     return () => style.remove()
   }, 'dsh-plugin-subscriptions: settings panel breathing room')
   // The shell's Context merge types `connection` as the host handle; in the
-  // browser shell the same key holds the full client ConnectionHandle.
-  const connection = ctx.get('connection') as unknown as ConnectionHandle
+  // browser shell the same key holds the full client ConnectionHandle. Its
+  // `/subscriptions-auth` calls follow the transport the node half registered.
+  const connection = routeSubscriptionsAuth(ctx.get('connection') as unknown as ConnectionHandle)
   const t = ctx.locale.bind(NS) as SubscriptionsSectionInjected['t']
   const injected = (): SubscriptionsSectionInjected => ({ rpc: connection.rpc, t })
   ctx.slots.inject('settings.section', () => ctx.slots.register({
