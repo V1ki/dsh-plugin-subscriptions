@@ -491,6 +491,8 @@ async function mountPlugin(): Promise<ConnectionRpcHandler> {
       },
     },
   })
+  // The channel is an HTTP route, so the plugin gates on `webServer` too.
+  ctx.provide('webServer', { register: () => () => {} })
   ctx.plugin(plugin, { providers: ['codex'] })
   await new Promise(resolve => setTimeout(resolve, 50))
   assert.ok(handler !== undefined, 'the /subscriptions-auth channel was registered')

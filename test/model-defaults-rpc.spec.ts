@@ -81,6 +81,8 @@ async function mount(options: { tier?: string } = {}): Promise<{ handler: Connec
       },
     },
   })
+  // The channel is an HTTP route, so the plugin gates on `webServer` too.
+  ctx.provide('webServer', { register: () => () => {} })
   ctx.plugin(plugin, {
     providers: ['codex'],
     ...options.tier === undefined ? {} : {

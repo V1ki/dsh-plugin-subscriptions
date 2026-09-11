@@ -1,12 +1,16 @@
 /**
  * The `/subscriptions-auth` host RPC channel the web Settings page drives. The
- * channel is registered only when a host `connection` service exists (the web
- * profile); headless compositions load the plugin without it. All business
- * outcomes are returned as RpcResult values; handlers never throw.
+ * channel is registered only when the host `connection` and `webServer`
+ * services exist (the web profile); headless compositions load the plugin
+ * without them. All business outcomes are returned as RpcResult values;
+ * handlers never throw.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { ConnectionRpcHandler, HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
+// Also activates the `ctx.webServer` Context merge for the inject block.
+import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { RpcResult } from '../compat.js'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
@@ -194,6 +198,146 @@ type RpcHandleCompat = (
   handler: ConnectionRpcHandler,
   options?: { readonly authority: 'loopback' },
 ) => () => Promise<void>
+
+/** The web server registry, as this channel uses it. */
+interface WebServerHandle {
+  register(route: WebRoute): () => void
+}
+
+/** Endpoint-segment shape, matching the host's own channel router. */
+const ENDPOINT_SEGMENT_PATTERN = /^[A-Za-z0-9_$.-]+$/
+
+/**
+ * Buffered-body cap for this channel. Every `/subscriptions-auth` request is
+ * small — provider ids, an account key, a pasted callback URL, a proxy config;
+ * image and video bytes travel out in the response, never in.
+ */
+const MAX_REQUEST_BODY_BYTES = 1024 * 1024
+
+/**
+ * The channel-relative endpoint one request path names.
+ * @param pathname - request pathname below this channel.
+ * @returns the endpoint, or undefined when the path is not a channel endpoint.
+ */
+function endpointFromPath(pathname: string): string | undefined {
+  if (!pathname.startsWith(`${SUBSCRIPTIONS_AUTH_CHANNEL}/`)) return undefined
+  const endpoint = pathname.slice(SUBSCRIPTIONS_AUTH_CHANNEL.length + 1)
+  const bad = endpoint.split('/').some(
+    segment => segment === '' || segment === '.' || segment === '..' || !ENDPOINT_SEGMENT_PATTERN.test(segment),
+  )
+  return bad ? undefined : endpoint
+}
+
+/**
+ * Buffer one request body under {@link MAX_REQUEST_BODY_BYTES}.
+ * @param req - the incoming request.
+ * @returns the body, or undefined once the cap is exceeded.
+ */
+async function readBody(req: IncomingMessage): Promise<string | undefined> {
+  const declared = req.headers['content-length']
+  if (declared !== undefined && Number(declared) > MAX_REQUEST_BODY_BYTES) return undefined
+  const chunks: Buffer[] = []
+  let received = 0
+  for await (const chunk of req) {
+    const buffer = chunk as Buffer
+    received += buffer.byteLength
+    if (received > MAX_REQUEST_BODY_BYTES) return undefined
+    chunks.push(buffer)
+  }
+  return Buffer.concat(chunks).toString('utf8')
+}
+
+/** Write one `server-response` envelope, the only success shape the client parses. */
+function respond(res: ServerResponse, rpcId: string, result: RpcResult<unknown>): void {
+  const body = JSON.stringify({ type: 'server-response', rpcId, result })
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(body)
+}
+
+/**
+ * Mount this channel's HTTP route on the web server ourselves.
+ *
+ * `connection.rpc.handle()` cannot do it on dsh >= 0.1.5. Its `register()`
+ * still ends in `owner.effect(() => owner.webServer.register(route))`, but
+ * `owner` is a cordis shadow context: property lookups on it start at the
+ * *connection plugin's* own fiber, not at ours. Up to 0.1.2 that fiber
+ * declared `inject: ['webServer', 'credentials']`, so the lookup resolved;
+ * 0.1.5 narrowed it to `inject: ['credentials']` and moved the web transport
+ * into a nested `ctx.inject(['webServer'], ...)` child fiber. The lookup now
+ * throws `cannot get property "webServer" without inject`, cordis swallows the
+ * throw while the fiber executes, and the channel silently never mounts — so
+ * every POST falls through to the static file handler, which answers 405.
+ * Declaring `webServer` on our own inject list does not help: the shadow
+ * context is not ours.
+ *
+ * Registering the same route directly keeps the path, the envelope and the
+ * fence identical to what the host would have installed: `requestRejection`
+ * is the very method the host's own `/api` route calls.
+ * @param webServer - the host web server registry.
+ * @param connection - the host connection handle, for its browser fence.
+ * @param handler - the decoded endpoint handler.
+ * @returns the disposer removing the route.
+ */
+function registerChannelRoute(
+  webServer: WebServerHandle,
+  connection: HostConnectionHandle,
+  handler: ConnectionRpcHandler,
+): () => void {
+  return webServer.register({
+    kind: 'prefix',
+    path: SUBSCRIPTIONS_AUTH_CHANNEL,
+    handler: async (req, res) => {
+      const rejection = connection.requestRejection(req)
+      if (rejection !== undefined) {
+        res.writeHead(rejection)
+        res.end(rejection === 401 ? 'unauthorized' : 'forbidden')
+        return
+      }
+      const endpoint = endpointFromPath(new URL(req.url ?? '/', 'http://dsh.internal').pathname)
+      if (req.method !== 'POST' || endpoint === undefined) {
+        res.writeHead(404)
+        res.end('not found')
+        return
+      }
+      if (req.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') {
+        res.writeHead(415)
+        res.end('content type must be application/json')
+        return
+      }
+      const body = await readBody(req)
+      if (body === undefined) {
+        res.writeHead(413, { connection: 'close' })
+        res.end()
+        req.destroy()
+        return
+      }
+      let message: unknown
+      try {
+        message = JSON.parse(body)
+      } catch {
+        res.writeHead(400)
+        res.end('body is not JSON')
+        return
+      }
+      const envelope = message as Record<string, unknown>
+      const rpcId = typeof envelope?.rpcId === 'string' ? envelope.rpcId : 'invalid-request'
+      if (envelope?.type !== 'client-request' || typeof envelope.rpcId !== 'string') {
+        respond(res, rpcId, failure(new BadRequest('invalid client-request message')))
+        return
+      }
+      if (envelope.method !== endpoint) {
+        const detail = `method ${JSON.stringify(envelope.method)} does not match endpoint ${JSON.stringify(endpoint)}`
+        respond(res, rpcId, failure(new BadRequest(detail)))
+        return
+      }
+      const abort = new AbortController()
+      res.on('close', () => {
+        if (!res.writableEnded) abort.abort()
+      })
+      respond(res, rpcId, await handler(endpoint, envelope.payload, abort.signal))
+    },
+  })
+}
 
 function ok(value: unknown): RpcResult<unknown> {
   return { ok: true, value }
@@ -505,23 +649,34 @@ export function registerAuthRpc(
   modelDefaults: ModelDefaultsController | undefined = undefined,
   providerSettings: ProviderSettingsController | undefined = undefined,
 ): void {
-  // `connection` is not in this plugin's inject list (headless compositions
-  // lack it), so its startup order is unconstrained: defer registration until
-  // the service exists instead of probing once at apply time.
-  ctx.inject(['connection'], (ctx) => {
+  // Neither `connection` nor `webServer` is in this plugin's inject list
+  // (headless compositions lack both), so their startup order is
+  // unconstrained: defer registration until the services exist instead of
+  // probing once at apply time. `webServer` joins `connection` here because
+  // this channel is an HTTP route — without it there is nothing to mount on.
+  ctx.inject(['connection', 'webServer'], (ctx) => {
     const connection = ctx.get('connection') as HostConnectionHandle
+    const webServer = ctx.get('webServer') as WebServerHandle
+    const handler: ConnectionRpcHandler = async (endpoint, payload, signal) => {
+      try {
+        return await dispatch(controller, speed, proxy, modelDefaults, endpoint, payload, signal, providerSettings)
+      } catch (error) {
+        return failure(error)
+      }
+    }
     ctx.effect(
-      () => (connection.rpc.handle as RpcHandleCompat)(
-        SUBSCRIPTIONS_AUTH_CHANNEL,
-        async (endpoint, payload, signal) => {
-          try {
-            return await dispatch(controller, speed, proxy, modelDefaults, endpoint, payload, signal, providerSettings)
-          } catch (error) {
-            return failure(error)
-          }
-        },
-        { authority: 'loopback' },
-      ),
+      // dsh >= 0.1.2 exposes the browser fence as `requestRejection`, so we can
+      // mount the route ourselves — which dsh >= 0.1.5 requires, see
+      // {@link registerChannelRoute}. On rc.2 that method does not exist yet
+      // and `rpc.handle` still resolves `webServer` through the connection
+      // plugin's own inject, so let the host own the route there.
+      () => typeof connection.requestRejection === 'function'
+        ? registerChannelRoute(webServer, connection, handler)
+        : (connection.rpc.handle as RpcHandleCompat)(
+          SUBSCRIPTIONS_AUTH_CHANNEL,
+          handler,
+          { authority: 'loopback' },
+        ),
       'dsh-plugin-subscriptions: /subscriptions-auth rpc channel',
     )
   })

@@ -31,6 +31,8 @@ test('provider settings RPC edits picker visibility without losing the editor ca
     handler = callback
     return async () => {}
   } } })
+  // The channel is an HTTP route, so the plugin gates on `webServer` too.
+  ctx.provide('webServer', { register: () => () => {} })
   ctx.provide('tools', { register: (definition: { name: string }) => { tools.add(definition.name); return () => {} } })
   const runtime = ctx.plugin(plugin, { providers: ['codex', 'grok'], pool: { enabled: false } })
   try {

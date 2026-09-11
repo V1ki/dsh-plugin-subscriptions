@@ -36,6 +36,8 @@ async function mount(attachments?: FakeStore): Promise<ConnectionRpcHandler> {
       },
     },
   })
+  // The channel is an HTTP route, so the plugin gates on `webServer` too.
+  ctx.provide('webServer', { register: () => () => {} })
   if (attachments !== undefined) ctx.provide('attachments', attachments)
   ctx.plugin(plugin, { providers: ['codex'] })
   await new Promise(resolve => setTimeout(resolve, 50))
