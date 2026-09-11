@@ -195,6 +195,16 @@ type RpcHandleCompat = (
   options?: { readonly authority: 'loopback' },
 ) => () => Promise<void>
 
+/**
+ * DSH 0.1.5-rc.1 exposes `connection.register(owner, channel, handler)` so the
+ * calling fiber (which injects `webServer`) owns the route. `rpc.handle()` on
+ * that line binds owner to the connection plugin fiber (`inject = ["credentials"]`),
+ * which cannot read `webServer` — see V1ki/dsh-plugin-subscriptions#77.
+ */
+type ConnectionWithOwnerRegister = HostConnectionHandle & {
+  register?(owner: Context, channel: string, handler: ConnectionRpcHandler): () => Promise<void>
+}
+
 function ok(value: unknown): RpcResult<unknown> {
   return { ok: true, value }
 }
@@ -505,23 +515,28 @@ export function registerAuthRpc(
   modelDefaults: ModelDefaultsController | undefined = undefined,
   providerSettings: ProviderSettingsController | undefined = undefined,
 ): void {
-  // `connection` is not in this plugin's inject list (headless compositions
-  // lack it), so its startup order is unconstrained: defer registration until
-  // the service exists instead of probing once at apply time.
-  ctx.inject(['connection'], (ctx) => {
-    const connection = ctx.get('connection') as HostConnectionHandle
+  // `connection` / `webServer` are optional (headless compositions lack both).
+  // Defer until they exist instead of probing once at apply time.
+  // DSH 0.1.5-rc.1: connection.rpc.handle() binds owner to the connection
+  // plugin fiber, which does not inject webServer. Prefer
+  // connection.register(thisCtx, ...) so this fiber owns the route (#77).
+  ctx.inject(['connection', 'webServer'], (ctx) => {
+    const connection = ctx.get('connection') as ConnectionWithOwnerRegister
+    const handler: ConnectionRpcHandler = async (endpoint, payload, signal) => {
+      try {
+        return await dispatch(controller, speed, proxy, modelDefaults, endpoint, payload, signal, providerSettings)
+      } catch (error) {
+        return failure(error)
+      }
+    }
     ctx.effect(
-      () => (connection.rpc.handle as RpcHandleCompat)(
-        SUBSCRIPTIONS_AUTH_CHANNEL,
-        async (endpoint, payload, signal) => {
-          try {
-            return await dispatch(controller, speed, proxy, modelDefaults, endpoint, payload, signal, providerSettings)
-          } catch (error) {
-            return failure(error)
-          }
-        },
-        { authority: 'loopback' },
-      ),
+      () => typeof connection.register === 'function'
+        ? connection.register(ctx, SUBSCRIPTIONS_AUTH_CHANNEL, handler)
+        : (connection.rpc.handle as RpcHandleCompat)(
+          SUBSCRIPTIONS_AUTH_CHANNEL,
+          handler,
+          { authority: 'loopback' },
+        ),
       'dsh-plugin-subscriptions: /subscriptions-auth rpc channel',
     )
   })

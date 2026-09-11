@@ -1056,8 +1056,18 @@ export function apply(ctx: Context, config: Config): void {
   // x_search and video_generate follow the grok provider; image_generate
   // prefers the codex provider and falls back to grok.
   ctx.inject(['tools'], (toolsCtx) => {
+    // Skip x_search when another plugin (typically @liustack/modsearch) already
+    // owns the name. A throw here used to abort apply() entirely (#76).
+    let ownsXSearch = false
     if (grokTokens !== undefined) {
-      toolsCtx.tools.register(createXSearchTool({ tokens: grokTokens }))
+      try {
+        toolsCtx.tools.register(createXSearchTool({ tokens: grokTokens }))
+        ownsXSearch = true
+      } catch (error) {
+        ctx.logger?.warn?.(
+          `dsh-plugin-subscriptions: x_search already provided by another plugin, skipping (${error instanceof Error ? error.message : String(error)})`,
+        )
+      }
       toolsCtx.tools.register(createVideoGenerateTool({ tokens: grokTokens }))
     }
     if (codexTokens !== undefined || grokTokens !== undefined) {
@@ -1072,11 +1082,14 @@ export function apply(ctx: Context, config: Config): void {
     }
     // Restrictions are scoped to each agent. Keep global definitions registered
     // so already-open sessions retain both their schemas and execution path.
+    // Only deny x_search when this plugin actually registered it — otherwise we
+    // would disable modsearch's tool of the same name.
     toolsCtx.on('agent/created', ({ agent }) => {
       const at = agent.session.header.createdAt
       const deny: string[] = []
       if (grokTokens !== undefined) {
-        for (const tool of ['x_search', 'video_generate'] as const) {
+        const grokTools = (ownsXSearch ? ['x_search', 'video_generate'] : ['video_generate']) as const
+        for (const tool of grokTools) {
           if (!preferences.toolEnabled('grok', tool, at)) deny.push(tool)
         }
       }
