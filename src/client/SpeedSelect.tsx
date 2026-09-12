@@ -80,7 +80,7 @@ export type SpeedSelectProps = PropsRuntime<'conversation.input.right'>
  * at all) simply keeps the toggle hidden.
  */
 export function createSpeedLoader(
-  connection: ConnectionHandle,
+  connection: Pick<ConnectionHandle, 'rpc'>,
   models: () => ModelDirectoriesLike | undefined,
   sessionId: string,
 ): SpeedSelectInjected['loadSpeed'] {
@@ -97,7 +97,7 @@ export function createSpeedLoader(
 
 /** The `setSpeed` half of the inject face: boolean outcome for the component's busy state. */
 export function createSpeedSetter(
-  connection: ConnectionHandle,
+  connection: Pick<ConnectionHandle, 'rpc'>,
   sessionId: string,
 ): SpeedSelectInjected['setSpeed'] {
   return tier => callSubscriptionsAuth(connection.rpc, 'setSpeed', { sessionId, tier })

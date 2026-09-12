@@ -1,18 +1,21 @@
 /**
- * The `/subscriptions-auth` host RPC channel the web Settings page drives. The
- * channel is registered only when a host `connection` service exists (the web
- * profile); headless compositions load the plugin without it. All business
- * outcomes are returned as RpcResult values; handlers never throw.
+ * The `/subscriptions-auth` endpoints the web Settings page drives, served as
+ * the `/api/subscriptions-auth` Fetch route (see rpc-fetch.ts) or, on rc.2, as
+ * a host RPC channel. They are registered only when a host `connection`
+ * service exists (the web profile); headless compositions load the plugin
+ * without it. All business outcomes are returned as RpcResult values;
+ * handlers never throw.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { ConnectionRpcHandler, HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
+import type { ConnectionFetchMethod, ConnectionFetchRoute, ConnectionRpcHandler, HostConnectionFetch, HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
 import type { RpcResult } from '../compat.js'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { PROVIDER_IDS, type ProviderId } from './store.js'
 import type { ProviderUsage } from '../providers/common.js'
 import type { ProxyConfigView, ProxyDraft, ProxyInput, ProxyTestResult } from '../http.js'
+import { SUBSCRIPTIONS_AUTH_ROUTE, subscriptionsAuthFetch } from './rpc-fetch.js'
 
 /** The RPC channel this plugin registers on the host connection. */
 export const SUBSCRIPTIONS_AUTH_CHANNEL = '/subscriptions-auth'
@@ -194,6 +197,22 @@ type RpcHandleCompat = (
   handler: ConnectionRpcHandler,
   options?: { readonly authority: 'loopback' },
 ) => () => Promise<void>
+
+/**
+ * Exact Fetch route across the dsh lines, widening two fields the
+ * 0.1.2-alpha types this package builds against declare too narrowly:
+ *
+ * - `requestBody`: 0.1.3-alpha.1 added this required mode (the bridge reads it
+ *   before touching the body); the 0.1.2-alpha runtime ignores the extra field.
+ * - `methods`: `ConnectionFetchMethod` is `'GET' | 'HEAD'` until 0.1.3-alpha.2
+ *   widens it to include `'POST'`. The 0.1.2 runtime never validates the names
+ *   (`assertFetchRoute` only checks the path, arity and duplicates) and matches
+ *   with `route.methods.has(request.method)`, so a POST route is served there too.
+ */
+type FetchRouteCompat = Omit<ConnectionFetchRoute, 'methods'> & {
+  readonly methods: readonly (ConnectionFetchMethod | 'POST')[]
+  readonly requestBody: 'buffered' | 'streaming'
+}
 
 function ok(value: unknown): RpcResult<unknown> {
   return { ok: true, value }
@@ -490,7 +509,9 @@ async function dispatch(
 }
 
 /**
- * Register the `/subscriptions-auth` RPC channel when a host connection exists.
+ * Register the `/subscriptions-auth` endpoints when a host connection exists:
+ * as the exact `/api/subscriptions-auth` Fetch route where the host has the
+ * Fetch registry (dsh 0.1.2-alpha.1+), else as the legacy RPC channel (rc.2).
  * @param ctx - the plugin context (headless profiles have no `connection`).
  * @param controller - the auth operations backing the endpoints.
  * @param speed - the per-session speed-tier state backing the Speed toggle.
@@ -505,23 +526,36 @@ export function registerAuthRpc(
   modelDefaults: ModelDefaultsController | undefined = undefined,
   providerSettings: ProviderSettingsController | undefined = undefined,
 ): void {
+  const handler: ConnectionRpcHandler = async (endpoint, payload, signal) => {
+    try {
+      return await dispatch(controller, speed, proxy, modelDefaults, endpoint, payload, signal, providerSettings)
+    } catch (error) {
+      return failure(error)
+    }
+  }
   // `connection` is not in this plugin's inject list (headless compositions
   // lack it), so its startup order is unconstrained: defer registration until
   // the service exists instead of probing once at apply time.
   ctx.inject(['connection'], (ctx) => {
     const connection = ctx.get('connection') as HostConnectionHandle
+    // rc.2 has no Fetch registry despite the type; 0.1.5 can only serve this way
+    // (see rpc-fetch.ts), and the browser half picks the matching transport.
+    const fetchRoutes = (connection as { readonly fetch?: HostConnectionFetch }).fetch
+    if (fetchRoutes !== undefined) {
+      const route: FetchRouteCompat = {
+        path: SUBSCRIPTIONS_AUTH_ROUTE,
+        methods: ['POST'],
+        requestBody: 'buffered',
+        fetch: subscriptionsAuthFetch(handler),
+      }
+      ctx.effect(
+        () => fetchRoutes.register(route as ConnectionFetchRoute),
+        `dsh-plugin-subscriptions: ${SUBSCRIPTIONS_AUTH_ROUTE} fetch route`,
+      )
+      return
+    }
     ctx.effect(
-      () => (connection.rpc.handle as RpcHandleCompat)(
-        SUBSCRIPTIONS_AUTH_CHANNEL,
-        async (endpoint, payload, signal) => {
-          try {
-            return await dispatch(controller, speed, proxy, modelDefaults, endpoint, payload, signal, providerSettings)
-          } catch (error) {
-            return failure(error)
-          }
-        },
-        { authority: 'loopback' },
-      ),
+      () => (connection.rpc.handle as RpcHandleCompat)(SUBSCRIPTIONS_AUTH_CHANNEL, handler, { authority: 'loopback' }),
       'dsh-plugin-subscriptions: /subscriptions-auth rpc channel',
     )
   })

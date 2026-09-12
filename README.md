@@ -268,7 +268,7 @@ After `pnpm build`, restart `dsh web` to pick up changes.
 ## Layout
 
 - `src/index.ts` — plugin entry: config schema, adapter registration, auth-change re-announce, RPC wiring
-- `src/auth/` — PKCE/JWT helpers, token store, OAuth flow engine (temp loopback callback server), Claude Code credential reader (Keychain/file), `/subscriptions-auth` RPC channel
+- `src/auth/` — PKCE/JWT helpers, token store, OAuth flow engine (temp loopback callback server), Claude Code credential reader (Keychain/file), `/subscriptions-auth` endpoints (the `/api/subscriptions-auth` Fetch route on DSH v0.1.2-alpha.1+, an RPC channel on v0.1.1-rc.2)
 - `src/providers/` — per-provider OAuth constants/exchange/refresh + `LlmAdapter`s, multi-account token plumbing (`accounts.ts`), the pool (`pool.ts` + `pool-health.ts` / `pool-usage.ts` / `pool-family.ts`), and `rate-limit.ts` (reset-instant parsing + retry policy)
 - `src/translate/` — dsh `Message[]` ⟷ OpenAI Responses / Anthropic Messages wire formats, SSE → `StreamChunk`
 - `src/tools/` — `x_search`, `image_generate`, and `video_generate`
