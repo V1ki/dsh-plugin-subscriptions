@@ -186,6 +186,22 @@ test('readClaudeCodeCredentials returns undefined for incomplete credentials', n
   })
 })
 
+test('readClaudeCodeCredentials returns undefined for EMPTY-string credentials', needsFileStore, async () => {
+  // A corrupted Keychain item (observed in the wild after a Claude Code
+  // logout) holds the right keys with empty strings — importing it used to
+  // poison the auth store and blind every provider's status page.
+  const blob = JSON.stringify({
+    claudeAiOauth: {
+      accessToken: '', refreshToken: '', expiresAt: 0,
+      scopes: ['user:profile'], subscriptionType: 'pro',
+    },
+  })
+  await withEnv('CLAUDE_CONFIG_DIR', credentialsDir('claude-empty-str-', blob), () => {
+    assert.equal(readClaudeCodeCredentials(), undefined, 'empty tokens = undefined')
+    return Promise.resolve()
+  })
+})
+
 test('readClaudeCodeCredentials reads bare fields (no claudeAiOauth wrapper)', needsFileStore, async () => {
   const blob = JSON.stringify({
     accessToken: 'bare-at', refreshToken: 'bare-rt', expiresAt: Date.now() + 3600_000,

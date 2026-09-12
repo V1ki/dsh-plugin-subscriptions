@@ -28,7 +28,12 @@ interface CredentialBlob {
 const DEFAULT_SCOPES = 'user:profile user:inference user:sessions:claude_code user:mcp_servers'
 
 function toSession(data: RawCreds): ClaudeSession | undefined {
-  if (typeof data.accessToken !== 'string' || typeof data.refreshToken !== 'string' || typeof data.expiresAt !== 'number') {
+  // Empty-string tokens (seen from a corrupted Keychain item left by a Claude
+  // Code logout) pass the typeof gate but are useless and would poison the
+  // auth store — a single such entry fails every provider's status read.
+  if (typeof data.accessToken !== 'string' || data.accessToken.length === 0
+    || typeof data.refreshToken !== 'string' || data.refreshToken.length === 0
+    || typeof data.expiresAt !== 'number' || !Number.isFinite(data.expiresAt)) {
     return undefined
   }
   const scopes = Array.isArray(data.scopes) ? data.scopes.join(' ') : typeof data.scopes === 'string' ? data.scopes : DEFAULT_SCOPES
