@@ -100,14 +100,44 @@ export const claudeRateLimitReset: RateLimitResetReader = (response, body, now) 
  * so these headers impersonate the CLI; the harness attribution user-agent
  * cannot be sent here (one user-agent slot, and the CLI's wins).
  */
-export const CLAUDE_CLI_FALLBACK_VERSION = '2.1.234'
+export const CLAUDE_CLI_FALLBACK_VERSION = '2.1.263'
+
+/**
+ * Candidate invocations, in order of preference.
+ *
+ * npm installs Claude Code on Windows as `claude.cmd` (a batch shim); no
+ * `claude.exe` exists. `execFileSync` cannot run either name directly there:
+ * the extensionless one is `ENOENT` (no `PATHEXT` resolution), and the `.cmd`
+ * is `EINVAL` since Node's CVE-2024-27980 fix refuses to spawn batch files
+ * without a shell. Both Windows candidates therefore go through `cmd.exe`,
+ * with the argument inside the command string so that Node does not warn
+ * about unescaped shell arguments (DEP0190).
+ */
+const CLAUDE_VERSION_PROBES: readonly (readonly [string, readonly string[], { shell?: boolean }])[] =
+  process.platform === 'win32'
+    ? [
+        ['claude --version', [], { shell: true }],
+        ['claude.cmd --version', [], { shell: true }],
+      ]
+    : [['claude', ['--version'], {}]]
 
 export function detectClaudeVersion(): string {
-  try {
-    const raw = execFileSync('claude', ['--version'], { timeout: 3000, encoding: 'utf8' })
-    const match = raw.match(/^(\d+\.\d+\.\d+)/)
-    if (match) return match[1]
-  } catch {}
+  for (const [command, args, options] of CLAUDE_VERSION_PROBES) {
+    try {
+      // 3s was tight once cmd.exe startup is in the path; a timeout here
+      // silently costs the real version and pins the stale fallback.
+      const raw = execFileSync(command, [...args], {
+        timeout: 10_000,
+        encoding: 'utf8',
+        // Keep CLI stderr chatter out of the parsed text.
+        stdio: ['ignore', 'pipe', 'ignore'],
+        ...options,
+      })
+      // Unanchored: the shell path may prefix the version with other output.
+      const match = raw.match(/(\d+\.\d+\.\d+)/)
+      if (match) return match[1]
+    } catch {}
+  }
   return CLAUDE_CLI_FALLBACK_VERSION
 }
 

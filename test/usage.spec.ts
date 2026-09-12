@@ -276,6 +276,20 @@ test('fetchGrokUsage tolerates a null config and non-2xx responses', async () =>
   await assert.rejects(fetchGrokUsage(grokSession, failing), /grok billing/)
 })
 
+test('fetchGrokUsage extracts reset window when creditUsagePercent is absent but currentPeriod is present', async () => {
+  const { fetchFn } = fakeFetch({
+    config: {
+      currentPeriod: { type: 'USAGE_PERIOD_TYPE_WEEKLY', end: '2026-09-10T12:00:00Z' },
+    },
+  })
+  const usage = await fetchGrokUsage(grokSession, fetchFn)
+  assert.ok(usage.windows)
+  assert.equal(usage.windows.length, 1)
+  assert.equal(usage.windows[0]?.kind, 'weekly')
+  assert.equal(usage.windows[0]?.usedPercent, 0)
+  assert.equal(usage.windows[0]?.resetsAt, Date.parse('2026-09-10T12:00:00Z'))
+})
+
 /** Mount the plugin with fake llm/connection; return the RPC handler. */
 async function mount(): Promise<ConnectionRpcHandler> {
   let handler: ConnectionRpcHandler | undefined
