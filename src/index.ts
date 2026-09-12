@@ -18,6 +18,7 @@ import type {
 } from '@deepseek-ai/dsh-llm'
 // Type-only: activates the `ctx.tools` Context merge for the inject block.
 import type {} from '@deepseek-ai/dsh-tools'
+import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { OAuthFlowManager, type OAuthAttempt } from './auth/oauth-flow.js'
 import { DeviceFlowManager, type DeviceAttempt } from './auth/device-flow.js'
@@ -112,7 +113,7 @@ import { createXSearchTool } from './tools/x-search.js'
 import { createImageGenerateTool } from './tools/image-generate.js'
 import { createVideoGenerateTool, videosDirectory } from './tools/video-generate.js'
 import { proxiedFetch, proxyGetConfig, proxySetConfig, proxyTestConnection } from './http.js'
-import { ProviderSettingsStore, PROVIDER_TOOLS, validatePreferences } from './provider-settings.js'
+import { ProviderSettingsStore, PROVIDER_TOOLS, validatePreferences, type SubscriptionTool } from './provider-settings.js'
 
 export type { ModelEntry, ProviderUsage, UsageWindow } from './providers/common.js'
 export type { RateLimitConfig, RateLimitWait } from './providers/rate-limit.js'
@@ -1056,19 +1057,74 @@ export function apply(ctx: Context, config: Config): void {
   // x_search and video_generate follow the grok provider; image_generate
   // prefers the codex provider and falls back to grok.
   ctx.inject(['tools'], (toolsCtx) => {
+    /**
+     * Register one tool under its canonical name, falling back to the alias
+     * when another plugin already owns it (issue #76: e.g. @liustack/modsearch
+     * registers its own `x_search`; the duplicate insert throws and used to
+     * abort the whole apply, taking the providers and the auth channel down
+     * with it). A failed register leaves no state behind, so the alias attempt
+     * is safe; when even the alias is taken the tool is skipped with a warning
+     * and the rest of the plugin keeps working.
+     * @param canonical - the default tool name.
+     * @param alias - the fallback name, namespaced to this plugin.
+     * @param build - constructs the definition for one candidate name.
+     * @returns the name the tool is registered under, or undefined when skipped.
+     */
+    const registerTool = (
+      canonical: string,
+      alias: string,
+      build: (name: string) => ToolDefinition,
+    ): string | undefined => {
+      let lastRegisterError = ''
+      const attempt = (candidate: string): boolean => {
+        try {
+          toolsCtx.tools.register(build(candidate))
+          return true
+        } catch (error) {
+          lastRegisterError = error instanceof Error ? error.message : String(error)
+          return false
+        }
+      }
+      // A visible `get` probe (present on every dsh line this plugin supports;
+      // hand-built test contexts may omit it) skips the doomed attempt; the
+      // try/catch stays for the race where another plugin registers between
+      // probe and insert.
+      const probe = (toolsCtx.tools as { get?: (name: string) => unknown }).get
+      const free = (candidate: string): boolean =>
+        typeof probe !== 'function' || probe.call(toolsCtx.tools, candidate) === undefined
+      if (free(canonical) && attempt(canonical)) return canonical
+      if (free(alias) && attempt(alias)) {
+        onWarn(`tool "${canonical}" is already registered by another plugin; this plugin's tool is mounted as "${alias}"`)
+        return alias
+      }
+      onWarn(`tool "${canonical}" could not be registered (${lastRegisterError || 'name owned by another plugin'}); skipping it`)
+      return undefined
+    }
+
+    // Settings key → registered tool name. The Settings-page switches key on
+    // the stable settings name; the deny list needs the name that actually
+    // registered, which the alias changes.
+    const toolNames = new Map<SubscriptionTool, string>()
     if (grokTokens !== undefined) {
-      toolsCtx.tools.register(createXSearchTool({ tokens: grokTokens }))
-      toolsCtx.tools.register(createVideoGenerateTool({ tokens: grokTokens }))
+      const xSearch = registerTool('x_search', 'grok_x_search',
+        candidate => createXSearchTool({ tokens: grokTokens, name: candidate }))
+      if (xSearch !== undefined) toolNames.set('x_search', xSearch)
+      const video = registerTool('video_generate', 'grok_video_generate',
+        candidate => createVideoGenerateTool({ tokens: grokTokens, name: candidate }))
+      if (video !== undefined) toolNames.set('video_generate', video)
     }
     if (codexTokens !== undefined || grokTokens !== undefined) {
-      toolsCtx.tools.register(createImageGenerateTool({
-        imagePool,
-        ...codexTokens === undefined ? {} : { codexTokens },
-        ...grokTokens === undefined ? {} : { grokTokens },
-        resolveAttachments,
-        resolveLlm: () => ctx.get('llm'),
-        providerEnabled: (provider, createdAt) => preferences.toolEnabled(provider, 'image_generate', createdAt),
-      }))
+      const image = registerTool('image_generate', 'subscriptions_image_generate',
+        candidate => createImageGenerateTool({
+          imagePool,
+          ...codexTokens === undefined ? {} : { codexTokens },
+          ...grokTokens === undefined ? {} : { grokTokens },
+          resolveAttachments,
+          resolveLlm: () => ctx.get('llm'),
+          providerEnabled: (provider, createdAt) => preferences.toolEnabled(provider, 'image_generate', createdAt),
+          name: candidate,
+        }))
+      if (image !== undefined) toolNames.set('image_generate', image)
     }
     // Restrictions are scoped to each agent. Keep global definitions registered
     // so already-open sessions retain both their schemas and execution path.
@@ -1077,13 +1133,15 @@ export function apply(ctx: Context, config: Config): void {
       const deny: string[] = []
       if (grokTokens !== undefined) {
         for (const tool of ['x_search', 'video_generate'] as const) {
-          if (!preferences.toolEnabled('grok', tool, at)) deny.push(tool)
+          const registered = toolNames.get(tool)
+          if (registered !== undefined && !preferences.toolEnabled('grok', tool, at)) deny.push(registered)
         }
       }
       if ((codexTokens !== undefined || grokTokens !== undefined)
         && !(codexTokens !== undefined && preferences.toolEnabled('codex', 'image_generate', at))
         && !(grokTokens !== undefined && preferences.toolEnabled('grok', 'image_generate', at))) {
-        deny.push('image_generate')
+        const registered = toolNames.get('image_generate')
+        if (registered !== undefined) deny.push(registered)
       }
       if (deny.length) agent.ctx.tools.restrict({ deny })
     })

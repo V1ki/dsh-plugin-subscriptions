@@ -58,6 +58,11 @@ export interface ImageGenerateToolOptions {
   resolveAttachments?: () => AttachmentStore | undefined
   /** Lazy llm-service lookup for the image-capability route check. */
   resolveLlm?: () => LlmRuntime | undefined
+  /**
+   * Registered tool name. Defaults to `image_generate`; the plugin falls back
+   * to an alias when another plugin already owns that name (issue #76).
+   */
+  name?: string
 }
 
 /** The wire request body for one generation call. */
@@ -319,8 +324,9 @@ function imageGenerateText(value: ImageGenerateValue): ContentBlock {
  */
 export function createImageGenerateTool(options: ImageGenerateToolOptions): ToolDefinition {
   const imagePool = options.imagePool ?? new ImageAccountPool()
+  const toolName = options.name ?? 'image_generate'
   return defineTool({
-    name: 'image_generate',
+    name: toolName,
     description: 'Generate an image with the ChatGPT subscription (gpt-image-2) or the Grok '
       + 'subscription (grok-imagine-image-2.0) and save it as an image file. The `provider` '
       + 'parameter picks the preferred provider (default gpt); when the preferred one is logged '
@@ -402,7 +408,7 @@ export function createImageGenerateTool(options: ImageGenerateToolOptions): Tool
     },
     presentCall: args => ({
       card: 'generic',
-      title: `image_generate${args.referenceImages === undefined ? '' : ` (edit, ${args.referenceImages.length} images)`}: ${truncate(args.prompt)}`,
+      title: `${toolName}${args.referenceImages === undefined ? '' : ` (edit, ${args.referenceImages.length} images)`}: ${truncate(args.prompt)}`,
     }),
     // The web UI has no image surface on tool cards and flattens result blocks
     // to text/JSON, so the completed card shows the text summary only; the

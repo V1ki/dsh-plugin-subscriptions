@@ -48,6 +48,11 @@ export interface VideoGenerateToolOptions {
   pollIntervalMs?: number
   /** Overall deadline from submit to completion. */
   maxWaitMs?: number
+  /**
+   * Registered tool name. Defaults to `video_generate`; the plugin falls back
+   * to an alias when another plugin already owns that name (issue #76).
+   */
+  name?: string
 }
 
 /** The wire request body for one generation call. */
@@ -194,8 +199,9 @@ interface VideoGenerateValue {
 export function createVideoGenerateTool(options: VideoGenerateToolOptions): ToolDefinition {
   const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS
   const maxWaitMs = options.maxWaitMs ?? DEFAULT_MAX_WAIT_MS
+  const toolName = options.name ?? 'video_generate'
   return defineTool({
-    name: 'video_generate',
+    name: toolName,
     description: `Generate a short video (1-15 seconds) with the grok subscription (${VIDEO_GENERATE_MODEL}) `
       + 'and save it as an MP4 file. Generation is asynchronous and may take a minute or more; '
       + 'the tool waits for completion and returns the saved file path. '
@@ -247,7 +253,7 @@ export function createVideoGenerateTool(options: VideoGenerateToolOptions): Tool
     },
     presentCall: args => ({
       card: 'generic',
-      title: `video_generate: ${truncate(args.prompt)}`,
+      title: `${toolName}: ${truncate(args.prompt)}`,
     }),
     async execute(args, exec) {
       const body = buildVideoGenerateBody(args)

@@ -26,6 +26,12 @@ export interface XSearchToolOptions {
   tokens: AccountTokenManager<GrokSession>
   /** Fetch implementation (injectable for tests). */
   fetchFn?: FetchFn
+  /**
+   * Registered tool name. Defaults to `x_search`; when another plugin already
+   * owns that name (issue #76), the plugin mounts this tool under an alias
+   * instead so both search tools stay available.
+   */
+  name?: string
 }
 
 /** Normalized, validated arguments of one search call. */
@@ -131,8 +137,9 @@ function truncate(text: string, max = 60): string {
  * @returns the tool to register on `ctx.tools`.
  */
 export function createXSearchTool(options: XSearchToolOptions): ToolDefinition {
+  const toolName = options.name ?? 'x_search'
   return defineTool({
-    name: 'x_search',
+    name: toolName,
     description: "Search X (Twitter) posts, profiles, and threads using the grok subscription's hosted xAI x_search. "
       + 'Use this for current discussion, reactions, or claims on X rather than general web pages.',
     parameters: {
@@ -177,7 +184,7 @@ export function createXSearchTool(options: XSearchToolOptions): ToolDefinition {
     },
     presentCall: args => ({
       card: 'generic',
-      title: `x_search: ${truncate(args.query)}`,
+      title: `${toolName}: ${truncate(args.query)}`,
       kind: 'search',
     }),
     presentResult: (_args, result) => {
