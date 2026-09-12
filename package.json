@@ -71,7 +71,7 @@
     "@deepseek-ai/dsh-client-locale": "0.1.2-alpha.3",
     "@deepseek-ai/dsh-client-ui-settings": "0.1.2-alpha.3",
     "@deepseek-ai/dsh-client-ui-conversation": "0.1.2-alpha.3",
-    "@deepseek-ai/dsh-client-ui-commands": "0.1.2-alpha.3",
+    "@deepseek-ai/dsh-client-ui-commands": "0.1.5-alpha.1",
     "@deepseek-ai/dsh-client-ui-primitives": "0.1.2-alpha.3",
     "@deepseek-ai/dsh-client-ui-renderer": "0.1.2-alpha.3",
     "@deepseek-ai/dsh-client-ui-slots": "0.1.2-alpha.3",
