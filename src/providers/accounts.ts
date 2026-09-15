@@ -18,6 +18,7 @@ import {
   getAccountSession,
   listAccounts,
   saveAccountSession,
+  resolveAccountKey,
 } from '../auth/store.js'
 import type { AccountEntry, ProviderId } from '../auth/store.js'
 
@@ -116,6 +117,8 @@ export interface AccountStoreIo<S> {
   get(account?: string): Promise<S | undefined>
   save(account: string, session: S): Promise<void>
   remove(account: string): Promise<void>
+  /** Resolve a legacy alias to the canonical account key. */
+  resolve?(account: string): Promise<string>
 }
 
 export interface AccountTokenManagerOptions<S extends TimedSession> {
@@ -141,6 +144,7 @@ export class AccountTokenManager<S extends TimedSession> {
       get: account => getAccountSession(provider, account) as Promise<S | undefined>,
       save: (account, session) => saveAccountSession(provider, account, session as never),
       remove: account => deleteAccountSession(provider, account),
+      resolve: account => resolveAccountKey(provider, account),
     }
   }
 
@@ -163,14 +167,20 @@ export class AccountTokenManager<S extends TimedSession> {
    * @throws LlmError MISSING_CREDENTIAL when the account is not logged in.
    */
   async session(account?: string, forceRefresh = false): Promise<S> {
-    const key = account ?? await this.defaultAccount()
-    if (key === undefined) throw this.missingCredential()
+    const requested = account ?? await this.defaultAccount()
+    if (requested === undefined) throw this.missingCredential()
+    const key = await this.resolveAccount(requested)
     return this.tokensFor(key).session(forceRefresh)
   }
 
+  /** Resolve a legacy alias before it reaches any per-account manager or cache. */
+  resolveAccount(account: string): Promise<string> {
+    return this.io.resolve?.(account) ?? Promise.resolve(account)
+  }
+
   /** Read an account's stored session without any refresh side effect. */
-  peek(account?: string): Promise<S | undefined> {
-    return this.io.get(account)
+  async peek(account?: string): Promise<S | undefined> {
+    return this.io.get(account === undefined ? undefined : await this.resolveAccount(account))
   }
 
   /** Whether a session is stored for the account (cheap; never refreshes). */
@@ -187,7 +197,14 @@ export class AccountTokenManager<S extends TimedSession> {
         displayName: this.options.displayName,
         ...this.options.makeOptions(account),
         load: () => io.get(account),
-        save: session => io.save(account, session),
+        save: async session => {
+          await io.save(account, session)
+          const canonical = await this.resolveAccount(account)
+          if (canonical !== account) {
+            this.managers.set(canonical, manager!)
+            if (this.managers.get(account) === manager) this.managers.delete(account)
+          }
+        },
         remove: () => io.remove(account),
         onRemoved: () => { this.options.onAccountRemoved?.(account) },
       })

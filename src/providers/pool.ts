@@ -40,6 +40,8 @@ export interface PoolAdapterOptions {
   switchMargin: number
   /** The default account of one provider (for config members omitting `account`). */
   defaultAccount: (provider: ProviderId) => Promise<string | undefined>
+  /** Resolve legacy account aliases before pool deduplication and cache identity. */
+  resolveAccount?: (provider: ProviderId, account: string) => Promise<string>
   /** Account pools (auto-aggregated plus config overrides), resolved lazily. */
   families: () => Promise<Map<string, PoolDefinition>>
   /** User-configured extra picker entries (heterogeneous fallbacks), by pool id. */
@@ -177,8 +179,9 @@ export class PoolAdapter extends LlmAdapter {
     const seen = new Set<string>()
     const resolved: ConcretePoolMember[] = []
     for (const member of members) {
-      const account = member.account ?? await this.options.defaultAccount(member.provider)
-      if (account === undefined) continue
+      const requested = member.account ?? await this.options.defaultAccount(member.provider)
+      if (requested === undefined) continue
+      const account = await (this.options.resolveAccount?.(member.provider, requested) ?? Promise.resolve(requested))
       const key = memberKey(member.provider, account, member.model)
       if (seen.has(key)) continue
       seen.add(key)
@@ -199,11 +202,8 @@ export class PoolAdapter extends LlmAdapter {
     if (definition === undefined) throw new LlmError(`unknown pool model "${model}"`, 'NO_ADAPTER')
     const resolved: LlmResolvedModelInfo[] = []
     let lastFailure: unknown
-    const seenMembers = new Set<string>()
-    for (const member of definition.members) {
-      const identity = JSON.stringify([member.provider, member.model, member.account])
-      if (seenMembers.has(identity)) continue
-      seenMembers.add(identity)
+    const members = await this.concrete(definition.members)
+    for (const member of members) {
       const adapter = this.options.adapters[member.provider]
       if (adapter === undefined) continue
       // Tolerate per-member failures (a misconfigured tier member, a

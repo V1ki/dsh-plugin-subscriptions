@@ -14,6 +14,7 @@
  */
 
 import { createHash } from 'node:crypto'
+import { decodeJwtPayload } from './jwt.js'
 import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
@@ -108,6 +109,8 @@ export interface ProviderAccounts<S> {
   /** Key of the account direct (non-pool) routes serve; the first login wins. */
   default?: string
   accounts: Record<string, S>
+  /** Old keys remain bound to their migrated account, never a workspace sibling. */
+  aliases?: Record<string, string>
 }
 
 /** The durable store shape: per provider, its accounts. */
@@ -132,8 +135,9 @@ export interface AccountEntry<S> {
 }
 
 /**
- * The stable identity of one session's account: codex keys on the always
- * present `accountId` claim, the others on their display identity, falling
+ * The stable identity of one session's account: Codex keys on workspace AND
+ * user (email fallback, workspace-only for unidentified legacy sessions),
+ * the others on their display identity, falling
  * back to a refresh-token hash for sessions stored before identity fields
  * existed. Logging the same account in again lands on the same key, so a
  * re-login updates in place instead of duplicating. (The hash fallback can
@@ -146,8 +150,17 @@ export interface AccountEntry<S> {
  */
 export function accountKeyOf(provider: ProviderId, session: StoredSession): string {
   switch (provider) {
-    case 'codex':
-      return (session as CodexSession).accountId
+    case 'codex': {
+      const codex = session as CodexSession
+      const payload = typeof codex.idToken === 'string' ? decodeJwtPayload(codex.idToken) : undefined
+      const auth = claimObject(payload?.['https://api.openai.com/auth'])
+      const user = nonEmpty(auth?.chatgpt_user_id) ?? nonEmpty(auth?.user_id)
+      const profile = claimObject(payload?.['https://api.openai.com/profile'])
+      const email = nonEmpty(codex.emailAddress) ?? nonEmpty(payload?.email) ?? nonEmpty(profile?.email)
+      if (user === undefined && email === undefined) return codex.accountId
+      // JSON tuple encoding avoids separator collisions and distinguishes IDs from emails.
+      return JSON.stringify([codex.accountId, user === undefined ? 'email' : 'user', user ?? email!.toLowerCase()])
+    }
     case 'claude':
       return (session as ClaudeSession).emailAddress ?? tokenHash(session.refreshToken)
     case 'grok':
@@ -156,6 +169,86 @@ export function accountKeyOf(provider: ProviderId, session: StoredSession): stri
       return (session as AntigravitySession).account ?? tokenHash(session.refreshToken)
     case 'copilot':
       return (session as CopilotSession).account ?? tokenHash(session.refreshToken)
+  }
+}
+
+function nonEmpty(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined
+}
+
+function claimObject(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown> : undefined
+}
+
+/** Resolve only recorded aliases, not an ambiguous workspace-wide match. */
+function resolveAccount(entry: ProviderAccounts<StoredSession>, key: string): string {
+  const seen = new Set<string>()
+  while (!Object.hasOwn(entry.accounts, key)
+    && entry.aliases !== undefined
+    && Object.hasOwn(entry.aliases, key)
+    && !seen.has(key)) {
+    seen.add(key)
+    key = entry.aliases[key]
+  }
+  return key
+}
+
+/** Resolve a persisted legacy account key to its canonical account identity. */
+export async function resolveAccountKey(
+  provider: ProviderId,
+  account: string,
+  path = authFilePath(),
+): Promise<string> {
+  const entry = (await loadStore(path))[provider]
+  return entry === undefined ? account : resolveAccount(entry, account)
+}
+
+/** Migrate workspace-only keys once; retain collisions rather than discard credentials. */
+function codexEmail(session: CodexSession): string | undefined {
+  const payload = typeof session.idToken === 'string' ? decodeJwtPayload(session.idToken) : undefined
+  const profile = claimObject(payload?.['https://api.openai.com/profile'])
+  return (nonEmpty(session.emailAddress) ?? nonEmpty(payload?.email) ?? nonEmpty(profile?.email))?.toLowerCase()
+}
+
+function codexUserKey(session: CodexSession): string | undefined {
+  const key = accountKeyOf('codex', session)
+  try {
+    const tuple = JSON.parse(key) as unknown
+    return Array.isArray(tuple) && tuple[1] === 'user' ? key : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Upgrade one unambiguous email fallback to the stable user key. */
+function reconcileCodexIdentity(entry: ProviderAccounts<CodexSession>, session: CodexSession): string | undefined {
+  const userKey = codexUserKey(session)
+  const email = codexEmail(session)
+  if (userKey === undefined || email === undefined) return undefined
+  const emailKey = JSON.stringify([session.accountId, 'email', email])
+  const previous = entry.accounts[emailKey]
+  if (previous === undefined || codexEmail(previous) !== email) return undefined
+  // Never merge workspace-wide: the exact normalized workspace/email pair must match.
+  if (!Object.hasOwn(entry.accounts, userKey)) entry.accounts[userKey] = previous
+  delete entry.accounts[emailKey]
+  entry.aliases = { ...entry.aliases, [emailKey]: userKey }
+  for (const [alias, target] of Object.entries(entry.aliases)) {
+    if (target === emailKey) entry.aliases[alias] = userKey
+  }
+  if (entry.default === emailKey) entry.default = userKey
+  return userKey
+}
+
+function migrateCodex(entry: ProviderAccounts<CodexSession>): void {
+  for (const [oldKey, session] of Object.entries(entry.accounts)) {
+    if (oldKey !== session.accountId) continue
+    const key = accountKeyOf('codex', session)
+    if (key === oldKey || Object.hasOwn(entry.accounts, key)) continue
+    entry.accounts[key] = session
+    delete entry.accounts[oldKey]
+    entry.aliases = { ...entry.aliases, [oldKey]: key }
+    if (entry.default === oldKey) entry.default = key
   }
 }
 
@@ -264,7 +357,7 @@ function parseStore(text: string, path: string): SessionMap {
         continue
       }
       const session = record as unknown as StoredSession
-      const key = accountKeyOf(provider, session)
+      const key = provider === 'codex' ? (session as CodexSession).accountId : accountKeyOf(provider, session)
       ;(store as Record<string, unknown>)[provider] = { default: key, accounts: { [key]: session } }
       continue
     }
@@ -293,6 +386,7 @@ function parseStore(text: string, path: string): SessionMap {
       : Object.keys(kept)[0]
     ;(store as Record<string, unknown>)[provider] = { ...record, default: validDefault, accounts: kept }
   }
+  if (store.codex !== undefined) migrateCodex(store.codex)
   return store
 }
 
@@ -386,7 +480,7 @@ export async function getAccountSession<K extends ProviderId>(
   if (entry === undefined) return undefined
   const key = account ?? entry.default
   if (key === undefined) return undefined
-  return entry.accounts[key] as SessionOf<K> | undefined
+  return entry.accounts[resolveAccount(entry, key)] as SessionOf<K> | undefined
 }
 
 /**
@@ -412,7 +506,17 @@ export async function saveAccountSession<K extends ProviderId>(
   return serialize(path, async () => {
     const store = await loadStore(path)
     const entry = store[provider] as ProviderAccounts<SessionOf<K>> | undefined
+    if (entry !== undefined) {
+      account = resolveAccount(entry, account)
+      if (provider === 'codex') {
+        account = reconcileCodexIdentity(
+          entry as unknown as ProviderAccounts<CodexSession>,
+          session as unknown as CodexSession,
+        ) ?? accountKeyOf('codex', session as unknown as CodexSession)
+      }
+    }
     ;(store as Record<string, unknown>)[provider] = {
+      ...entry,
       default: entry?.default ?? account,
       accounts: { ...entry?.accounts, [account]: session },
     } satisfies ProviderAccounts<SessionOf<K>>
@@ -435,13 +539,16 @@ export async function deleteAccountSession(
   return serialize(path, async () => {
     const store = await loadStore(path)
     const entry = store[provider]
-    if (entry === undefined || !(account in entry.accounts)) return
+    if (entry === undefined) return
+    account = resolveAccount(entry, account)
+    if (!Object.hasOwn(entry.accounts, account)) return
     const accounts = { ...entry.accounts }
     delete accounts[account]
     if (Object.keys(accounts).length === 0) {
       delete store[provider]
     } else {
       ;(store as Record<string, unknown>)[provider] = {
+        ...entry,
         ...entry.default === account ? { default: Object.keys(accounts)[0] } : { default: entry.default },
         accounts,
       }
@@ -464,7 +571,8 @@ export async function setDefaultAccount(
   return serialize(path, async () => {
     const store = await loadStore(path)
     const entry = store[provider]
-    if (entry === undefined || !(account in entry.accounts)) {
+    if (entry !== undefined) account = resolveAccount(entry, account)
+    if (entry === undefined || !Object.hasOwn(entry.accounts, account)) {
       throw new Error(`no ${provider} account "${account}" is logged in`)
     }
     ;(store as Record<string, unknown>)[provider] = { ...entry, default: account }

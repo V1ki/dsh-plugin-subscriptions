@@ -97,6 +97,33 @@ test('concurrent refreshes of one account coalesce; accounts refresh independent
   assert.deepEqual(refreshes.sort(), ['a1', 'a2'])
 })
 
+test('legacy and canonical keys share one in-flight refresh', async () => {
+  const expired = session('old', 1000)
+  const stored = new Map<string, TestSession>([['canonical', expired]])
+  let calls = 0
+  const tokens = new AccountTokenManager<TestSession>({
+    provider: 'codex', displayName: 'Test',
+    makeOptions: () => ({ preemptMs: 60_000, refresh: async current => {
+      calls += 1
+      await new Promise(resolve => setTimeout(resolve, 10))
+      return { ...current, accessToken: 'new', expiresAt: Date.now() + 3_600_000 }
+    }, isPermanent: () => true }),
+    io: {
+      list: () => Promise.resolve([{ key: 'canonical', session: stored.get('canonical')! }]),
+      get: key => Promise.resolve(stored.get(key === 'legacy' ? 'canonical' : key ?? 'canonical')),
+      save: (_key, value) => { stored.set('canonical', value); return Promise.resolve() },
+      remove: () => { stored.delete('canonical'); return Promise.resolve() },
+      resolve: key => Promise.resolve(key === 'legacy' ? 'canonical' : key),
+    },
+  })
+  const [legacy, canonical, defaultSession] = await Promise.all([
+    tokens.session('legacy'), tokens.session('canonical'), tokens.session(),
+  ])
+  assert.equal(calls, 1)
+  assert.deepEqual([legacy.accessToken, canonical.accessToken, defaultSession.accessToken], ['new', 'new', 'new'])
+  assert.equal(stored.has('canonical'), true)
+})
+
 test('a permanent refresh failure removes only that account and notifies once', async () => {
   const { tokens, stored, removed, notified } = harness({
     accounts: { a1: session('at-1', 1000), a2: session('at-2') },

@@ -955,6 +955,7 @@ export function apply(ctx: Context, config: Config): void {
       strategy: poolConfig?.strategy ?? 'quota_aware',
       switchMargin: poolConfig?.switchMargin ?? 2,
       defaultAccount: provider => accountTokens.get(provider)?.defaultAccount() ?? Promise.resolve(undefined),
+      resolveAccount: (provider, account) => accountTokens.get(provider)?.resolveAccount(account) ?? Promise.resolve(account),
       families,
       tiers: poolConfig?.tiers ?? {},
       onWarn,

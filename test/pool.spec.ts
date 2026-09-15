@@ -27,6 +27,22 @@ const SessionId = (id: string): NonNullable<GenerateOptions['sessionId']> =>
 
 const OPTIONS: GenerateOptions = { provider: 'codex', model: 'm', messages: [] }
 
+test('pool canonicalizes legacy aliases before deduplication', async () => {
+  const adapter = new FakeAdapter(() => serveOk())
+  const pool = new PoolAdapter({
+    adapters: { codex: adapter }, health: new PoolHealthRegistry(),
+    usage: new PoolUsageTracker(() => undefined), strategy: 'priority', switchMargin: 2,
+    defaultAccount: async () => 'canonical',
+    resolveAccount: async (_provider, account) => account === 'legacy' ? 'canonical' : account,
+    families: async () => new Map([[poolKey('codex', 'm'), { members: [
+      { provider: 'codex', model: 'm', account: 'legacy' },
+      { provider: 'codex', model: 'm', account: 'canonical' },
+    ] }]]), tiers: {}, onWarn: () => {},
+  })
+  await collect(pool.stream(OPTIONS))
+  assert.deepEqual(adapter.accounts, ['canonical'])
+})
+
 test('pool context intersects each account and each model, including same-provider tiers', async () => {
   const adapter = new FakeAdapter(() => serveOk())
   const visited: string[] = []
