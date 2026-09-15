@@ -5,13 +5,13 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { PROVIDER_IDS, type ProviderId } from './auth/store.js'
 
 export const PROVIDER_TOOLS = {
-  codex: ['image_generate'],
+  codex: ['image_generate', 'web_search'],
   claude: [],
   grok: ['image_generate', 'video_generate', 'x_search'],
   copilot: [],
   antigravity: [],
 } as const
-export type SubscriptionTool = 'image_generate' | 'video_generate' | 'x_search'
+export type SubscriptionTool = 'image_generate' | 'video_generate' | 'x_search' | 'web_search'
 export interface ProviderPreferences {
   /** Absent follows discovery; an explicit selection hides newly discovered models. */
   visibleModels?: string[]

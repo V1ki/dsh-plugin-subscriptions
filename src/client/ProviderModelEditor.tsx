@@ -179,7 +179,7 @@ export function ProviderModelEditor({ provider, rpc, t }: Props) {
           {catalog.tools.map(tool => <label key={tool}>
             <input type="checkbox" checked={draft.tools?.[tool] !== false} onChange={event => edit({
               ...draft, tools: { ...draft.tools, [tool]: event.target.checked },
-            })} /> {t(tool === 'image_generate' ? 'modelsImage' : tool === 'video_generate' ? 'modelsVideo' : 'modelsSearch')}
+            })} /> {t(tool === 'image_generate' ? 'modelsImage' : tool === 'video_generate' ? 'modelsVideo' : tool === 'web_search' ? 'modelsWebSearch' : 'modelsSearch')}
           </label>)}
         </div>}
         <div style={actions}>

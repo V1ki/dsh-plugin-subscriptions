@@ -7,6 +7,12 @@
 # Headless usage without installing into the profile (node half only; log in
 # from a web profile first, the token file is shared):
 #   pnpm dsh --profile headless --patch <this-checkout>/overlay.yml "task"
+# Select this plugin's Codex search backend explicitly. A user profile patch can
+# still override the global provider selection after this bundle patch.
+- id: web
+  config:
+    searchProvider: codex
+
 - insert:
     - id: llm-subscriptions
       name: dsh-plugin-subscriptions

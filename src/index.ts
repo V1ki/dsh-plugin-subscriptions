@@ -18,6 +18,8 @@ import type {
 } from '@deepseek-ai/dsh-llm'
 // Type-only: activates the `ctx.tools` Context merge for the inject block.
 import type {} from '@deepseek-ai/dsh-tools'
+// Type-only: activates the `ctx.web` Context merge for optional registration.
+import type {} from '@deepseek-ai/dsh-web'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { OAuthFlowManager, type OAuthAttempt } from './auth/oauth-flow.js'
 import { DeviceFlowManager, type DeviceAttempt } from './auth/device-flow.js'
@@ -67,6 +69,7 @@ import { DEFAULT_RATE_LIMIT_MAX_WAIT_MS, resolveRateLimitWait } from './provider
 import type { RateLimitConfig } from './providers/rate-limit.js'
 import { catalogStore } from './providers/catalog-store.js'
 import { CodexClientVersionCache } from './providers/codex-client-version.js'
+import { CodexWebSearchProvider } from './providers/codex-search.js'
 import { PoolAdapter } from './providers/pool.js'
 import { ImageAccountPool } from './providers/image-pool.js'
 import { registerWithAlias } from './tools/registration.js'
@@ -1147,6 +1150,18 @@ export function apply(ctx: Context, config: Config): void {
     ctx.effect(() => () => { clearInterval(syncTimer) }, 'dsh-plugin-subscriptions: claude background sync timer')
   }
 
+  // `web` is optional on headless/minimal compositions. Register Codex behind
+  // DSH's native web_search tool when the capability seam is mounted.
+  if (codexTokens !== undefined) {
+    const tokens = codexTokens
+    ctx.inject(['web'], webCtx => {
+      webCtx.web.registerSearchProvider(new CodexWebSearchProvider({
+        tokens,
+        fetchFn: proxiedFetch,
+      }))
+    })
+  }
+
   // `tools` is optional (headless/minimal compositions may not mount it), so
   // registration waits for the service instead of injecting it at load.
   // x_search and video_generate follow the grok provider; image_generate
@@ -1178,6 +1193,7 @@ export function apply(ctx: Context, config: Config): void {
     toolsCtx.on('agent/created', ({ agent }) => {
       const at = agent.session.header.createdAt
       const deny: string[] = []
+      if (codexTokens !== undefined && !preferences.toolEnabled('codex', 'web_search', at)) deny.push('web_search')
       if (grokTokens !== undefined) {
         for (const tool of ['x_search', 'video_generate'] as const) {
           const registered = registeredNames.get(tool)

@@ -2,7 +2,7 @@
  * Proxy routing for every outbound subscription request. When a proxy is
  * configured, {@link proxiedFetch} attaches an undici {@link ProxyAgent} as the
  * fetch `dispatcher`, so token exchanges, model-API streams, usage lookups,
- * model discovery, and the `x_search` / `image_generate` / `video_generate`
+ * model discovery, and the `web_search` / `x_search` / `image_generate` / `video_generate`
  * tools all leave through the proxy without touching their call sites.
  *
  * The config lives at `~/.dsh/plugins/subscriptions/proxy.json` (mode 0600,

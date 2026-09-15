@@ -31,19 +31,21 @@ test('tool policies retain old-session settings across changes and restarts', as
   try {
     const path = join(dir, 'settings.json')
     const store = new ProviderSettingsStore(path)
-    await store.set('codex', { tools: { image_generate: false } })
+    await store.set('codex', { tools: { image_generate: false, web_search: false } })
     const doc = JSON.parse(await readFile(path, 'utf8'))
     const at = doc.toolHistory[0].at as number
     const reload = new ProviderSettingsStore(path)
     assert.equal(reload.toolEnabled('codex', 'image_generate', at - 1), true)
     assert.equal(reload.toolEnabled('codex', 'image_generate', at + 1), false)
+    assert.equal(reload.toolEnabled('codex', 'web_search', at + 1), false)
     assert.equal(reload.toolEnabled('grok', 'image_generate', at + 1), true)
     assert.equal(reload.toolEnabled('grok', 'x_search', at + 1), true)
     await new Promise(resolve => setTimeout(resolve, 5))
-    await reload.set('codex', { tools: { image_generate: true } })
+    await reload.set('codex', { tools: { image_generate: true, web_search: true } })
     const again = new ProviderSettingsStore(path)
     assert.equal(again.toolEnabled('codex', 'image_generate', at + 1), false)
     assert.equal(again.toolEnabled('codex', 'image_generate', Date.now() + 1), true)
+    assert.equal(again.toolEnabled('codex', 'web_search', Date.now() + 1), true)
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
 
