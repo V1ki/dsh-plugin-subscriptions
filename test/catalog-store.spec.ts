@@ -50,6 +50,45 @@ test('catalog store round-trips per-provider snapshots in one file', async () =>
   JSON.parse(await readFile(path, 'utf8'))
 })
 
+test('catalog store round-trips output token limits', async () => {
+  const path = await tempStorePath()
+  const snapshot = {
+    at: 123,
+    models: [
+      { id: 'g', name: 'G', maxOutputTokens: 32_768 },
+      { id: 'min', name: 'Minimum', maxOutputTokens: 1 },
+      { id: 'max', name: 'Maximum', maxOutputTokens: Number.MAX_SAFE_INTEGER },
+    ],
+  }
+  await catalogStore('grok', path).save(snapshot)
+  assert.deepEqual(JSON.parse(await readFile(path, 'utf8')).grok, snapshot)
+  assert.deepEqual(await catalogStore('grok', path).load(), snapshot)
+})
+
+test('catalog store accepts old caches without output token limits', async () => {
+  const path = await tempStorePath()
+  const snapshot = { at: 123, models: [{ id: 'g', name: 'G', contextWindow: 500_000 }] }
+  await writeFile(path, JSON.stringify({ grok: snapshot }))
+  const loaded = await catalogStore('grok', path).load()
+  assert.deepEqual(loaded, snapshot)
+  assert.equal(Object.hasOwn(loaded!.models[0], 'maxOutputTokens'), false)
+})
+
+test('sanitizeSnapshot rejects invalid output token limits', () => {
+  for (const maxOutputTokens of [
+    0, -1, 1.5, '32768', null, Number.MAX_SAFE_INTEGER + 1,
+    NaN, Infinity, -Infinity, true, {}, [],
+  ]) {
+    assert.equal(sanitizeSnapshot({
+      at: 123,
+      models: [
+        { id: 'valid', name: 'Valid' },
+        { id: 'invalid', name: 'Invalid', maxOutputTokens },
+      ],
+    }), undefined, `Invalid maxOutputTokens: ${String(maxOutputTokens)}`)
+  }
+})
+
 test('catalog store tolerates missing and corrupt files', async () => {
   const path = await tempStorePath()
   const store = catalogStore('grok', path)

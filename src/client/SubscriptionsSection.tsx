@@ -16,7 +16,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import { en } from './locales.js'
-import { ProviderModelEditor } from './ProviderModelEditor.js'
+import { ProviderAccountManager } from './ProviderAccountManager.js'
 import type { SubscriptionsKey } from './locales.js'
 
 import { callSubscriptionsAuth, SubscriptionsAuthError } from './subscriptions-rpc.js'
@@ -460,6 +460,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [proxyLoadError, setProxyLoadError] = useState<string | undefined>(undefined)
   /** Proxy dialog state (draft fields; the password never pre-fills). */
   const [proxyOpen, setProxyOpen] = useState(false)
+  const [managedProvider, setManagedProvider] = useState<{ id: SubscriptionProvider; name: string }>()
   const [proxyEnabled, setProxyEnabled] = useState(false)
   const [proxyUrl, setProxyUrl] = useState('')
   const [proxyUsername, setProxyUsername] = useState('')
@@ -909,6 +910,10 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                   {t('addAccount')}
                 </button>
               )}
+              <button type="button" style={styles.button} aria-haspopup="dialog"
+                onClick={() => setManagedProvider({ id, name })}>
+                {t('accountsManage')}
+              </button>
               {busy && (
                 <button type="button" style={styles.button} onClick={() => { void cancel(id) }}>
                   {t('cancel')}
@@ -918,7 +923,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
             {!busy && accounts.length > 0 && (
               <p style={styles.statusLine}>{t('addAccountHint')}</p>
             )}
-            <ProviderModelEditor provider={id} rpc={rpc} t={t} />
+
             {busy && deviceCode !== undefined && (
               <div style={styles.deviceCode}>
                 <span style={styles.statusLine}>{t('deviceCodePrompt')}</span>
@@ -956,6 +961,8 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
           </div>
         )
       })}
+      {managedProvider && <ProviderAccountManager provider={managedProvider.id} name={managedProvider.name}
+        rpc={rpc} t={t} onClose={() => setManagedProvider(undefined)} />}
       {proxyOpen && (
         <div style={styles.modalOverlay} onClick={() => setProxyOpen(false)}>
           <div style={styles.modal} onClick={event => event.stopPropagation()}>

@@ -4,6 +4,7 @@ import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import type { ProviderPreferences, SubscriptionTool } from '../provider-settings.js'
 import type { SubscriptionProvider } from './SubscriptionsSection.js'
 import { callSubscriptionsAuth } from './subscriptions-rpc.js'
+import { mergeLatestAccounts } from './account-preferences.js'
 import type { SubscriptionsKey } from './locales.js'
 
 interface ModelRow {
@@ -25,6 +26,8 @@ interface Props {
   provider: SubscriptionProvider
   rpc: ConnectionHandle['rpc']
   t: (key: SubscriptionsKey, params?: Record<string, unknown>) => string
+  /** Render the editor as an embedded section of the account manager dialog. */
+  embedded?: boolean
 }
 const border = '1px solid var(--dsw-alias-border-l2, #ddd)'
 const control: CSSProperties = {
@@ -34,8 +37,8 @@ const control: CSSProperties = {
 const actions: CSSProperties = { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }
 
 /** Local draft: refreshes and failed saves never silently replace unsaved edits. */
-export function ProviderModelEditor({ provider, rpc, t }: Props) {
-  const [open, setOpen] = useState(false)
+export function ProviderModelEditor({ provider, rpc, t, embedded = false }: Props) {
+  const [open, setOpen] = useState(embedded === true)
   const [catalog, setCatalog] = useState<Catalog>()
   const [draft, setDraft] = useState<ProviderPreferences>({})
   const [contexts, setContexts] = useState<Record<string, string>>({})
@@ -69,6 +72,9 @@ export function ProviderModelEditor({ provider, rpc, t }: Props) {
     }
   }
   function edit(next: ProviderPreferences) { setDraft(next); setDirty(true); setSaved(false) }
+  useEffect(() => {
+    if (embedded && !catalog && !busy) void load()
+  }, [embedded])
   async function save() {
     const windows: Record<string, number> = Object.create(null) as Record<string, number>
     for (const [model, text] of Object.entries(contexts)) {
@@ -79,7 +85,7 @@ export function ProviderModelEditor({ provider, rpc, t }: Props) {
       }
       windows[model] = value
     }
-    const settings = { ...draft, ...(provider === 'codex' ? { contextWindows: windows } : {}) }
+    let settings = { ...draft, ...(provider === 'codex' ? { contextWindows: windows } : {}) }
     const request = ++generation.current
     setBusy(true)
     setError('')
@@ -98,6 +104,10 @@ export function ProviderModelEditor({ provider, rpc, t }: Props) {
           }),
         }))
       }
+      // Account management can save while this editor has an older draft.
+      // Refresh immediately before replacing settings, never revive stale accounts.
+      const latest = await callSubscriptionsAuth<Catalog>(rpc, 'providerSettings', { provider })
+      settings = mergeLatestAccounts(settings, latest.settings)
       await callSubscriptionsAuth(rpc, 'setProviderSettings', { provider, settings })
       if (generation.current !== request) return
       setDraft(settings)
@@ -116,10 +126,10 @@ export function ProviderModelEditor({ provider, rpc, t }: Props) {
   const models = [...allModels, ...missing].filter(model => `${model.name} ${model.id}`.toLowerCase().includes(query.trim().toLowerCase()))
   const selected = new Set(draft.visibleModels ?? allModels.map(model => model.id))
   return <div style={{ borderTop: border, marginTop: 12, paddingTop: 12 }}>
-    <button type="button" style={{ ...control, border: 0, padding: 0, cursor: 'pointer' }} aria-expanded={open}
+    {embedded ? <h3 style={{ margin: 0, fontSize: 15 }}>{t('modelsEdit')}</h3> : <button type="button" style={{ ...control, border: 0, padding: 0, cursor: 'pointer' }} aria-expanded={open}
       onClick={() => { setOpen(!open); if (!open && !busy && !dirty) void load() }}>
       {t('modelsEdit')} {open ? '▴' : '▾'}
-    </button>
+    </button>}
     {open && <div style={{ display: 'grid', gap: 12, marginTop: 12 }}>
       <p style={{ margin: 0 }}>{t('modelsHint')}</p>
       {error && <p role="alert" style={{ margin: 0, color: 'var(--dsw-alias-state-error-primary, #b42318)' }}>{error}</p>}

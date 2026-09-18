@@ -12,7 +12,17 @@ export const PROVIDER_TOOLS = {
   antigravity: [],
 } as const
 export type SubscriptionTool = 'image_generate' | 'video_generate' | 'x_search' | 'web_search'
+export interface AccountPreferences {
+  alias?: string
+  /** Absent means included. */
+  poolEnabled?: boolean
+  /** Absent means no separate picker entries. */
+  independentEntry?: boolean
+  /** Absent allows every model; [] allows none. */
+  poolModels?: string[]
+}
 export interface ProviderPreferences {
+  accounts?: Record<string, AccountPreferences>
   /** Absent follows discovery; an explicit selection hides newly discovered models. */
   visibleModels?: string[]
   contextWindows?: Record<string, number>
@@ -32,6 +42,30 @@ export function validatePreferences(provider: ProviderId, input: unknown): Provi
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('settings must be an object')
   const raw = input as Record<string, unknown>
   const result: ProviderPreferences = {}
+  if (raw.accounts !== undefined) {
+    if (!raw.accounts || typeof raw.accounts !== 'object' || Array.isArray(raw.accounts)) throw new Error('accounts must be an account-to-preferences map')
+    result.accounts = Object.create(null) as Record<string, AccountPreferences>
+    for (const [key, value] of Object.entries(raw.accounts)) {
+      if (!key.trim() || !value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid account preferences')
+      const account = value as Record<string, unknown>
+      const parsed: AccountPreferences = {}
+      if (account.alias !== undefined) {
+        if (typeof account.alias !== 'string') throw new Error('account alias must be a string')
+        parsed.alias = account.alias.trim()
+      }
+      for (const field of ['poolEnabled', 'independentEntry'] as const) {
+        if (account[field] !== undefined) {
+          if (typeof account[field] !== 'boolean') throw new Error(`${field} must be a boolean`)
+          parsed[field] = account[field]
+        }
+      }
+      if (account.poolModels !== undefined) {
+        if (!Array.isArray(account.poolModels) || account.poolModels.some(id => typeof id !== 'string' || !id.trim())) throw new Error('poolModels must be an array of model ids')
+        parsed.poolModels = [...new Set(account.poolModels as string[])]
+      }
+      result.accounts[key] = parsed
+    }
+  }
   if (raw.visibleModels !== undefined) {
     if (!Array.isArray(raw.visibleModels) || raw.visibleModels.some(id => typeof id !== 'string' || !id.trim())) {
       throw new Error('visibleModels must be an array of model ids')

@@ -20,7 +20,7 @@ import {
   refreshAntigravity,
   requestAntigravityContent,
 } from '../src/providers/antigravity.js'
-import type { FetchFn } from '../src/providers/common.js'
+import type { CatalogSnapshot, FetchFn } from '../src/providers/common.js'
 import {
   AntigravityStreamTranslator,
   streamAntigravity,
@@ -290,6 +290,108 @@ function accountTokens(refresh: (value: AntigravitySession) => Promise<Antigravi
   })
   return { tokens, accounts }
 }
+
+test('Antigravity discovery retains valid output caps without confusing maxTokens with output tokens', async () => {
+  const invalid = [undefined, null, 0, -1, 1.5, '65535', Number.MAX_SAFE_INTEGER + 1]
+  const models = await fetchAntigravityModels(session, runtime, routed({
+    [`${runtime.baseURL}/v1internal:fetchAvailableModels`]: { models: {
+      'gemini-3.1-pro-low': { maxTokens: 1048576, maxOutputTokens: 65535 },
+      'gpt-oss-120b-medium': { maxTokens: 131072, maxOutputTokens: 32768 },
+      ...Object.fromEntries(invalid.map((value, index) => [`invalid-${index}`, { maxTokens: 131072, maxOutputTokens: value }])),
+    } },
+  }))
+  assert.equal(models[0].maxOutputTokens, 65535)
+  assert.equal(models[1].maxOutputTokens, 32768)
+  for (const model of models.slice(2)) assert.equal(Object.hasOwn(model, 'maxOutputTokens'), false)
+})
+
+test('Antigravity resolves per-model output defaults and bounds configured defaults to the catalog', async () => {
+  const { tokens } = accountTokens()
+  const limits: Record<string, number> = {
+    'gemini-3.1-pro-low': 65535,
+    'gpt-oss-120b-medium': 32768,
+    'claude-sonnet-4-6': 64000,
+    'gemini-3-flash': 65536,
+    'tab_flash_lite_preview': 4096,
+  }
+  let fetches = 0
+  const fetchFn: FetchFn = async () => {
+    fetches++
+    return Response.json({ models: Object.fromEntries(Object.entries(limits).map(([id, maxOutputTokens]) => [id, { maxOutputTokens }])) })
+  }
+  const adapter = new AntigravityAdapter({ tokens, models: [], discovery: true, streamIdleTimeoutMs: 1000, runtime, fetchFn })
+  for (const [model, limit] of Object.entries(limits)) {
+    const info = await adapter.resolveOwnModel('antigravity', model, 'alice')
+    assert.equal(info.defaultMaxTokens, limit)
+    const payload = toAntigravityRequest({ ...options([]), model, maxTokens: info.defaultMaxTokens }, [], session.projectId, true)
+    assert.equal(payload.request.generationConfig?.maxOutputTokens, limit)
+  }
+  assert.equal(fetches, 1, 'successive model resolutions reuse the catalog')
+  const configured = new AntigravityAdapter({
+    tokens, discovery: true, streamIdleTimeoutMs: 1000, runtime, fetchFn,
+    models: [{ id: 'gemini-3.1-pro-low', maxTokens: 8192 }, { id: 'gpt-oss-120b-medium', maxTokens: 65536 }],
+  })
+  assert.equal((await configured.resolveOwnModel('antigravity', 'gemini-3.1-pro-low', 'alice')).defaultMaxTokens, 8192)
+  assert.equal((await configured.resolveOwnModel('antigravity', 'gpt-oss-120b-medium', 'alice')).defaultMaxTokens, 32768)
+})
+
+test('Antigravity output defaults remain account-scoped', async () => {
+  const { tokens } = accountTokens()
+  const adapter = new AntigravityAdapter({
+    tokens, models: [], discovery: true, streamIdleTimeoutMs: 1000, runtime,
+    fetchFn: async (_input, init) => Response.json({ models: {
+      shared: { maxOutputTokens: new Headers(init?.headers).get('authorization') === 'Bearer alice' ? 65535 : 32768 },
+    } }),
+  })
+  assert.equal((await adapter.resolveOwnModel('antigravity', 'shared', 'alice')).defaultMaxTokens, 65535)
+  assert.equal((await adapter.resolveOwnModel('antigravity', 'shared', 'bob')).defaultMaxTokens, 32768)
+})
+
+test('Antigravity uses persisted output limits after restart without a network request', async () => {
+  const { tokens } = accountTokens()
+  let saved: CatalogSnapshot | undefined
+  const catalogStore = {
+    load: async () => saved,
+    save: async (snapshot: CatalogSnapshot) => { saved = structuredClone(snapshot) },
+    clear: async () => { saved = undefined },
+  }
+  const initial = new AntigravityAdapter({
+    tokens, models: [], discovery: true, streamIdleTimeoutMs: 1000, runtime, catalogStore,
+    fetchFn: async () => Response.json({ models: { 'gemini-3.1-pro-low': { maxOutputTokens: 65535 } } }),
+  })
+  assert.equal((await initial.resolveOwnModel('antigravity', 'gemini-3.1-pro-low', 'alice')).defaultMaxTokens, 65535)
+  assert.equal(saved?.models[0].maxOutputTokens, 65535)
+  let fetches = 0
+  const restarted = new AntigravityAdapter({
+    tokens, models: [], discovery: true, streamIdleTimeoutMs: 1000, runtime, catalogStore,
+    fetchFn: async () => { fetches++; throw new Error('offline') },
+  })
+  assert.equal((await restarted.resolveOwnModel('antigravity', 'gemini-3.1-pro-low', 'alice')).defaultMaxTokens, 65535)
+  assert.equal(fetches, 0)
+})
+
+test('Antigravity falls back for legacy caches, absent caps, failed discovery and discovery disabled', async () => {
+  const { tokens } = accountTokens()
+  const model = 'gemini-3.1-pro-low'
+  for (const mode of ['legacy-cache', 'missing-cap', 'offline', 'disabled'] as const) {
+    const adapter = new AntigravityAdapter({
+      tokens, models: [], discovery: mode !== 'disabled', streamIdleTimeoutMs: 1000, runtime,
+      ...(mode === 'legacy-cache' ? { catalogStore: {
+        load: async () => ({ at: Date.now(), models: [{ id: model, name: model }] }),
+        save: async () => {}, clear: async () => {},
+      } } : {}),
+      fetchFn: async () => {
+        if (mode !== 'missing-cap') throw new Error('offline')
+        return Response.json({ models: { [model]: {} } })
+      },
+    })
+    assert.equal((await adapter.resolveOwnModel('antigravity', model, 'alice')).defaultMaxTokens, 32768, mode)
+  }
+  const configured = new AntigravityAdapter({
+    tokens, models: [{ id: model, maxTokens: 8192 }], discovery: false, streamIdleTimeoutMs: 1000,
+  })
+  assert.equal((await configured.resolveOwnModel('antigravity', model, 'alice')).defaultMaxTokens, 8192)
+})
 
 test('Antigravity catalogs stay account-scoped and invalidate after account changes', async () => {
   const { tokens, accounts } = accountTokens()

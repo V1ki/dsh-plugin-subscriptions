@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { Context } from '@deepseek-ai/cordis'
 import type { AccountAwareAdapter } from '../src/providers/accounts.js'
+import { CodexAdapter } from '../src/providers/codex.js'
+import { saveAccountSession } from '../src/auth/store.js'
 import * as plugin from '../src/index.js'
 import { createFakeConnection } from './fake-connection.js'
 
@@ -18,10 +20,6 @@ test('provider settings RPC edits picker visibility without losing the editor ca
   const tools = new Set<string>()
   ctx.provide('llm', {
     registerAdapter: (routes: string[], adapter: AccountAwareAdapter) => {
-      adapter.listModels = async provider => [
-        { provider, id: 'm1', name: 'Model 1' }, { provider, id: 'm2', name: 'Model 2' },
-      ]
-      adapter.resolveModel = async (provider, model) => ({ provider, id: model, name: model, reasoning: { efforts: [{ id: ReasoningEffortId('high'), name: 'High' }] } })
       adapters.set(routes[0], adapter)
       return Object.assign(() => {}, { replace: () => {} })
     },
@@ -29,19 +27,23 @@ test('provider settings RPC edits picker visibility without losing the editor ca
   const connection = createFakeConnection()
   ctx.provide('connection', connection.connection)
   ctx.provide('tools', { register: (definition: { name: string }) => { tools.add(definition.name); return () => {} } })
-  const runtime = ctx.plugin(plugin, { providers: ['codex', 'grok'], pool: { enabled: false } })
+  const originalResolve = CodexAdapter.prototype.resolveOwnModel
+  let unavailable = false
+  CodexAdapter.prototype.resolveOwnModel = async (provider, model) => {
+    if (unavailable && model === 'm2') throw new Error('capabilities unavailable')
+    return { provider, id: model, name: model, reasoning: { efforts: [{ id: ReasoningEffortId('high'), name: 'High' }] } }
+  }
+  const runtime = ctx.plugin(plugin, { providers: ['codex', 'grok'], pool: { enabled: false }, models: { codex: [{ id: 'm1', name: 'Model 1', inputModalities: ['text'] }, { id: 'm2', name: 'Model 2', inputModalities: ['text'] }] } })
   try {
     await new Promise(resolve => setTimeout(resolve, 50))
+    if (!connection.registered()) await runtime
     assert.ok(connection.registered())
+    await saveAccountSession('codex', 'account', { accessToken: 'token', refreshToken: 'refresh', expiresAt: Date.now() + 3600_000, accountId: 'account', idToken: '' })
     const call = (endpoint: string, payload: unknown) => connection.handler(endpoint, payload, new AbortController().signal)
     assert.equal((await call('setProviderSettings', { provider: 'codex', settings: { visibleModels: ['m1'], tools: { image_generate: false, web_search: false } } })).ok, true)
     assert.deepEqual((await adapters.get('codex')!.listModels('codex')).map(model => model.id), ['m1'])
     assert.equal((await adapters.get('codex')!.resolveModel('codex', 'm2')).id, 'm2')
-    const resolve = adapters.get('codex')!.resolveModel
-    adapters.get('codex')!.resolveModel = async (provider, model) => {
-      if (model === 'm2') throw new Error('capabilities unavailable')
-      return resolve(provider, model)
-    }
+    unavailable = true
     const catalog = await call('providerSettings', { provider: 'codex', force: true })
     assert.ok(catalog.ok)
     assert.deepEqual((catalog.value as { models: { id: string }[] }).models.map(model => model.id), ['m1', 'm2'])
@@ -74,6 +76,7 @@ test('provider settings RPC edits picker visibility without losing the editor ca
     assert.equal((await adapters.get('codex')!.listModels('codex')).length, 2)
   } finally {
     await runtime.dispose()
+    CodexAdapter.prototype.resolveOwnModel = originalResolve
     if (previous === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previous
     await rm(home, { recursive: true, force: true })
   }
@@ -109,12 +112,13 @@ test('Antigravity registers the real multi-account adapter with provider setting
     assert.ok(connection.registered(), 'the subscriptions-auth Fetch routes were registered')
     assert.deepEqual((await listAccounts('antigravity')).map(entry => entry.key), ['alice', 'bob'])
     const adapter = adapters.get('antigravity')!
-    assert.deepEqual((await adapter.listOwnModels('antigravity', 'bob')).map(model => model.id), ['m1', 'm2'])
+    assert.deepEqual((await adapter.listModels('antigravity')).map(model => model.id), ['m1', 'm2'])
     const call = (endpoint: string, payload: unknown) => connection.handler(endpoint, payload, new AbortController().signal)
     const catalog = await call('providerSettings', { provider: 'antigravity', force: true })
     assert.ok(catalog.ok)
     assert.deepEqual((catalog.value as { models: { id: string }[] }).models.map(model => model.id), ['m1', 'm2'])
     assert.deepEqual((catalog.value as { tools: string[] }).tools, [])
+    assert.deepEqual((catalog.value as { accounts: unknown[] }).accounts, ['alice', 'bob'].map(key => ({ key, label: key, models: [{ id: 'm1', name: 'm1' }, { id: 'm2', name: 'm2' }] })))
     assert.equal((await call('setProviderSettings', { provider: 'antigravity', settings: { visibleModels: ['m2'] } })).ok, true)
     assert.deepEqual((await adapter.listModels('antigravity')).map(model => model.id), ['m2'])
     assert.equal((await call('setProviderSettings', { provider: 'antigravity', settings: { tools: { image_generate: true } } })).ok, false)

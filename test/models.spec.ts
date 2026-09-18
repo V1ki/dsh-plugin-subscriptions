@@ -1482,6 +1482,8 @@ test('resolveModel and Speed use a non-default account catalog for a model only 
     'max',
   ])
   assert.equal(await adapter.supportsFastTier('gpt-5.6-sol'), true)
+  assert.equal(await adapter.supportsFastTier('gpt-5.6-sol', 'pro'), true)
+  assert.equal(await adapter.supportsFastTier('gpt-5.6-sol', 'plus'), false)
   assert.deepEqual(await adapter.fastCapableModels(), ['gpt-5.6-sol'])
 })
 

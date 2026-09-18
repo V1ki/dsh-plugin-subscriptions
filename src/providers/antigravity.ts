@@ -60,7 +60,8 @@ export const ANTIGRAVITY_DEFAULT_USER_AGENT = 'antigravity/1.104.0 dsh-plugin-su
 export const ANTIGRAVITY_PREEMPT_MS = 5 * 60_000
 const ANTIGRAVITY_CALLBACK_PATH = '/oauth-callback'
 const ANTIGRAVITY_CONTEXT_WINDOW = 1_024_000
-const ANTIGRAVITY_DEFAULT_MAX_TOKENS = 65_536
+// Fallback only when discovery is unavailable or the model omits its output cap.
+const ANTIGRAVITY_DEFAULT_MAX_TOKENS = 32_768
 
 /** Antigravity, not Gemini CLI, OAuth scopes from the local reference clients. */
 export const ANTIGRAVITY_SCOPES = [
@@ -361,6 +362,7 @@ interface AntigravityWireModel {
   description?: string
   inputTokenLimit?: number
   maxInputTokens?: number
+  maxOutputTokens?: number
   quotaInfo?: { remainingFraction?: number; resetTime?: string }
   weeklyQuotaInfo?: { remainingFraction?: number; resetTime?: string }
   weeklyQuota?: { remainingFraction?: number; resetTime?: string }
@@ -393,6 +395,8 @@ export async function fetchAntigravityModels(
     name: model.displayName ?? id.split('-').map(word => word.length === 0 ? word : word[0].toUpperCase() + word.slice(1)).join(' '),
     ...model.description === undefined ? {} : { description: model.description },
     contextWindow: model.inputTokenLimit ?? model.maxInputTokens ?? ANTIGRAVITY_CONTEXT_WINDOW,
+    ...typeof model.maxOutputTokens === 'number' && Number.isSafeInteger(model.maxOutputTokens) && model.maxOutputTokens > 0
+      ? { maxOutputTokens: model.maxOutputTokens } : {},
     inputModalities: ['text', 'image'],
   }))
   if (models.length === 0) throw new Error('Antigravity models endpoint returned an empty catalog')
@@ -625,6 +629,10 @@ export class AntigravityAdapter extends LlmAdapter {
     const discovered = await this.discovered(model, account)
     const configured = this.options.models.find(entry => entry.id === model)
     const reasoning = mergeReasoning(this.options.defaultEffortOf?.(model), antigravityReasoning(model))
+    const outputLimit = discovered?.maxOutputTokens
+    const preferredMaxTokens = configured?.maxTokens ?? outputLimit ?? ANTIGRAVITY_DEFAULT_MAX_TOKENS
+    // Configuration may lower the default, but must not exceed a known server cap.
+    const defaultMaxTokens = outputLimit === undefined ? preferredMaxTokens : Math.min(preferredMaxTokens, outputLimit)
     return {
       provider,
       id: model,
@@ -632,7 +640,7 @@ export class AntigravityAdapter extends LlmAdapter {
       ...discovered?.description === undefined ? {} : { description: discovered.description },
       inputModalities: discovered?.inputModalities ?? configured?.inputModalities ?? ['text', 'image'],
       context: { contextWindow: discovered?.contextWindow ?? configured?.contextWindow ?? ANTIGRAVITY_CONTEXT_WINDOW },
-      defaultMaxTokens: configured?.maxTokens ?? ANTIGRAVITY_DEFAULT_MAX_TOKENS,
+      defaultMaxTokens,
       ...reasoning === undefined ? {} : { reasoning },
     }
   }

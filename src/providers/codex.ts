@@ -813,8 +813,8 @@ export class CodexAdapter extends LlmAdapter {
   }
 
   /** Whether the discovered catalog advertises a fast tier for this model. */
-  async supportsFastTier(model: string): Promise<boolean> {
-    return (await this.discovered(model))?.fastTier === true
+  async supportsFastTier(model: string, account?: string): Promise<boolean> {
+    return (await this.discovered(model, account))?.fastTier === true
   }
 
   /** Ids of every discovered model with a fast tier (the Speed toggle's visibility list). */

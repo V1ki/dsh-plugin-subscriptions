@@ -71,6 +71,8 @@ import { catalogStore } from './providers/catalog-store.js'
 import { CodexClientVersionCache } from './providers/codex-client-version.js'
 import { CodexWebSearchProvider } from './providers/codex-search.js'
 import { PoolAdapter } from './providers/pool.js'
+import { AccountPreferencesAdapter, accountAllowsPool, accountModelId, parseAccountModelId } from './providers/account-preferences.js'
+export type { AccountPreferences, ProviderPreferences } from './provider-settings.js'
 import { ImageAccountPool } from './providers/image-pool.js'
 import { registerWithAlias } from './tools/registration.js'
 import { buildAccountPools, poolKey } from './providers/pool-family.js'
@@ -696,6 +698,15 @@ export function apply(ctx: Context, config: Config): void {
   // Dropped on every copilot auth transition so replay state (captured
   // reasoning) never survives an account switch in memory.
   let copilotAdapter: CopilotAdapter | undefined
+  const memberAdapters = new Map<ProviderId, AccountAwareAdapter>()
+  const register = (provider: ProviderId, adapter: AccountAwareAdapter): AdapterRegistrationHandle => {
+    const route = new AccountPreferencesAdapter({
+      provider, adapter, settings: preferences, pool: () => poolAdapter,
+      accounts: async () => (await accountTokens.get(provider)?.list() ?? []).map(({ key, session }) => ({ key, label: accountOf(provider, session) ?? key })),
+    })
+    memberAdapters.set(provider, route.poolMember())
+    return ctx.llm.registerAdapter([provider], route)
+  }
   for (const provider of providers) {
     switch (provider) {
       case 'codex': {
@@ -737,7 +748,7 @@ export function apply(ctx: Context, config: Config): void {
         })
         codexAdapter = adapter
         adapters.set('codex', adapter)
-        handles.set('codex', ctx.llm.registerAdapter(['codex'], adapter))
+        handles.set('codex', register('codex', adapter))
         break
       }
       case 'claude': {
@@ -772,7 +783,7 @@ export function apply(ctx: Context, config: Config): void {
           pool: () => poolAdapter,
         })
         adapters.set('claude', adapter)
-        handles.set('claude', ctx.llm.registerAdapter(['claude'], adapter))
+        handles.set('claude', register('claude', adapter))
         break
       }
       case 'grok': {
@@ -805,7 +816,7 @@ export function apply(ctx: Context, config: Config): void {
           pool: () => poolAdapter,
         })
         adapters.set('grok', adapter)
-        handles.set('grok', ctx.llm.registerAdapter(['grok'], adapter))
+        handles.set('grok', register('grok', adapter))
         break
       }
       case 'copilot': {
@@ -835,7 +846,7 @@ export function apply(ctx: Context, config: Config): void {
           pool: () => poolAdapter,
         })
         adapters.set('copilot', copilotAdapter)
-        handles.set('copilot', ctx.llm.registerAdapter(['copilot'], copilotAdapter))
+        handles.set('copilot', register('copilot', copilotAdapter))
         break
       }
       case 'antigravity': {
@@ -867,7 +878,7 @@ export function apply(ctx: Context, config: Config): void {
           pool: () => poolAdapter,
         })
         adapters.set('antigravity', adapter)
-        handles.set('antigravity', ctx.llm.registerAdapter(['antigravity'], adapter))
+        handles.set('antigravity', register('antigravity', adapter))
         break
       }
     }
@@ -925,15 +936,17 @@ export function apply(ctx: Context, config: Config): void {
         await Promise.all([...adapters].map(async ([provider, adapter]) => {
           try {
             const accounts = (await accountTokens.get(provider)?.list() ?? []).map(entry => entry.key)
-            if (accounts.length < 2) return
+            if (accounts.length === 0) return
             const catalogs = (await Promise.all(accounts.map(async account => {
               const models = await withTimeout(
                 signal => adapter.listOwnModels(provider, account, signal),
                 POOL_USAGE_TIMEOUT_MS,
               )
-              return models === undefined ? undefined : { account, models }
+              const settings = preferences.get(provider).accounts
+              const policy = settings && Object.hasOwn(settings, account) ? settings[account] : undefined
+              return models === undefined ? undefined : { account, models: models.filter(model => accountAllowsPool(policy, model.id)) }
             }))).filter(entry => entry !== undefined)
-            if (catalogs.length >= 2) sources[provider] = { catalogs }
+            if (catalogs.length > 0) sources[provider] = { catalogs }
           } catch {
             // Discovery failures are already reported by the owning adapter.
           }
@@ -952,7 +965,7 @@ export function apply(ctx: Context, config: Config): void {
       return pools
     }
     poolAdapter = new PoolAdapter({
-      adapters: Object.fromEntries(adapters),
+      adapters: Object.fromEntries(memberAdapters),
       health: poolHealth,
       usage: poolUsage,
       strategy: poolConfig?.strategy ?? 'quota_aware',
@@ -974,9 +987,18 @@ export function apply(ctx: Context, config: Config): void {
 
   const speed: SpeedController = {
     async speed(sessionId) {
+      const fastModels = await codexAdapter?.fastCapableModels() ?? []
+      const accountPreferences = preferences.get('codex').accounts
+      for (const { key } of await codexTokens?.list() ?? []) {
+        if (!accountPreferences || !Object.hasOwn(accountPreferences, key) || accountPreferences[key].independentEntry !== true) continue
+        for (const model of [...fastModels]) {
+          if (parseAccountModelId(model)) continue
+          if (await codexAdapter?.supportsFastTier(model, key)) fastModels.push(accountModelId(key, model))
+        }
+      }
       return {
         tier: speedBySession.get(sessionId) ?? 'standard',
-        fastModels: await codexAdapter?.fastCapableModels() ?? [],
+        fastModels,
       }
     },
     async setSpeed(sessionId, tier) {
@@ -1022,7 +1044,7 @@ export function apply(ctx: Context, config: Config): void {
         }
         const views: ModelDefaultView[] = []
         for (const model of models) {
-          if (tierIds.has(model.id)) continue
+          if (tierIds.has(model.id) || parseAccountModelId(model.id)) continue
           let info: LlmResolvedModelInfo | undefined
           try {
             info = await ctx.llm.resolveModelInfo(provider, model.id)
@@ -1088,7 +1110,7 @@ export function apply(ctx: Context, config: Config): void {
       }
       const models = await fullCatalogs.get(provider)!(provider)
       // Enumerate each account once, with the same bounds used by pool discovery.
-      const accounts = provider === 'codex' ? await codexTokens!.list() : []
+      const accounts = await accountTokens.get(provider)?.list() ?? []
       const accountCatalogs = await Promise.all(accounts.map(async account => ({
         account: account.key,
         models: await withTimeout(signal => adapter.listOwnModels(provider, account.key, signal), DISCOVERY_TIMEOUT_MS).catch(() => undefined),
@@ -1117,7 +1139,13 @@ export function apply(ctx: Context, config: Config): void {
           } : {}),
         }
       }))
-      return { provider, settings: preferences.get(provider), models: rows, tools: PROVIDER_TOOLS[provider] }
+      return {
+        provider, settings: preferences.get(provider), models: rows, tools: PROVIDER_TOOLS[provider],
+        accounts: accounts.map(({ key, session }) => {
+          const catalog = accountCatalogs.find(entry => entry.account === key)?.models
+          return { key, label: accountOf(provider, session) ?? key, models: (catalog ?? []).map(({ id, name }) => ({ id, name })), ...(catalog === undefined ? { unavailable: true } : {}) }
+        }),
+      }
     },
     async set(provider, settings) {
       if (!adapters.has(provider)) throw new BadRequest(`provider ${provider} is not configured`)
@@ -1126,7 +1154,8 @@ export function apply(ctx: Context, config: Config): void {
         throw new BadRequest(error instanceof Error ? error.message : String(error))
       }
       await preferences.set(provider, validated)
-      handles.get(provider)?.replace([provider])
+      poolAdapter?.invalidate()
+      for (const [route, handle] of handles) handle.replace([route])
     },
   })
 

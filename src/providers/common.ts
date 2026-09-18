@@ -460,6 +460,8 @@ export interface DiscoveredModel {
   description?: string
   /** Advertised combined context capacity in tokens. */
   contextWindow?: number
+  /** Server-advertised per-request output token ceiling, when disclosed. */
+  maxOutputTokens?: number
   /** Provider sort hint; lower sorts earlier. */
   priority?: number
   /** Advertised reasoning efforts, when the provider discloses them. */
