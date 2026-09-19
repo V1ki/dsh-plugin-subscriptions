@@ -75,7 +75,7 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => {
     const style = document.createElement('style')
     style.setAttribute('data-plugin', 'dsh-plugin-subscriptions')
-    style.textContent = 'div[role="dialog"][aria-modal="true"]:has(> nav) { padding-top: 14px; }'
+    style.textContent = "div[role=\"dialog\"][aria-modal=\"true\"]:has(> nav) { padding-top: 14px; }\n.dsh-subscriptions-usage-summary::-webkit-details-marker { display: none; }\n.dsh-subscriptions-usage-summary::marker { content: ''; }\n.dsh-subscriptions-usage-chevron { display: inline-block; font-size: 18px; line-height: 1; transform: rotate(0deg); transition: transform 120ms ease; }\ndetails[open] > .dsh-subscriptions-usage-summary .dsh-subscriptions-usage-chevron { transform: rotate(90deg); }"
     document.head.appendChild(style)
     return () => style.remove()
   }, 'dsh-plugin-subscriptions: settings panel breathing room')

@@ -40,7 +40,7 @@ test('provider settings RPC edits picker visibility without losing the editor ca
     assert.ok(connection.registered())
     await saveAccountSession('codex', 'account', { accessToken: 'token', refreshToken: 'refresh', expiresAt: Date.now() + 3600_000, accountId: 'account', idToken: '' })
     const call = (endpoint: string, payload: unknown) => connection.handler(endpoint, payload, new AbortController().signal)
-    assert.equal((await call('setProviderSettings', { provider: 'codex', settings: { visibleModels: ['m1'], tools: { image_generate: false } } })).ok, true)
+    assert.equal((await call('setProviderSettings', { provider: 'codex', settings: { visibleModels: ['m1'], tools: { image_generate: false, web_search: false } } })).ok, true)
     assert.deepEqual((await adapters.get('codex')!.listModels('codex')).map(model => model.id), ['m1'])
     assert.equal((await adapters.get('codex')!.resolveModel('codex', 'm2')).id, 'm2')
     unavailable = true
@@ -67,10 +67,10 @@ test('provider settings RPC edits picker visibility without losing the editor ca
     const old = create(Date.now() - 1000)
     assert.deepEqual(old, [])
     // Grok still supplies image_generate while only Codex is disabled.
-    assert.deepEqual(create(Date.now() + 1000), [])
+    assert.deepEqual(create(Date.now() + 1000), ['web_search'])
     assert.equal((await call('setProviderSettings', { provider: 'grok', settings: { tools: { image_generate: false, video_generate: false } } })).ok, true)
     assert.deepEqual(old, [])
-    assert.deepEqual(create(Date.now() + 1000).sort(), ['image_generate', 'video_generate'])
+    assert.deepEqual(create(Date.now() + 1000).sort(), ['image_generate', 'video_generate', 'web_search'])
     assert.deepEqual([...tools].sort(), ['image_generate', 'video_generate', 'x_search'])
     assert.equal((await call('setProviderSettings', { provider: 'codex', settings: {} })).ok, true)
     assert.equal((await adapters.get('codex')!.listModels('codex')).length, 2)

@@ -27,7 +27,7 @@ import { createPortal } from 'react-dom'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import { IconDataOutline16, useAnchoredPosition, useDismissOnOutsidePointer } from '@deepseek-ai/dsh-client-ui-primitives'
-import { callSubscriptionsAuth, usageBarColor } from './SubscriptionsSection.js'
+import { callSubscriptionsAuth, groupUsageWindows, usageBarColor } from './SubscriptionsSection.js'
 import type { AccountStatus, ProviderStatus, ProviderUsage, SubscriptionProvider, UsageWindow } from './SubscriptionsSection.js'
 import type { ModelDirectoriesLike } from './SpeedSelect.js'
 import { en } from './locales.js'
@@ -507,33 +507,48 @@ function AccountMeta({ account, translate }: { account: AccountUsageDisplay; tra
   )
 }
 
-/** Preview each account independently; all remaining quotas stay accessible. */
+/** Group equal percentages by default; expanding reveals every model quota separately. */
 export function AccountWindows({ windows, model, translate }: {
   windows: readonly UsageWindow[]; model: string | undefined; translate: Translate
 }) {
-  const { shown, hidden } = previewWindows(windows, model)
+  const ordered = prioritizeWindows(windows, model)
+  const groups = groupUsageWindows(ordered)
+  const labelOf = (w: UsageWindow): string =>
+    `${usageWindowLabel(translate, w)}${model !== undefined && w.scope === model ? ` · ${translate('usageBadgeCurrent')}` : ''}`
   const rows = (items: readonly UsageWindow[]) => (
     <dl style={styles.details}>
-      {items.map((w, i) => (
-        <WindowRow key={i} label={`${usageWindowLabel(translate, w)}${model !== undefined && w.scope === model ? ` · ${translate('usageBadgeCurrent')}` : ''}`} window={w} />
-      ))}
+      {items.map((w, i) => <WindowRow key={i} label={labelOf(w)} window={w} />)}
     </dl>
   )
-  return <>
-    {rows(shown)}
-    {hidden.length > 0 && <details style={styles.moreWindows}>
-      <summary style={styles.moreSummary}>{translate('usageBadgeMoreWindows', { count: hidden.length })}</summary>
-      {rows(hidden)}
-    </details>}
-  </>
+  // Short, already-distinct lists need no disclosure. Long lists still collapse
+  // to a bounded summary, even when every percentage happens to differ.
+  if (groups.length === windows.length && windows.length <= WINDOW_PREVIEW_LIMIT) return rows(ordered)
+  return <details style={styles.moreWindows}>
+    <summary className="dsh-subscriptions-usage-summary" style={styles.moreSummary}>
+      <dl style={styles.details}>
+        {groups.slice(0, WINDOW_PREVIEW_LIMIT).map(group => (
+          <WindowRow
+            key={group.percent}
+            label={`${labelOf(group.first)}${group.windows.length > 1 ? ` +${group.windows.length - 1}` : ''}`}
+            title={group.windows.map(labelOf).join('\n')}
+            window={group.resetsAt === undefined
+              ? { kind: group.first.kind, ...group.first.scope === undefined ? {} : { scope: group.first.scope }, usedPercent: group.percent }
+              : { ...group.first, usedPercent: group.percent, resetsAt: group.resetsAt }}
+          />
+        ))}
+      </dl>
+      <span style={styles.expandHint}><span className="dsh-subscriptions-usage-chevron" aria-hidden>›</span>{translate('usageBadgeMoreWindows', { count: windows.length })}</span>
+    </summary>
+    {rows(ordered)}
+  </details>
 }
 
 /** One `dt`/`dd` pair: window name → `25% · 6d1h`, with the bar underneath. */
-function WindowRow({ label, window: w }: { label: string; window: UsageWindow }) {
+function WindowRow({ label, window: w, title }: { label: string; window: UsageWindow; title?: string }) {
   const percent = usedPercent(w)
   return (
     <>
-      <dt style={styles.dt}>{label}</dt>
+      <dt style={styles.dt} title={title}>{label}</dt>
       <dd style={styles.dd}>
         {percent}%
         {w.resetsAt !== undefined && <span style={styles.reset}> · {windowLabel(w)}</span>}
@@ -607,7 +622,8 @@ const styles: Record<string, CSSProperties> = {
     gridTemplateColumns: 'minmax(0, 1fr) max-content', gap: '4px 16px', margin: 0,
   },
   moreWindows: { marginTop: 8 },
-  moreSummary: { cursor: 'pointer', color: 'var(--dsw-alias-label-secondary)', marginBottom: 8 },
+  moreSummary: { display: 'block', listStyle: 'none', cursor: 'pointer', color: 'var(--dsw-alias-label-secondary)', marginBottom: 8 },
+  expandHint: { display: 'flex', alignItems: 'center', gap: 5 },
   dt: { minWidth: 0, margin: 0, overflowWrap: 'anywhere' },
   dd: {
     minWidth: 0, margin: 0, color: 'var(--dsw-alias-label-secondary)',
