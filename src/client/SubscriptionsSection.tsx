@@ -227,6 +227,12 @@ const styles: Record<string, CSSProperties> = {
     background: 'var(--dsw-alias-bg-layer-1)', border: '1px solid var(--dsw-alias-border-l2)',
   },
   usageFill: { height: '100%', borderRadius: 3 },
+  usageDetails: { display: 'block' },
+  usageSummary: { display: 'block', cursor: 'pointer', listStyle: 'none' },
+  usageExpand: {
+    display: 'flex', alignItems: 'center', gap: 5, marginTop: 6, fontSize: 12, lineHeight: '18px',
+    color: 'var(--dsw-alias-label-tertiary)',
+  },
   deviceCode: {
     marginTop: 4, display: 'flex', flexDirection: 'column', gap: 6,
     border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8,
@@ -317,6 +323,79 @@ export function usageBarColor(usedPercent: number): string {
   if (usedPercent >= 95) return 'var(--dsw-alias-state-error-primary)'
   if (usedPercent >= 80) return 'var(--dsw-alias-state-warn-label)'
   return 'var(--dsw-alias-state-success-primary)'
+}
+
+/** A visual quota row: windows that render at the same percentage share one bar. */
+export interface UsageWindowGroup {
+  /** First reported window, retained for its label and representative reset time. */
+  first: UsageWindow
+  /** Every model/window represented by this one visual bar, in API order. */
+  windows: UsageWindow[]
+  /** Clamped, rounded percentage displayed by the shared bar. */
+  percent: number
+  /** Reset time only when every grouped window has the same value. */
+  resetsAt: number | undefined
+}
+
+/**
+ * Group visually identical quota bars while retaining every source window for
+ * an accessible hover title. Grouping uses the rounded percentage users see,
+ * so values such as 0.2% and 0.4% do not create indistinguishable empty bars.
+ */
+export function groupUsageWindows(windows: readonly UsageWindow[]): UsageWindowGroup[] {
+  const groups = new Map<number, UsageWindowGroup>()
+  for (const window of windows) {
+    const percent = Math.round(Math.min(100, Math.max(0, window.usedPercent)))
+    const group = groups.get(percent)
+    if (group === undefined) {
+      groups.set(percent, { first: window, windows: [window], percent, resetsAt: window.resetsAt })
+      continue
+    }
+    group.windows.push(window)
+    if (group.resetsAt !== window.resetsAt) group.resetsAt = undefined
+  }
+  return [...groups.values()]
+}
+
+const WINDOW_PREVIEW_LIMIT = 4
+
+/** Settings quota list: grouped while closed, every original model row when expanded. */
+function SettingsUsageWindows({ windows, t }: { windows: readonly UsageWindow[]; t: SubscriptionsSectionInjected['t'] }) {
+  const groups = groupUsageWindows(windows)
+  const row = (window: UsageWindow, key: string | number, label = usageWindowLabel(t, window), title?: string) => {
+    const percent = Math.round(Math.min(100, Math.max(0, window.usedPercent)))
+    return <div key={key} style={styles.usageRow}>
+      <div style={styles.usageMeta}>
+        <span title={title}>{label}</span>
+        <span>
+          {percent}%
+          {window.resetsAt !== undefined && ` · ${t('usageResets', { date: new Date(window.resetsAt).toLocaleString() })}`}
+        </span>
+      </div>
+      <div style={styles.usageTrack}>
+        <div style={{ ...styles.usageFill, width: `${percent}%`, background: usageBarColor(percent) }} />
+      </div>
+    </div>
+  }
+  if (groups.length === windows.length && windows.length <= WINDOW_PREVIEW_LIMIT) {
+    return <>{windows.map((window, index) => row(window, index))}</>
+  }
+  return <details style={styles.usageDetails}>
+    <summary className="dsh-subscriptions-usage-summary" style={styles.usageSummary}>
+      <div>
+        {groups.slice(0, WINDOW_PREVIEW_LIMIT).map(group => row(
+          group.resetsAt === undefined
+            ? { kind: group.first.kind, ...group.first.scope === undefined ? {} : { scope: group.first.scope }, usedPercent: group.percent }
+            : { ...group.first, usedPercent: group.percent, resetsAt: group.resetsAt },
+          group.percent,
+          `${usageWindowLabel(t, group.first)}${group.windows.length > 1 ? ` +${group.windows.length - 1}` : ''}`,
+          group.windows.map(window => usageWindowLabel(t, window)).join('\n'),
+        ))}
+      </div>
+      <span style={styles.usageExpand}><span className="dsh-subscriptions-usage-chevron" aria-hidden>›</span>{t('usageBadgeMoreWindows', { count: windows.length })}</span>
+    </summary>
+    {windows.map((window, index) => row(window, index))}
+  </details>
 }
 
 /** One-line status text of the proxy config card. */
@@ -866,24 +945,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                       {usage?.windows !== undefined && usage.windows.length === 0 && (
                         <p style={styles.statusLine}>{t('usageEmpty')}</p>
                       )}
-                      {(usage?.windows ?? []).map((window, index) => {
-                        const percent = Math.min(100, Math.max(0, window.usedPercent))
-                        return (
-                          <div key={index} style={styles.usageRow}>
-                            <div style={styles.usageMeta}>
-                              <span>{usageWindowLabel(t, window)}</span>
-                              <span>
-                                {`${String(Math.round(percent))}%`}
-                                {window.resetsAt !== undefined
-                                  && ` · ${t('usageResets', { date: new Date(window.resetsAt).toLocaleString() })}`}
-                              </span>
-                            </div>
-                            <div style={styles.usageTrack}>
-                              <div style={{ ...styles.usageFill, width: `${String(percent)}%`, background: usageBarColor(percent) }} />
-                            </div>
-                          </div>
-                        )
-                      })}
+                      <SettingsUsageWindows windows={usage?.windows ?? []} t={t} />
                     </div>
                   )}
                 </div>
