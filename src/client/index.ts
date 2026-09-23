@@ -35,6 +35,10 @@ import type { SubscriptionUsageBadgeInjected } from './SubscriptionUsageBadge.js
 import { en, zh } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
 import { fastCommandDescription } from './fast-command.js'
+// Shared with the node half so the toolview key always matches the registered
+// name; image_generate resolves to the scoped alias the host's own image tool
+// leaves free.
+import { TOOL_ALIASES } from '../tools/registration.js'
 
 export type { SubscriptionsSectionInjected, SubscriptionsSectionProps } from './SubscriptionsSection.js'
 export type { ImageGenerateToolviewInjected, ImageGenerateToolviewProps } from './ImageGenerateToolview.js'
@@ -93,13 +97,14 @@ export function apply(ctx: ClientContext): void {
     inject: injected,
   }, SubscriptionsSection))
 
-  // The image_generate keyed toolview owns how image calls render inline; its
-  // gallery bytes ride the same channel through the injected loader. The
-  // framework synthesizes the toolview's own `t` seat from `locale: NS`.
+  // The subscription image tool's keyed toolview owns how image calls render
+  // inline; its gallery bytes ride the same channel through the injected
+  // loader. The framework synthesizes the toolview's own `t` seat from
+  // `locale: NS`.
   const toolviewInjected = (): ImageGenerateToolviewInjected => ({ load: createImageLoader(connection.rpc) })
   ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
     name: 'tool.call.toolview',
-    key: 'image_generate',
+    key: TOOL_ALIASES.image_generate,
     locale: NS,
     inject: toolviewInjected,
   }, ImageGenerateToolview))

@@ -9,6 +9,7 @@ import type { AccountAwareAdapter } from '../src/providers/accounts.js'
 import { CodexAdapter } from '../src/providers/codex.js'
 import { saveAccountSession } from '../src/auth/store.js'
 import * as plugin from '../src/index.js'
+import { TOOL_ALIASES } from '../src/tools/registration.js'
 import { createFakeConnection } from './fake-connection.js'
 
 test('provider settings RPC edits picker visibility without losing the editor catalog or existing sessions', async () => {
@@ -72,8 +73,11 @@ test('provider settings RPC edits picker visibility without losing the editor ca
     assert.deepEqual(create(Date.now() + 1000), [])
     assert.equal((await call('setProviderSettings', { provider: 'grok', settings: { tools: { image_generate: false, video_generate: false } } })).ok, true)
     assert.deepEqual(old, [])
-    assert.deepEqual(create(Date.now() + 1000).sort(), ['image_generate', 'video_generate'])
-    assert.deepEqual([...tools].sort(), ['image_generate', 'video_generate', 'x_search'])
+    // The image tool registers under the plugin namespace (the host owns
+    // `image_generate`), so a disabled image switch denies only this plugin's
+    // tool and never the host's.
+    assert.deepEqual(create(Date.now() + 1000).sort(), [TOOL_ALIASES.image_generate, 'video_generate'].sort())
+    assert.deepEqual([...tools].sort(), [TOOL_ALIASES.image_generate, 'video_generate', 'x_search'].sort())
     assert.equal((await call('setProviderSettings', { provider: 'codex', settings: {} })).ok, true)
     assert.equal((await adapters.get('codex')!.listModels('codex')).length, 2)
   } finally {

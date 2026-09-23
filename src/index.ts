@@ -1209,7 +1209,9 @@ export function apply(ctx: Context, config: Config): void {
   // `tools` is optional (headless/minimal compositions may not mount it), so
   // registration waits for the service instead of injecting it at load.
   // x_search and video_generate follow the grok provider; image_generate
-  // prefers the codex provider and falls back to grok.
+  // prefers the codex provider and falls back to grok, and registers under its
+  // scoped alias because the host composition owns the canonical name (see
+  // HOST_OWNED_TOOLS in tools/registration.ts).
   ctx.inject(['tools'], (toolsCtx) => {
     const registeredNames = new Map<string, string>()
     if (grokTokens !== undefined) {

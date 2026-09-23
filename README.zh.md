@@ -34,7 +34,7 @@
 
 ![订阅用量胶囊展开后显示所有服务商与账号](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/usage-badge.png)
 
-`image_generate` 工具生成的图片直接内联显示在对话里:
+`dsh_subscriptions_image_generate` 工具生成的图片直接内联显示在对话里:
 
 ![image_generate 内联显示生成的图片](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/image-generate-inline.png)
 
@@ -64,10 +64,10 @@
 
 - **`web_search`** 搜索提供商(Codex)—— 通过 DSH 原生的 `web_search` 工具和引用界面使用 Codex 托管的网页搜索,复用默认 Codex 账号和插件的代理配置。它只是注册到宿主 `web` 能力位上的候选之一,不会独占:未挂载其他搜索提供商时 DSH 自动选中它,与其他提供商共存时由宿主自己的 `web.searchProvider` 配置决定优先级。在 Codex 的 **Provider tools** 里关闭 **Web search** 只会撤回本提供商,宿主的 `web_search` 工具仍归其余已注册的提供商使用。
 - **`x_search`**(Grok)—— xAI 托管的 X 搜索,返回 `{ answer, citations }`。
-- **`image_generate`**(ChatGPT 或 Grok)—— 经 Codex 后端调用 `gpt-image-2`,或经 `api.x.ai/v1/images/generations` 调用 `grok-imagine-image-2.0`。`provider` 参数指定首选提供方(`gpt` 为默认值,可选 `grok`);首选方未登录时自动回退到另一方。图片保存到 `~/.dsh/plugins/subscriptions/images/` 并返回路径。Grok 路径上 `size`/`quality` 参数会映射为 Grok 的 `aspect_ratio`/`quality`。
+- **`dsh_subscriptions_image_generate`**(ChatGPT 或 Grok)—— 经 Codex 后端调用 `gpt-image-2`,或经 `api.x.ai/v1/images/generations` 调用 `grok-imagine-image-2.0`。该工具注册在插件命名空间下,因为 DSH 自带共享的 `image_generate` 工具、而宿主工具保留其 canonical 名称;参数面不变。`provider` 参数指定首选提供方(`gpt` 为默认值,可选 `grok`);首选方未登录时自动回退到另一方。图片保存到 `~/.dsh/plugins/subscriptions/images/` 并返回路径。Grok 路径上 `size`/`quality` 参数会映射为 Grok 的 `aspect_ratio`/`quality`。
 - **`video_generate`**(Grok)—— 经 `api.x.ai/v1/videos` 调用 `grok-imagine-video-1.5`(异步提交 + 轮询);MP4 保存到 `~/.dsh/plugins/subscriptions/videos/` 并返回路径,视频直接在对话里内联播放。支持时长(1–15 秒)、宽高比、分辨率,以及通过 `image_url` 做图生视频。
 
-`image_generate` 也支持编辑：模型在需要修改或参考已有图片时传入可选的 `referenceImages`（1–5 张完整 DSH 附件引用），未传时继续文生图。参考图可以来自用户上传、`read_image` 的结果或之前生成的图片；本地文件需先调用 `read_image`，不能把文件路径当作引用。图片旁的引用文本和工具结构化结果可直接复用。引用顺序对应提示词中的图片顺序，编辑结果保存为新文件并可继续编辑，也可切换 GPT/Grok 使用同一参考图。
+`dsh_subscriptions_image_generate` 也支持编辑：模型在需要修改或参考已有图片时传入可选的 `referenceImages`（1–5 张完整 DSH 附件引用），未传时继续文生图。参考图可以来自用户上传、`read_image` 的结果或之前生成的图片；本地文件需先调用 `read_image`，不能把文件路径当作引用。图片旁的引用文本和工具结构化结果可直接复用。引用顺序对应提示词中的图片顺序，编辑结果保存为新文件并可继续编辑，也可切换 GPT/Grok 使用同一参考图。
 
 Codex 编辑走 `/backend-api/codex/images/edits`，Grok 编辑走 `/v1/images/edits`；沿用现有 provider 偏好、未登录回退及会话工具开关。空数组、重复或无效引用、超过附件限制会报错，不会降级为文生图；编辑需要 DSH 附件服务。
 
@@ -262,7 +262,7 @@ Antigravity 为 Gemini 使用 `parametersJsonSchema`，为 Claude/GPT-OSS 使用
 
 DSH `v0.1.3-alpha.1` 新增宿主统一代理支持。建议在启动环境或 `$DSH_HOME/.env` 中配置 `HTTP_PROXY` / `HTTPS_PROXY`(或 `ALL_PROXY`)以及 `NO_PROXY`,重启 DSH,然后**关闭插件代理**。参见 [DSH 网络代理指南](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.1.3-alpha.1/docs/user/guide/network-proxy.zh.md)。环境变量中的代理凭据会被子命令继承,与插件私有配置文件的凭据边界不同;不会自动删除或迁移已有设置。
 
-插件代理作为可选覆盖设置保留,用于仍受支持的旧版 DSH 以及仅订阅请求使用独立代理的场景。所有订阅相关请求 —— token 交换、模型 API 流式调用、用量查询、模型目录发现,以及 `x_search` / `image_generate` / `video_generate` 工具 —— 都可以使用。在 **设置 → 订阅 → 代理 → 配置…** 中设置:勾选启用,填写代理地址(`http://127.0.0.1:7890`)、可选用户名/密码,以及可选的逗号分隔绕过列表(如 `127.0.0.1`、`localhost`、`*.example.com`)。关闭或绕过插件代理后使用 DSH 的全局 fetch 路由,**不一定直连**;要求直连时还应配置宿主的 `NO_PROXY`。密码保存在 `~/.dsh/plugins/subscriptions/proxy.json`(权限 0600),不会回传给浏览器;「测试」按钮会用当前配置探测一次端点,显示 HTTP 状态码与耗时。
+插件代理作为可选覆盖设置保留,用于仍受支持的旧版 DSH 以及仅订阅请求使用独立代理的场景。所有订阅相关请求 —— token 交换、模型 API 流式调用、用量查询、模型目录发现,以及 `x_search` / `dsh_subscriptions_image_generate` / `video_generate` 工具 —— 都可以使用。在 **设置 → 订阅 → 代理 → 配置…** 中设置:勾选启用,填写代理地址(`http://127.0.0.1:7890`)、可选用户名/密码,以及可选的逗号分隔绕过列表(如 `127.0.0.1`、`localhost`、`*.example.com`)。关闭或绕过插件代理后使用 DSH 的全局 fetch 路由,**不一定直连**;要求直连时还应配置宿主的 `NO_PROXY`。密码保存在 `~/.dsh/plugins/subscriptions/proxy.json`(权限 0600),不会回传给浏览器;「测试」按钮会用当前配置探测一次端点,显示 HTTP 状态码与耗时。
 
 保存后立即对后续请求生效,无需重启。OAuth 授权页在浏览器中打开,走浏览器/系统自身的代理设置,不受此配置影响;不支持 socks 代理。
 

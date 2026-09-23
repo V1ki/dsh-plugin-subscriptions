@@ -42,3 +42,20 @@ test('registerWithAlias skips and warns when canonical and alias collide', () =>
   assert.match(warnings[0]!, /x_search/)
   assert.deepEqual([...tools.names].sort(), ['dsh_subscriptions_x_search', 'x_search'])
 })
+
+test('registerWithAlias uses the plugin namespace for a host-owned tool even when the canonical name is free', () => {
+  const tools = registry([])
+  const result = registerWithAlias(tools, definition('image_generate'))
+  assert.equal(result?.name, TOOL_ALIASES.image_generate)
+  assert.deepEqual([...tools.names], [TOOL_ALIASES.image_generate])
+})
+
+test('registerWithAlias never claims the canonical name of a host-owned tool', () => {
+  const tools = registry([TOOL_ALIASES.image_generate])
+  const warnings: string[] = []
+  const result = registerWithAlias(tools, definition('image_generate'), message => warnings.push(message))
+  assert.equal(result, undefined)
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0]!, /image_generate/)
+  assert.deepEqual([...tools.names], [TOOL_ALIASES.image_generate])
+})
