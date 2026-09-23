@@ -92,6 +92,7 @@ import {
 import {
   ClaudeAdapter,
   claudeFlow,
+  CLAUDE_CONTEXT_WINDOW,
   CLAUDE_PREEMPT_MS,
   exchangeClaudeCode,
   fetchClaudeUsage,
@@ -739,7 +740,7 @@ export function apply(ctx: Context, config: Config): void {
           // restarts, so a resumed session's selected effort keeps resolving.
           catalogStore: catalogStore('codex'),
           defaultEffortOf: (model: string) => defaultEffortOf('codex', model),
-          contextWindowOf: model => preferences.contextWindow(model),
+          contextWindowOf: model => preferences.contextWindow('codex', model),
           pool: () => poolAdapter,
           speedFor: (sessionId: string | undefined, model: string): boolean | Promise<boolean> =>
             sessionId !== undefined
@@ -780,6 +781,7 @@ export function apply(ctx: Context, config: Config): void {
           resolveAttachments,
           catalogStore: catalogStore('claude'),
           defaultEffortOf: (model: string) => defaultEffortOf('claude', model),
+          contextWindowOf: (model: string) => preferences.contextWindow('claude', model),
           pool: () => poolAdapter,
         })
         adapters.set('claude', adapter)
@@ -1129,11 +1131,15 @@ export function apply(ctx: Context, config: Config): void {
         }
         // A model with unavailable capabilities can still be hidden or restored.
         const info = await withTimeout(() => adapter.resolveModel(provider, model.id), DISCOVERY_TIMEOUT_MS).catch(() => undefined)
+        const claudeDefault = provider === 'claude'
+          ? catalog.claude.find(entry => entry.id === model.id)?.contextWindow ?? CLAUDE_CONTEXT_WINDOW
+          : undefined
         return {
           id: model.id, name: model.name,
           contextWindow: info?.context?.contextWindow,
           efforts: tierIds.has(model.id) ? [] : info?.reasoning?.efforts.map(({ id, name }) => ({ id, name })) ?? [],
           configured: defaultEffortOf(provider, model.id),
+          ...(claudeDefault !== undefined ? { defaultContextWindow: claudeDefault } : {}),
           ...(contexts.length ? {
             defaultContextWindow: Math.min(...contexts.map(entry => entry.default)),
             maxContextWindow: Math.min(...contexts.map(entry => entry.max)),

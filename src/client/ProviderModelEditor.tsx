@@ -85,7 +85,7 @@ export function ProviderModelEditor({ provider, rpc, t, embedded = false }: Prop
       }
       windows[model] = value
     }
-    let settings = { ...draft, ...(provider === 'codex' ? { contextWindows: windows } : {}) }
+    let settings = { ...draft, ...(provider === 'codex' || provider === 'claude' ? { contextWindows: windows } : {}) }
     const request = ++generation.current
     setBusy(true)
     setError('')
@@ -170,19 +170,20 @@ export function ProviderModelEditor({ provider, rpc, t, embedded = false }: Prop
                 {model.efforts?.map(effort => <option key={effort.id} value={effort.id}>{effort.name}</option>)}
               </select>
             </label>}
-            {provider === 'codex' && model.maxContextWindow !== undefined && <div style={actions}>
+            {(provider === 'codex' && model.maxContextWindow !== undefined || provider === 'claude' && model.defaultContextWindow !== undefined) && <div style={actions}>
               <label style={actions}>{t('modelsContext')}
                 <input style={{ ...control, width: 140 }} inputMode="numeric" value={contexts[model.id] ?? ''}
                   aria-label={`${model.name} ${t('modelsContext')}`} placeholder={String(model.defaultContextWindow)}
                   onChange={event => { setContexts({ ...contexts, [model.id]: event.target.value }); setDirty(true); setSaved(false) }} />
               </label>
-              <small>{t('modelsContextBounds', { default: model.defaultContextWindow, max: model.maxContextWindow })}</small>
+              <small>{provider === 'codex' ? t('modelsContextBounds', { default: model.defaultContextWindow, max: model.maxContextWindow }) : t('modelsClaudeContextDefault', { default: model.defaultContextWindow })}</small>
             </div>}
             </div>
           </div>)}
           {models.length === 0 && <span>{t('modelDefaultsFilterEmpty', { query })}</span>}
         </div>
         {provider === 'codex' && <small>{t('modelsContextHint')}</small>}
+        {provider === 'claude' && <small>{t('modelsClaudeContextHint')}</small>}
         {catalog.tools.length > 0 && <div style={{ display: 'grid', gap: 8 }}>
           <strong>{t('modelsTools')}</strong>
           <small>{t('modelsToolsHint')}</small>

@@ -47,6 +47,21 @@ test('Codex context overrides clamp per account, restore defaults, and distrust 
   assert.equal((await adapter.resolveOwnModel('codex', 'm', 'pro')).context?.contextWindow, 128000)
 })
 
+test('Claude context override adjusts local resolution, restores known model defaults, and allows larger budgets', async () => {
+  let requested: number | undefined = 1_200_000
+  const adapter = new ClaudeAdapter({
+    models: [{ id: 'claude-opus-5', name: 'Claude Opus 5', contextWindow: 1_000_000 }],
+    discovery: false, tokens: memoryTokens<ClaudeSession>(undefined), streamIdleTimeoutMs: 1000,
+    contextWindowOf: () => requested,
+  })
+  assert.equal((await adapter.resolveOwnModel('claude', 'claude-opus-5')).context?.contextWindow, 1_200_000)
+  requested = undefined
+  assert.equal((await adapter.resolveOwnModel('claude', 'claude-opus-5')).context?.contextWindow, 1_000_000)
+  assert.equal((await adapter.resolveOwnModel('claude', 'unknown')).context?.contextWindow, 200_000)
+  requested = 128_000
+  assert.equal((await adapter.resolveOwnModel('claude', 'claude-opus-5')).context?.contextWindow, 128_000)
+})
+
 const codexSession: CodexSession = {
   accessToken: 'at',
   refreshToken: 'rt',

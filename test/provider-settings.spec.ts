@@ -14,15 +14,21 @@ test('provider selections survive refresh-independent reloads and concurrent pro
     await Promise.all([
       store.set('codex', { visibleModels: ['gpt-6-astra'], contextWindows: { 'gpt-6-astra': 512000 } }),
       store.set('grok', { visibleModels: [] }),
+      store.set('claude', { contextWindows: { 'claude-opus-5': 1_200_000 } }),
     ])
     const reload = new ProviderSettingsStore(path)
     assert.equal(reload.visible('codex', 'gpt-6-astra'), true)
     assert.equal(reload.visible('codex', 'future-model'), false)
     assert.equal(reload.visible('grok', 'grok-4'), false)
-    assert.equal(reload.contextWindow('gpt-6-astra'), 512000)
+    assert.equal(reload.contextWindow('codex', 'gpt-6-astra'), 512000)
+    assert.equal(reload.contextWindow('claude', 'claude-opus-5'), 1_200_000)
+    assert.equal(reload.contextWindow('codex', 'claude-opus-5'), undefined)
     await reload.set('codex', {})
     assert.equal(reload.visible('codex', 'future-model'), true)
-    assert.equal(reload.contextWindow('gpt-6-astra'), undefined)
+    assert.equal(reload.contextWindow('codex', 'gpt-6-astra'), undefined)
+    assert.equal(reload.contextWindow('claude', 'claude-opus-5'), 1_200_000)
+    await reload.set('claude', { contextWindows: {} })
+    assert.equal(reload.contextWindow('claude', 'claude-opus-5'), undefined)
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
 
@@ -52,6 +58,7 @@ test('tool policies retain old-session settings across changes and restarts', as
 test('provider settings reject invalid contexts and unsupported tools; ids are safe object keys', () => {
   for (const value of [0, -1, 1.2, Infinity, NaN, '500000']) {
     assert.throws(() => validatePreferences('codex', { contextWindows: { model: value } }))
+    assert.throws(() => validatePreferences('claude', { contextWindows: { model: value } }))
   }
   assert.throws(() => validatePreferences('claude', { tools: { image_generate: false } }))
   assert.throws(() => validatePreferences('codex', { tools: { video_generate: true } }))
