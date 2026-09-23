@@ -1,6 +1,8 @@
 /**
- * Keyed toolview for the `image_generate` tool: renders generated images
- * inline in the conversation. The row shows the call's prompt while running
+ * Keyed toolview for this plugin's image tool, registered as
+ * `dsh_subscriptions_image_generate` because the host owns `image_generate`.
+ * Renders generated images inline in the conversation. The row shows the
+ * call's prompt while running
  * and after settling; a settled result with image blocks renders them through
  * this plugin's own ImageGallery (harness rc.8 stopped exporting the platform
  * one as a package value), whose bytes load through the node half's
@@ -20,6 +22,7 @@ import { IconSparkle16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { ImageGallery } from './ImageGallery.js'
 import type { ImageAttachmentRef, ImageLoader, MessageImageLabels } from './ImageGallery.js'
 import { callSubscriptionsAuth } from './subscriptions-rpc.js'
+import { TOOL_ALIASES } from '../tools/registration.js'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
 
@@ -168,7 +171,7 @@ export function ImageGenerateToolview(props: ImageGenerateToolviewProps) {
     const args = JSON.parse(argsRaw)
     if (Array.isArray(args?.referenceImages)) references = args.referenceImages.length
   } catch { /* Arguments may still be streaming. */ }
-  const title = `image_generate${references > 0 ? ` (${references} ref)` : ''}: ${derivePrompt(argsRaw)}`
+  const title = `${TOOL_ALIASES.image_generate}${references > 0 ? ` (${references} ref)` : ''}: ${derivePrompt(argsRaw)}`
   const images = resultImages(block)
   const text = settled ? resultText(block) : ''
   const labels: MessageImageLabels = {
