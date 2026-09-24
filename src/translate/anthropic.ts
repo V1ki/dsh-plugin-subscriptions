@@ -146,8 +146,23 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[]): A
     // owns those. A later one rides here so the cached prefix ahead of it
     // stays byte-identical.
     if (message.role === 'system' && index < start) continue
-    const role = message.role === 'system' ? 'user' : message.role
+    const role = message.role === 'assistant' ? 'assistant' : 'user'
     const blocks: Record<string, unknown>[] = []
+    if (message.role === 'tool') {
+      const id = message.toolCallId ?? message.tool_call_id
+        ?? (message.source?.kind === 'tool' ? String(message.source.callId) : undefined)
+      if (id === undefined) throw new LlmError('tool result has no call id', 'INVALID_REQUEST')
+      blocks.push({
+        type: 'tool_result',
+        tool_use_id: id,
+        content: toolResultContent({ type: 'tool-result', toolCallId: ToolCallId(id), content: message.content }),
+        ...message.isError === true ? { is_error: true } : {},
+      })
+      const last = out[out.length - 1]
+      if (last?.role === 'user') last.content.push(...blocks)
+      else out.push({ role: 'user', content: blocks })
+      continue
+    }
     for (const block of message.content) {
       switch (block.type) {
         case 'text':
