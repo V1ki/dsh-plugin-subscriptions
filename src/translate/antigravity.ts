@@ -130,6 +130,20 @@ export function toAntigravityContents(messages: readonly TranslatableMessage[], 
   const callNames = new Map<string, string>()
   for (const message of withToolResultImages(messages)) {
     if (message.role === 'system') continue
+    if (message.role === 'tool') {
+      const id = message.toolCallId ?? message.tool_call_id
+        ?? (message.source?.kind === 'tool' ? String(message.source.callId) : undefined)
+      if (id === undefined) throw new LlmError('tool result has no call id', 'INVALID_REQUEST')
+      const part: AntigravityPart = { functionResponse: {
+        id,
+        name: callNames.get(id) ?? '',
+        response: toolResultValue({ type: 'tool-result', toolCallId: ToolCallId(id), content: message.content }),
+      } }
+      const previous = out.at(-1)
+      if (previous?.role === 'user') previous.parts.push(part)
+      else out.push({ role: 'user', parts: [part] })
+      continue
+    }
     const role = message.role === 'assistant' ? 'model' as const : 'user' as const
     const metadata = replayBlocks(message, model)
     const parts: AntigravityPart[] = []
