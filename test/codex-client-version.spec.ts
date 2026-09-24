@@ -8,7 +8,7 @@ test('Codex version lookup deduplicates, caches and refreshes public metadata wi
   let calls = 0
   const cache = new CodexClientVersionCache(async (url, init) => {
     assert.equal(url, CODEX_VERSION_URL)
-    assert.deepEqual(init?.headers, { accept: 'application/json' })
+    assert.deepEqual(init?.headers, { accept: 'application/json', 'accept-encoding': 'identity' })
     assert.equal(init?.redirect, 'error')
     calls++
     return Response.json({ version: '0.155.0' })

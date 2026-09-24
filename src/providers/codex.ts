@@ -242,7 +242,7 @@ function codexSession(tokens: CodexTokenResponse, fallback?: CodexSession): Code
 export async function exchangeCodexCode(code: string, verifier: string, redirectUri: string): Promise<CodexSession> {
   const response = await proxiedFetch(CODEX_TOKEN_URL, {
     method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    headers: { 'content-type': 'application/x-www-form-urlencoded', 'accept-encoding': 'identity' },
     body: new URLSearchParams({
       grant_type: 'authorization_code',
       code,
@@ -263,7 +263,7 @@ export async function exchangeCodexCode(code: string, verifier: string, redirect
 export async function refreshCodex(session: CodexSession): Promise<CodexSession> {
   const response = await proxiedFetch(CODEX_TOKEN_URL, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', 'accept-encoding': 'identity' },
     body: JSON.stringify({
       client_id: CODEX_CLIENT_ID,
       grant_type: 'refresh_token',
@@ -363,6 +363,7 @@ export async function fetchCodexUsage(
       'chatgpt-account-id': session.accountId,
       'originator': 'codex_cli_rs',
       'accept': 'application/json',
+      'accept-encoding': 'identity',
       ...attributionHeaders(),
     },
     ...signal === undefined ? {} : { signal },
@@ -451,6 +452,7 @@ export async function fetchCodexModels(
       'chatgpt-account-id': session.accountId,
       'originator': 'codex_cli_rs',
       'accept': 'application/json',
+      'accept-encoding': 'identity',
       ...attributionHeaders(),
     },
     ...signal === undefined ? {} : { signal },

@@ -52,6 +52,7 @@ const control: CSSProperties = {
   font: 'inherit', color: 'inherit', background: 'transparent', border,
   borderRadius: 8, padding: '6px 10px', minWidth: 0,
 }
+const menuColors: CSSProperties = { background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)' }
 const actions: CSSProperties = { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }
 
 /**
@@ -159,14 +160,14 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
             }} /> {model.name}{!known.has(model.id) && ` (${t('modelsUnavailable')})`}</label>
             <div style={actions}>
             {(model.efforts?.length ?? 0) > 0 && <label style={actions}>{t('modelDefaultsTitle')}
-              <select style={control} aria-label={`${model.name} ${t('modelDefaultsTitle')}`}
+              <select style={{ ...control, ...menuColors }} aria-label={`${model.name} ${t('modelDefaultsTitle')}`}
                 value={efforts[model.id] ?? ''} onChange={event => {
                   setEfforts({ ...efforts, [model.id]: event.target.value }); setDirty(true)
                 }}>
-                <option value="">{t('modelDefaultsFollowProvider')}</option>
+                <option style={menuColors} value="">{t('modelDefaultsFollowProvider')}</option>
                 {model.configured && !model.efforts?.some(effort => effort.id === model.configured) &&
-                  <option value={model.configured} disabled>{model.configured} ({t('modelsUnavailable')})</option>}
-                {model.efforts?.map(effort => <option key={effort.id} value={effort.id}>{effort.name}</option>)}
+                  <option style={menuColors} value={model.configured} disabled>{model.configured} ({t('modelsUnavailable')})</option>}
+                {model.efforts?.map(effort => <option key={effort.id} style={menuColors} value={effort.id}>{effort.name}</option>)}
               </select>
             </label>}
             {provider === 'codex' && model.maxContextWindow !== undefined && <div style={actions}>
