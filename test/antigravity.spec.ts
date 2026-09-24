@@ -220,6 +220,17 @@ test('request conversion carries system, images, tools, tool results, and signed
   assert.equal(image?.inlineData?.data, 'aGVsbG8=')
 })
 
+test('first-class harness tool messages become correlated function responses', () => {
+  const messages: TranslatableMessage[] = [
+    message('assistant', [{ type: 'tool-call', id: ToolCallId('current-call'), name: 'bash', arguments: '{}' }]),
+    { role: 'tool', toolCallId: 'current-call', content: [{ type: 'text', text: 'done' }] },
+  ]
+  const parts = toAntigravityRequest(options([]), messages, 'project-123').request.contents.flatMap(entry => entry.parts)
+  assert.deepEqual(parts[1].functionResponse, {
+    id: 'current-call', name: 'bash', response: { output: 'done' },
+  })
+})
+
 test('stream translator emits reasoning, text, tool call, usage, finish, and replay signature', () => {
   const translator = new AntigravityStreamTranslator()
   const chunks = translator.push({
