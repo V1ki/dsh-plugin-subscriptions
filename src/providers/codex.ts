@@ -11,8 +11,10 @@ import type {
   LlmModelInfo,
   LlmProviderInfo,
   LlmResolvedModelInfo,
+  Message,
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '../compat.js'
 import { decodeJwtPayload } from '../auth/jwt.js'
 import type { FlowSpec } from '../auth/oauth-flow.js'
 import type { CodexSession } from '../auth/store.js'
@@ -665,6 +667,28 @@ export function codexRequestBody(
   }
 }
 
+/** Adapt the current harness's first-class tool messages at the Codex boundary. */
+export function projectCodexMessages(messages: readonly Message[]): Message[] {
+  return messages.map((message) => {
+    if (String(message.role) !== 'tool') return message
+    const current = message as Message & { toolCallId?: string; isError?: boolean }
+    const callId = current.toolCallId
+      ?? (current.source.kind === 'tool' ? String(current.source.callId) : undefined)
+    if (callId === undefined) throw new LlmError('Codex tool result has no call id', 'INVALID_REQUEST')
+    return {
+      id: message.id,
+      role: 'user',
+      source: { kind: 'tool', callId: ToolCallId(callId) },
+      content: [{
+        type: 'tool-result',
+        toolCallId: ToolCallId(callId),
+        content: [...message.content],
+        ...current.isError === undefined ? {} : { isError: current.isError },
+      }],
+    }
+  })
+}
+
 /** Codex wire adapter: one instance serves the `codex` provider route. */
 export class CodexAdapter extends LlmAdapter {
   private readonly catalog: ModelCatalogCache
@@ -934,7 +958,7 @@ export class CodexAdapter extends LlmAdapter {
   }
 
   private async request(options: GenerateOptions, session: CodexSession, signal: AbortSignal): Promise<Response> {
-    const messages = await resolveImages(options.messages, this.options.resolveAttachments?.(), signal)
+    const messages = await resolveImages(projectCodexMessages(options.messages), this.options.resolveAttachments?.(), signal)
     const fast = this.options.speedFor !== undefined
       && await this.options.speedFor(options.sessionId, options.model)
     const body = codexRequestBody(options, toResponsesInput(messages, options.system), fast)
