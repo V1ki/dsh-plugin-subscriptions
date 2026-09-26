@@ -103,6 +103,20 @@ export function toResponsesInput(
       input.push({ type: 'message', role, content })
       content = []
     }
+    // A tool result delivered as its own `role: "tool"` message carries the call id at message
+    // level. Forwarding that role would put an item the Responses API does not accept on the wire
+    // (`Invalid value: 'tool'`, param `input[n]`), so it becomes the same function_call_output
+    // item the `tool-result` block form produces.
+    if (role === 'tool') {
+      const callId = message.toolCallId ?? (message.source?.kind === 'tool' ? String(message.source.callId) : '')
+      flushMessage()
+      input.push({
+        type: 'function_call_output',
+        call_id: callId,
+        output: toolResultText({ type: 'tool-result', toolCallId: ToolCallId(callId), content: message.content }),
+      })
+      continue
+    }
     for (const block of message.content) {
       switch (block.type) {
         case 'text':

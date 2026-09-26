@@ -78,6 +78,60 @@ test('toResponsesInput: text, tool call, and tool result round trip', () => {
   ])
 })
 
+/**
+ * The harness may deliver a tool result as its own message rather than as a block inside a user
+ * message: role `tool`, the call id at message level, and the result's content parts.
+ */
+function deliveredToolResult(callId: string, text: string, isError?: boolean): TranslatableMessage {
+  return {
+    role: 'tool',
+    toolCallId: callId,
+    content: [{ type: 'text', text }],
+    ...isError === undefined ? {} : { isError },
+  }
+}
+
+test('toResponsesInput: a delivered tool-result message becomes a function_call_output', () => {
+  const { input } = toResponsesInput([
+    message('user', [{ type: 'text', text: 'list files' }]),
+    message('assistant', [toolCall('call-1', 'bash', '{"cmd":"ls"}')]),
+    deliveredToolResult('call-1', 'file-a\nfile-b'),
+  ])
+
+  // The provider rejects `role: "tool"` outright (`Invalid value: 'tool'`), so no message item
+  // may carry that role; the result rides as the tool-output item the block form also produces.
+  assert.deepEqual(input, [
+    { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'list files' }] },
+    { type: 'function_call', call_id: 'call-1', name: 'bash', arguments: '{"cmd":"ls"}' },
+    { type: 'function_call_output', call_id: 'call-1', output: 'file-a\nfile-b' },
+  ])
+})
+
+test('toAnthropicMessages: a delivered tool-result message becomes a tool_result block', () => {
+  const messages = toAnthropicMessages([
+    message('user', [{ type: 'text', text: 'list files' }]),
+    message('assistant', [toolCall('call-1', 'bash', '{"cmd":"ls"}')]),
+    deliveredToolResult('call-1', 'file-a\nfile-b'),
+  ])
+
+  // The Messages API accepts only user, assistant and system roles (`Unexpected role "tool"`).
+  assert.deepEqual(messages.map(entry => entry.role), ['user', 'assistant', 'user'])
+  assert.deepEqual(messages.at(-1), {
+    role: 'user',
+    content: [{ type: 'tool_result', tool_use_id: 'call-1', content: 'file-a\nfile-b' }],
+  })
+})
+
+test('a delivered tool-result message carries its own error flag onto both wires', () => {
+  assert.deepEqual(toResponsesInput([deliveredToolResult('call-1', 'boom', true)]).input, [
+    { type: 'function_call_output', call_id: 'call-1', output: 'boom' },
+  ])
+  assert.deepEqual(toAnthropicMessages([deliveredToolResult('call-1', 'boom', true)]).at(-1), {
+    role: 'user',
+    content: [{ type: 'tool_result', tool_use_id: 'call-1', content: 'boom', is_error: true }],
+  })
+})
+
 test('toResponsesInput: system-role messages become instructions unless options.system wins', () => {
   const systemMessage = message('system', [{ type: 'text', text: 'from history' }])
   const fromMessages = toResponsesInput([systemMessage])
