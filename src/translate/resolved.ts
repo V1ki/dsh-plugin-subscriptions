@@ -55,12 +55,23 @@ export function withToolResultImages(messages: readonly TranslatableMessage[]): 
   return out
 }
 
-/** Translator input message: role plus resolved blocks. */
+/**
+ * Translator input message: role plus resolved blocks.
+ *
+ * A delivered request may carry a tool result as its own message — role `tool`, the call id at
+ * message level, and text blocks — rather than as the `tool-result` block a `user` message holds.
+ * Both shapes reach the translators, so both are admitted here and each translator maps the
+ * message form onto the tool-output item its own wire expects.
+ */
 export interface TranslatableMessage {
-  role: 'system' | 'user' | 'assistant'
+  role: 'system' | 'user' | 'assistant' | 'tool'
   content: readonly TranslatableBlock[]
   /** Preserved for adapters whose provider-private replay metadata is required. */
   source?: Message['source']
+  /** Call id of a delivered tool result; the message form carries it here, not in a block. */
+  toolCallId?: string
+  /** Whether a delivered tool result reports a failed call. */
+  isError?: boolean
 }
 
 /**

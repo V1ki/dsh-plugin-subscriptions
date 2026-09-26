@@ -146,8 +146,27 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[]): A
     // owns those. A later one rides here so the cached prefix ahead of it
     // stays byte-identical.
     if (message.role === 'system' && index < start) continue
-    const role = message.role === 'system' ? 'user' : message.role
     const blocks: Record<string, unknown>[] = []
+    // A tool result delivered as its own `role: "tool"` message carries the call id at message
+    // level. The Messages API accepts only user, assistant and system roles (`Unexpected role
+    // "tool"` otherwise), so it becomes the same tool_result block the `tool-result` form
+    // produces, merged into a preceding user message as every other result is.
+    if (message.role === 'tool') {
+      const callId = message.toolCallId ?? (message.source?.kind === 'tool' ? String(message.source.callId) : '')
+      const toolBlock = {
+        type: 'tool_result',
+        tool_use_id: callId,
+        content: toolResultContent({ type: 'tool-result', toolCallId: ToolCallId(callId), content: message.content }),
+        ...message.isError === true ? { is_error: true } : {},
+      }
+      const last = out[out.length - 1]
+      if (last !== undefined && last.role === 'user') last.content.push(toolBlock)
+      else out.push({ role: 'user', content: [toolBlock] })
+      continue
+    }
+    // Resolved after the delivered form is handled, so the remaining roles are the conversation
+    // ones the wire declares.
+    const role = message.role === 'system' ? 'user' : message.role
     for (const block of message.content) {
       switch (block.type) {
         case 'text':
