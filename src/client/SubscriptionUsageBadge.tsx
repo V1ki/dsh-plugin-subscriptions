@@ -22,16 +22,27 @@
  * 'settings.subscriptions' namespace.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { CSSProperties } from 'react'
+import type { ComponentType, CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
-import { IconDataOutline16, useAnchoredPosition, useDismissOnOutsidePointer } from '@deepseek-ai/dsh-client-ui-primitives'
+import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
+import { useAnchoredPosition, useDismissOnOutsidePointer } from '@deepseek-ai/dsh-client-ui-primitives'
 import { callSubscriptionsAuth, usageBarColor } from './SubscriptionsSection.js'
 import type { AccountStatus, ProviderStatus, ProviderUsage, SubscriptionProvider, UsageWindow } from './SubscriptionsSection.js'
 import type { ModelDirectoriesLike } from './SpeedSelect.js'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
+import { useUsageBadgeMode } from './usage-badge-preferences.js'
+
+/** DSH renamed the data icon in 0.1.7; retain older supported hosts too. */
+export function usageBadgeIcon(icons: {
+  IconDataOutlineRegular?: ComponentType
+  IconDataOutline16?: ComponentType
+}): ComponentType {
+  return icons.IconDataOutlineRegular ?? icons.IconDataOutline16 ?? (() => null)
+}
+const UsageBadgeIcon = usageBadgeIcon(primitives)
 
 /** How often the badge re-reads usage; the server also shares its own cache/negative-cache across UI surfaces. */
 const USAGE_POLL_INTERVAL_MS = 15 * 60_000
@@ -96,8 +107,8 @@ const PROVIDER_NAMES: Record<SubscriptionProvider, string> = {
  * The `currentModel` half of the inject face: the session's effective
  * model selection through ui-model-selection's `modelDirectories` service,
  * resolved lazily per call (the service may register after this plugin, and
- * a shell without it simply reports "unknown", which the badge treats as
- * "show every provider").
+ * a shell without it reports "unknown"; the badge keeps the most recent
+ * subscription selected in this view, or stays hidden).
  */
 export function createCurrentModelReader(
   models: () => ModelDirectoriesLike | undefined,
@@ -149,9 +160,13 @@ export function prioritizeWindows(windows: readonly UsageWindow[], model?: strin
 
 /** Small previews keep a live model catalog from taking over the dialog. */
 export const WINDOW_PREVIEW_LIMIT = 4
-export function previewWindows(windows: readonly UsageWindow[], model?: string) {
+export function previewWindows(windows: readonly UsageWindow[], model?: string, provider?: SubscriptionProvider) {
   const ordered = prioritizeWindows(windows, model)
-  return { shown: ordered.slice(0, WINDOW_PREVIEW_LIMIT), hidden: ordered.slice(WINDOW_PREVIEW_LIMIT) }
+  // Antigravity has many model-specific quotas: preview only the current model.
+  const limit = provider === 'antigravity'
+    ? Math.min(2, model === undefined ? 0 : windows.filter(w => w.scope === model).length)
+    : WINDOW_PREVIEW_LIMIT
+  return { shown: ordered.slice(0, limit), hidden: ordered.slice(limit) }
 }
 
 /** Bounded readout; Antigravity quotas belong to individual models, not the account. */
@@ -172,17 +187,23 @@ export function compactSegment(d: ProviderUsageDisplay, model?: string, t: Trans
   return `${d.name} ${parts.join(' · ')}`
 }
 
-/**
- * Pick what the collapsed pill shows: the current model's provider when its
- * usage is known, otherwise every provider (unknown model, a provider this
- * plugin does not serve, or a current provider with no usage to report).
- */
+type ModelSelection = { provider: string; model: string }
+
+/** Remember only the most recent subscription in this view, including its model scope. */
+export function retainSubscriptionSelection(
+  previous: ModelSelection | undefined,
+  current: ModelSelection | undefined,
+): ModelSelection | undefined {
+  return current !== undefined && Object.hasOwn(PROVIDER_NAMES, current.provider) ? current : previous
+}
+
+/** At most one provider; no known selection or no usage means no badge. */
 export function collapsedDisplays(
   displays: readonly ProviderUsageDisplay[],
   current: string | undefined,
 ): readonly ProviderUsageDisplay[] {
   const match = displays.find(d => d.provider === current)
-  return match === undefined ? displays : [match]
+  return match === undefined ? [] : [match]
 }
 
 /** Order for the expanded dialog: the current provider first, the rest in poll order. */
@@ -231,8 +252,11 @@ function usageWindowLabel(t: Translate, window: UsageWindow): string {
 export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsageBadgeProps) {
   const translate: Translate = t ?? fallbackTranslate
   const [displays, setDisplays] = useState<ProviderUsageDisplay[]>([])
-  const [selection, setSelection] = useState<{ provider: string; model: string } | undefined>(undefined)
+  const [selection, setSelection] = useState<ModelSelection | undefined>(undefined)
+  const [lastSubscription, setLastSubscription] = useState<ModelSelection | undefined>(undefined)
+  const displayMode = useUsageBadgeMode()
   const current = selection?.provider
+  const badgeSelection = retainSubscriptionSelection(lastSubscription, selection)
   const [open, setOpen] = useState(false)
   const [hover, setHover] = useState(false)
   const inflightRef = useRef(false)
@@ -349,7 +373,11 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
       if (read === undefined || inflight) return
       inflight = true
       void read().then(
-        (model) => { if (!cancelled) setSelection(model) },
+        (model) => {
+          if (cancelled) return
+          setLastSubscription(previous => retainSubscriptionSelection(previous, model))
+          setSelection(model)
+        },
         () => { /* keep the last known provider; the next tick retries */ },
       ).finally(() => { inflight = false })
     }
@@ -392,12 +420,15 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
     return () => { observer.disconnect() }
   }, [])
 
+  useEffect(() => {
+    if (displayMode === 'hidden') setOpen(false)
+  }, [displayMode])
+
   const seat = <span ref={seatRef} style={styles.seat} aria-hidden />
+  const collapsed = collapsedDisplays(displays, badgeSelection?.provider)
+  if (displayMode === 'hidden' || collapsed.length === 0) return seat
 
-  if (displays.length === 0) return seat
-
-  const collapsed = collapsedDisplays(displays, current)
-  const label = collapsed.map(d => compactSegment(d, d.provider === current ? selection?.model : undefined, translate)).join(' | ')
+  const label = compactSegment(collapsed[0]!, badgeSelection?.model, translate)
   const expanded = expandedDisplays(displays, current)
   const title = translate('usageBadgeTitle')
 
@@ -420,7 +451,7 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
         onMouseLeave={() => { setHover(false) }}
         onClick={toggle}
       >
-        <IconDataOutline16 />
+        <UsageBadgeIcon />
         <span style={styles.label}>{label}</span>
       </button>
       {open && createPortal(
@@ -432,7 +463,7 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
         >
           <div style={styles.title}>
             <span style={styles.titleLabel}>
-              <IconDataOutline16 />
+              <UsageBadgeIcon />
               {title}
             </span>
           </div>
@@ -457,6 +488,7 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
                     key={`${d.provider}:${selection?.model ?? ''}`}
                     windows={account.windows}
                     model={d.provider === current ? selection?.model : undefined}
+                    provider={d.provider}
                     translate={translate}
                   />
                 </div>
@@ -508,10 +540,10 @@ function AccountMeta({ account, translate }: { account: AccountUsageDisplay; tra
 }
 
 /** Preview each account independently; all remaining quotas stay accessible. */
-export function AccountWindows({ windows, model, translate }: {
-  windows: readonly UsageWindow[]; model: string | undefined; translate: Translate
+export function AccountWindows({ windows, model, provider, translate }: {
+  windows: readonly UsageWindow[]; model: string | undefined; provider?: SubscriptionProvider; translate: Translate
 }) {
-  const { shown, hidden } = previewWindows(windows, model)
+  const { shown, hidden } = previewWindows(windows, model, provider)
   const rows = (items: readonly UsageWindow[]) => (
     <dl style={styles.details}>
       {items.map((w, i) => (
