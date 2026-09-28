@@ -43,6 +43,12 @@ export function withToolResultImages(messages: readonly TranslatableMessage[]): 
   for (const message of messages) {
     if (message.role === 'assistant') flush()
     out.push(message)
+    if (message.role === 'tool') {
+      const parts = message.content.filter((part): part is ResolvedImagePart => part.type === 'image' && 'dataBase64' in part)
+      if (parts.length > 0) {
+        images.push({ type: 'text', text: `Images from tool result ${String(message.toolCallId)}:` }, ...parts)
+      }
+    }
     for (const block of message.content) {
       if (block.type !== 'tool-result') continue
       const parts = block.content.filter((part): part is ResolvedImagePart => part.type === 'image' && 'dataBase64' in part)
@@ -57,8 +63,13 @@ export function withToolResultImages(messages: readonly TranslatableMessage[]): 
 
 /** Translator input message: role plus resolved blocks. */
 export interface TranslatableMessage {
-  role: 'system' | 'user' | 'assistant'
+  role: 'system' | 'developer' | 'user' | 'assistant' | 'tool'
   content: readonly TranslatableBlock[]
+  /** First-class tool result correlation in current harness messages. */
+  toolCallId?: string
+  /** Chat Completions correlation in imported histories. */
+  tool_call_id?: string
+  isError?: boolean
   /** Preserved for adapters whose provider-private replay metadata is required. */
   source?: Message['source']
 }
@@ -109,8 +120,7 @@ export async function resolveImages(
     }]
   }
   return Promise.all(messages.map(async (message): Promise<TranslatableMessage> => ({
-    role: message.role,
-    source: message.source,
+    ...message,
     content: (await Promise.all(message.content.map(resolveBlock))).flat(),
   })))
 }

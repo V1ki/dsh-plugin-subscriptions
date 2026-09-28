@@ -48,6 +48,18 @@ export function toChatMessages(
       }
       continue
     }
+    if (message.role === 'tool') {
+      const callId = message.toolCallId ?? message.tool_call_id
+        ?? (message.source?.kind === 'tool' ? String(message.source.callId) : undefined)
+      if (callId === undefined) throw new LlmError('tool result has no call id', 'INVALID_REQUEST')
+      out.push({ role: 'tool', tool_call_id: callId, content: message.content.map(block => block.type === 'text' ? block.text : '').join('') })
+      continue
+    }
+    if (message.role === 'developer') {
+      const content = message.content.filter(block => block.type === 'text').map(block => block.text).join('')
+      if (content.length > 0) out.push({ role: 'developer', content })
+      continue
+    }
     if (message.role === 'user') {
       // Tool results ride inside user-role messages; they become their own
       // `tool` messages while ordinary blocks accumulate into one user entry.

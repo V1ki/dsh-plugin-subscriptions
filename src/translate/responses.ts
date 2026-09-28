@@ -96,6 +96,19 @@ export function toResponsesInput(
       }
       continue
     }
+    // Current harness tool results are first-class role=tool messages.
+    // Responses represents their text as function_call_output items.
+    if (message.role === 'tool') {
+      const callId = message.toolCallId ?? message.tool_call_id
+        ?? (message.source?.kind === 'tool' ? String(message.source.callId) : undefined)
+      if (callId === undefined) throw new LlmError('tool result has no call id', 'INVALID_REQUEST')
+      input.push({
+        type: 'function_call_output',
+        call_id: callId,
+        output: message.content.map(block => block.type === 'text' ? block.text : '').join(''),
+      })
+      continue
+    }
     const role = message.role
     let content: Record<string, unknown>[] = []
     const flushMessage = (): void => {
