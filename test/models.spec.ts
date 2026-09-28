@@ -10,7 +10,13 @@ import assert from 'node:assert/strict'
 import './keep-alive.js'
 import { MessageId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { Message } from '@deepseek-ai/dsh-llm'
-import { CodexAdapter, codexRequestBody, fetchCodexModels, projectCodexMessages } from '../src/providers/codex.js'
+import {
+  CodexAdapter,
+  codexRequestBody,
+  fetchCodexModels,
+  isCodexPermanentRefreshError,
+  projectCodexMessages,
+} from '../src/providers/codex.js'
 import { toResponsesInput } from '../src/translate/responses.js'
 import { GrokAdapter } from '../src/providers/grok.js'
 import { ClaudeAdapter, claudeRequestBody, fetchClaudeModels } from '../src/providers/claude.js'
@@ -19,7 +25,7 @@ import { ModelCatalogCache } from '../src/providers/common.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
 import type { CatalogPersistence, CatalogSnapshot, FetchFn } from '../src/providers/common.js'
 import type { ClaudeSession, CodexSession, CopilotSession, GrokSession } from '../src/auth/store.js'
-import { withTimeout } from '../src/providers/common.js'
+import { oauthEndpointError, withTimeout } from '../src/providers/common.js'
 
 const STATIC_CODEX = [{ id: 'gpt-5.1-codex', name: 'GPT-5.1 Codex' }]
 const STATIC_CLAUDE = [{ id: 'claude-opus-4-5', name: 'Claude Opus 4.5' }]
@@ -1669,4 +1675,44 @@ test('withTimeout still settles when work ignores the abort signal', async () =>
 test('withTimeout returns the value when work finishes in time', async () => {
   const models = await withTimeout(async () => ['ok'], 50)
   assert.deepEqual(models, ['ok'])
+})
+
+test('oauthEndpointError reads the code from both the RFC 6749 and the OpenAI envelope shapes', async () => {
+  const rfc = await oauthEndpointError(
+    new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'gone' }), { status: 400 }),
+    'codex',
+  )
+  assert.equal(rfc.oauthCode, 'invalid_grant')
+  assert.match(rfc.message, /HTTP 400\): gone/)
+  assert.equal(isCodexPermanentRefreshError(rfc), true)
+
+  // auth.openai.com answers a burned refresh token like this (observed
+  // 2026-09-24); the plugin must log the account out instead of retrying
+  // "token refresh failed" forever.
+  const envelope = await oauthEndpointError(
+    new Response(JSON.stringify({ error: {
+      message: 'Your refresh token has already been used to generate a new access token. Please try signing in again.',
+      type: 'invalid_request_error',
+      param: null,
+      code: 'refresh_token_reused',
+    } }), { status: 401 }),
+    'codex',
+  )
+  assert.equal(envelope.oauthCode, 'refresh_token_reused')
+  assert.match(envelope.message, /already been used/)
+  assert.equal(isCodexPermanentRefreshError(envelope), true)
+
+  const ended = await oauthEndpointError(
+    new Response(JSON.stringify({ error: { message: 'Your session has ended. Please log in again.', code: 'refresh_token_invalidated' } }), { status: 401 }),
+    'codex',
+  )
+  assert.equal(isCodexPermanentRefreshError(ended), true)
+
+  // A transient rejection or an unparsable body stays non-permanent.
+  const transient = await oauthEndpointError(new Response(JSON.stringify({ error: { code: 'token_expired' } }), { status: 401 }), 'codex')
+  assert.equal(transient.oauthCode, 'token_expired')
+  assert.equal(isCodexPermanentRefreshError(transient), false)
+  const garbage = await oauthEndpointError(new Response('<html>', { status: 502 }), 'codex')
+  assert.equal(garbage.oauthCode, undefined)
+  assert.match(garbage.message, /HTTP 502\)$/)
 })

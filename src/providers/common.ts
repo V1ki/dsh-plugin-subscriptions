@@ -261,7 +261,12 @@ export class OAuthEndpointError extends Error {
 }
 
 /**
- * Read an OAuth JSON error body into an {@link OAuthEndpointError}.
+ * Read an OAuth JSON error body into an {@link OAuthEndpointError}. Two body
+ * shapes are understood: RFC 6749 (`{ error: "invalid_grant", error_description }`)
+ * and the OpenAI API envelope the auth.openai.com token endpoint now answers
+ * with (`{ error: { code: "refresh_token_reused", message } }`). The code
+ * must land in `oauthCode` either way — the permanent-failure classifiers
+ * key on it, and an unrecognized shape would keep a dead login forever.
  * @param response - the failed token-endpoint response.
  * @param label - diagnostic prefix naming the provider.
  * @returns the error to throw.
@@ -270,9 +275,16 @@ export async function oauthEndpointError(response: Response, label: string): Pro
   let oauthCode: string | undefined
   let detail = ''
   try {
-    const parsed = await response.json() as { error?: string; error_description?: string }
-    oauthCode = typeof parsed.error === 'string' ? parsed.error : undefined
-    detail = typeof parsed.error_description === 'string' ? parsed.error_description : (oauthCode ?? '')
+    const parsed = await response.json() as { error?: unknown; error_description?: unknown }
+    if (typeof parsed.error === 'string') {
+      oauthCode = parsed.error
+    } else if (typeof parsed.error === 'object' && parsed.error !== null) {
+      const nested = parsed.error as { code?: unknown; message?: unknown }
+      if (typeof nested.code === 'string' && nested.code.length > 0) oauthCode = nested.code
+      if (typeof nested.message === 'string') detail = nested.message
+    }
+    if (typeof parsed.error_description === 'string') detail = parsed.error_description
+    if (detail.length === 0) detail = oauthCode ?? ''
   } catch {
     // Only swallow error-body parsing: the HTTP status still identifies the failure.
   }
