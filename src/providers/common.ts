@@ -15,7 +15,7 @@ import {
   QUOTA_EXCEEDED_CODE,
   ReasoningEffortId,
 } from '@deepseek-ai/dsh-llm'
-import { rateLimitDiagnostics, retryAfterInstant, waitFromReset } from './rate-limit.js'
+import { durationMs, rateLimitDiagnostics, retryAfterInstant, waitFromReset } from './rate-limit.js'
 import type { RateLimitResetReader } from './rate-limit.js'
 
 /** One configured model catalog entry. */
@@ -146,7 +146,7 @@ export async function httpLlmError(
   // re-hitting the same closed window.
   const rateLimited = response.status === 429
   const reset = rateLimited
-    ? options.rateLimitReset?.(response, body, now) ?? retryAfterInstant(response, now)
+    ? options.rateLimitReset?.(response, body, now) ?? googleQuotaReset(body, now) ?? retryAfterInstant(response, now)
     : retryAfterInstant(response, now)
   if (reset === undefined && rateLimited) {
     options.onWarn?.(`${label}: ${rateLimitDiagnostics(response, body)}`)
@@ -155,6 +155,31 @@ export async function httpLlmError(
     status: response.status,
     ...reset === undefined ? {} : { providerRetryAfterMs: waitFromReset(reset, now) },
   })
+}
+
+/**
+ * Read a Google RPC quota reset from a 429 body.
+ *
+ * Antigravity discloses the window in `quotaResetDelay` and
+ * `quotaResetTimeStamp` and supplies no rate-limit reader. A wait beyond the
+ * route's delay ceiling makes the retry plugin fail the turn immediately
+ * rather than spending its local retry budget on a closed window. The
+ * relative delay wins: it is measured from this response, so a skewed local
+ * clock cannot stretch or erase it the way it would an absolute timestamp.
+ * @param body - the complete response body.
+ * @param now - the current epoch milliseconds.
+ * @returns the reset instant, or undefined when the body does not name one.
+ */
+function googleQuotaReset(body: string, now: number): number | undefined {
+  const delay = /"quotaResetDelay"\s*:\s*"([^"]+)"/.exec(body)
+  if (delay !== null) {
+    const ms = durationMs(delay[1])
+    if (ms !== undefined && ms > 0) return now + ms
+  }
+  const stamp = /"quotaResetTimeStamp"\s*:\s*"([^"]+)"/.exec(body)
+  if (stamp === null) return undefined
+  const instant = Date.parse(stamp[1])
+  return Number.isFinite(instant) && instant > now ? instant : undefined
 }
 
 /**

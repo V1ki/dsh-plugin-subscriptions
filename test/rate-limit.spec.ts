@@ -316,6 +316,83 @@ test('a 429 whose only signal is a snapshot header warns instead of waiting', as
   assert.match(warnings[0], /x-codex-primary-reset-after-seconds: 17000/)
 })
 
+test('an Antigravity quota body discloses its reset without a provider reader', async () => {
+  const warnings: string[] = []
+  // The #112 body: the delay and the timestamp name the same 35-hour reset.
+  const body = JSON.stringify({
+    error: {
+      code: 429,
+      message: 'Individual quota reached. Please upgrade your subscription to increase your limits.',
+      status: 'RESOURCE_EXHAUSTED',
+      details: [{
+        reason: 'QUOTA_EXHAUSTED',
+        metadata: {
+          quotaResetDelay: '35h25m28.374531157s',
+          quotaResetTimeStamp: new Date(Date.now() + 127_528_374).toISOString(),
+          model: 'claude-sonnet-4-6',
+        },
+      }],
+    },
+  })
+  const error = await httpLlmError(failure(429, {}, body), 'Antigravity API', {
+    onWarn: message => warnings.push(message),
+  })
+  assert.equal(error.code, 'RATE_LIMIT')
+  assert.equal(warnings.length, 0)
+  const wait = error.failure.providerRetryAfterMs
+  assert.ok(wait !== undefined)
+  assert.ok(wait > 35 * 3_600_000)
+  assert.ok(wait < 36 * 3_600_000)
+})
+
+test('an Antigravity quota delay beats a timestamp a skewed clock would misread', async () => {
+  // A local clock 35 hours slow would read the timestamp as 35 hours longer.
+  const body = JSON.stringify({ error: { details: [{ metadata: {
+    quotaResetDelay: '90s',
+    quotaResetTimeStamp: new Date(Date.now() + 35 * 3_600_000).toISOString(),
+  } }] } })
+  const wait = (await httpLlmError(failure(429, {}, body), 'Antigravity API')).failure.providerRetryAfterMs
+  assert.ok(wait !== undefined)
+  assert.ok(wait >= 90_000)
+  assert.ok(wait < 95_000)
+})
+
+test('an Antigravity quota timestamp serves when the delay is absent or unreadable', async () => {
+  for (const metadata of [{}, { quotaResetDelay: 'soon' }]) {
+    const body = JSON.stringify({ error: { details: [{ metadata: {
+      ...metadata,
+      quotaResetTimeStamp: new Date(Date.now() + 2 * 3_600_000).toISOString(),
+    } }] } })
+    const error = await httpLlmError(failure(429, {}, body), 'Antigravity API')
+    const wait = error.failure.providerRetryAfterMs
+    assert.equal(error.code, 'RATE_LIMIT')
+    assert.ok(wait !== undefined)
+    assert.ok(wait >= 2 * 3_600_000 - 5_000)
+    assert.ok(wait < 2 * 3_600_000 + 5_000)
+  }
+})
+
+test('an Antigravity quota body beats a generic retry-after', async () => {
+  // A 5-second retry-after cannot reopen a quota window 35 hours away.
+  const body = JSON.stringify({ error: { details: [{ metadata: { quotaResetDelay: '35h' } }] } })
+  const wait = (await httpLlmError(failure(429, { 'retry-after': '5' }, body), 'Antigravity API')).failure.providerRetryAfterMs
+  assert.ok(wait !== undefined)
+  assert.ok(wait >= 35 * 3_600_000)
+})
+
+test("a provider reset reader still beats Google quota fields", async () => {
+  const body = JSON.stringify({
+    error: { details: [{ metadata: { quotaResetTimeStamp: new Date(Date.now() + 35 * 3_600_000).toISOString() } }] },
+  })
+  const error = await httpLlmError(failure(429, {}, body), 'codex API', {
+    rateLimitReset: (_response, _body, now) => now + 45_000,
+  })
+  const wait = error.failure.providerRetryAfterMs
+  assert.ok(wait !== undefined)
+  assert.ok(wait >= 45_000)
+  assert.ok(wait < 50_000)
+})
+
 test('copilot uses generic retry-after and diagnoses unrecognized reset signals', async () => {
   const warnings: string[] = []
   const error = await httpLlmError(failure(429, {
