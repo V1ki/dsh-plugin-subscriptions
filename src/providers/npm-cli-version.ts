@@ -15,6 +15,15 @@ export function compareVersions(a: string, b: string): number {
   return different === -1 ? 0 : left[different]! - right[different]!
 }
 
+/** Where a presented CLI version came from; shown in Settings so a stale one is visible. */
+export type CliVersionSource = 'npm' | 'local' | 'fallback' | 'config'
+
+/** The CLI version a route presents, and where it came from. */
+export interface CliVersion {
+  version: string
+  source: CliVersionSource
+}
+
 export interface NpmCliVersionOptions {
   /** Registry metadata of the package's `latest` dist-tag; public, so never send credentials. */
   url: string
@@ -25,7 +34,7 @@ export interface NpmCliVersionOptions {
    * version may never go below. Read once, on first use, so a costly probe
    * (a local CLI's `--version`) never runs for an unused provider.
    */
-  floor: () => string
+  floor: () => CliVersion
   fetchFn?: FetchFn
   now?: () => number
   timeoutMs?: number
@@ -38,7 +47,9 @@ export interface NpmCliVersionOptions {
  * without a plugin release for every CLI bump.
  */
 export class NpmCliVersionCache {
-  private version: string | undefined
+  private presented: CliVersion | undefined
+  /** Whether a lookup has finished yet, successfully or not. */
+  private settled = false
   private expiresAt = 0
   private pending: Promise<string> | undefined
   private readonly fetchFn: FetchFn
@@ -56,13 +67,22 @@ export class NpmCliVersionCache {
 
   resolve(): Promise<string> {
     if (this.pending !== undefined) return this.pending
-    if (this.version !== undefined && this.now() < this.expiresAt) return Promise.resolve(this.version)
+    if (this.presented !== undefined && this.now() < this.expiresAt) return Promise.resolve(this.presented.version)
     this.pending = this.refresh().finally(() => { this.pending = undefined })
     return this.pending
   }
 
+  /**
+   * The version presented right now, without waiting on the registry;
+   * undefined until the first lookup finishes, so a lookup still in flight
+   * is never reported as a failed one.
+   */
+  current(): CliVersion | undefined {
+    return this.settled ? this.presented : undefined
+  }
+
   private async refresh(): Promise<string> {
-    const current = this.version ??= this.options.floor()
+    const current = (this.presented ??= this.options.floor()).version
     const { url, label } = this.options
     const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -90,14 +110,15 @@ export class NpmCliVersionCache {
         }, this.timeoutMs)
       })
       // Also bounded when an injected transport ignores cancellation.
-      this.version = await Promise.race([lookup(), timeout])
+      this.presented = { version: await Promise.race([lookup(), timeout]), source: 'npm' }
       this.expiresAt = this.now() + 6 * 60 * 60_000
     } catch {
       // Retain last-known good; on first use this is the floor.
       this.expiresAt = this.now() + 5 * 60_000
     } finally {
       clearTimeout(timer)
+      this.settled = true
     }
-    return this.version
+    return this.presented.version
   }
 }

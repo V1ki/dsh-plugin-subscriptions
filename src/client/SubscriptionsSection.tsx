@@ -49,6 +49,17 @@ export interface ProviderStatus {
   busy: boolean
   accounts: AccountStatus[]
   detail?: string
+  /** The CLI version the route presents (Codex, Claude), and where it came from. */
+  clientVersion?: { version: string; source: ClientVersionSource }
+}
+
+export type ClientVersionSource = 'npm' | 'local' | 'fallback' | 'config'
+
+const CLIENT_VERSION_SOURCES: Record<ClientVersionSource, SubscriptionsKey> = {
+  npm: 'clientVersionNpm',
+  local: 'clientVersionLocal',
+  fallback: 'clientVersionFallback',
+  config: 'clientVersionConfig',
 }
 
 /** `status` endpoint value: the node half owns this shape. */
@@ -183,6 +194,7 @@ const styles: Record<string, CSSProperties> = {
   dot: { width: 8, height: 8, borderRadius: '50%', flexShrink: 0 },
   name: { fontWeight: 500, fontSize: 14, lineHeight: '22px', color: 'var(--dsw-alias-label-primary)' },
   statusLine: { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
+  clientVersion: { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)', fontVariantNumeric: 'tabular-nums' },
   errorLine: { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-state-error-primary)' },
   actions: { display: 'flex', gap: 8, marginTop: 4, alignItems: 'center', flexWrap: 'wrap' },
   button: {
@@ -285,6 +297,19 @@ function dotColor(status: ProviderStatus | undefined): string {
  */
 function hasAccount(status: ProviderStatus | undefined): boolean {
   return (status?.accounts.length ?? 0) > 0
+}
+
+/** The CLI version a route presents, beside the provider name; nothing for routes without one. */
+export function ClientVersionTag({ clientVersion, t }: {
+  clientVersion: ProviderStatus['clientVersion']
+  t: SubscriptionsSectionInjected['t']
+}) {
+  if (clientVersion === undefined) return null
+  return (
+    <span style={styles.clientVersion} title={t('clientVersionHint')}>
+      {t('clientVersion', { version: clientVersion.version, source: t(CLIENT_VERSION_SOURCES[clientVersion.source]) })}
+    </span>
+  )
 }
 
 /**
@@ -799,6 +824,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
             <div style={styles.cardHeader}>
               <span style={{ ...styles.dot, background: dotColor(status) }} />
               <span style={styles.name}>{name}</span>
+              <ClientVersionTag clientVersion={status?.clientVersion} t={t} />
             </div>
             <p style={styles.statusLine}>{statusText(t, status)}</p>
             {status?.detail !== undefined && status.detail !== '' && (

@@ -136,6 +136,15 @@ function credentialsDir(prefix: string, blob: string): string {
 // The constants the authorize request is built from
 // ---------------------------------------------------------------------------
 
+test('status reports the CLI version a route presents, only where one is wired', () => inIsolatedHome(async () => {
+  const controller = new SubscriptionsAuthController(
+    new OAuthFlowManager(), new DeviceFlowManager(), () => {}, () => undefined, {}, () => undefined, undefined, {},
+    { codex: async () => ({ version: '0.157.1', source: 'npm' }) },
+  )
+  assert.deepEqual((await controller.status('codex')).clientVersion, { version: '0.157.1', source: 'npm' })
+  assert.equal('clientVersion' in await controller.status('grok'), false)
+}))
+
 test('Claude OAuth parameters match what Claude Code sends', () => {
   // Literals on purpose. Every URL assertion below compares the request
   // against these same constants, so only a literal can catch someone

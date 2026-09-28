@@ -11,7 +11,7 @@ export class CodexClientVersionCache extends NpmCliVersionCache {
     super({
       url: CODEX_VERSION_URL,
       label: 'Codex',
-      floor: () => CODEX_CLIENT_VERSION,
+      floor: () => ({ version: CODEX_CLIENT_VERSION, source: 'fallback' }),
       ...fetchFn === undefined ? {} : { fetchFn },
       ...now === undefined ? {} : { now },
       ...timeoutMs === undefined ? {} : { timeoutMs },

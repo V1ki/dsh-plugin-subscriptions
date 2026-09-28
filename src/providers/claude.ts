@@ -44,6 +44,7 @@ import { AccountTokenManager, DISCOVERY_TIMEOUT_MS, unionAccountCatalogs } from 
 import type { CatalogPersistence, DiscoveredModel, FetchFn, ModelEntry, ProviderUsage, UsageWindow } from './common.js'
 import { proxiedFetch } from '../http.js'
 import { compareVersions } from './npm-cli-version.js'
+import type { CliVersion } from './npm-cli-version.js'
 import {
   DEFAULT_RATE_LIMIT_WAIT,
   DEFAULT_RETRY,
@@ -147,9 +148,11 @@ export function detectClaudeVersion(): string {
  * version the endpoint already rejects for new models.
  * @param detect - local CLI probe (injectable for tests).
  */
-export function claudeCliVersionFloor(detect: () => string = detectClaudeVersion): string {
+export function claudeCliVersionFloor(detect: () => string = detectClaudeVersion): CliVersion {
   const local = detect()
-  return compareVersions(local, CLAUDE_CLI_FALLBACK_VERSION) > 0 ? local : CLAUDE_CLI_FALLBACK_VERSION
+  return compareVersions(local, CLAUDE_CLI_FALLBACK_VERSION) > 0
+    ? { version: local, source: 'local' }
+    : { version: CLAUDE_CLI_FALLBACK_VERSION, source: 'fallback' }
 }
 
 /** The User-Agent Claude Code sends at `version`. */
@@ -163,7 +166,7 @@ export function claudeCliUserAgent(version: string): string {
 // npm-backed resolver is wired in.
 let localCliVersion: string | undefined
 async function localClaudeCliVersion(): Promise<string> {
-  localCliVersion ??= claudeCliVersionFloor()
+  localCliVersion ??= claudeCliVersionFloor().version
   return localCliVersion
 }
 export const CLAUDE_BETA_FALLBACK = [

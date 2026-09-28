@@ -15,6 +15,7 @@ import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { PROVIDER_IDS, type ProviderId } from './store.js'
 import type { ProviderUsage } from '../providers/common.js'
 import type { ProxyConfigView, ProxyDraft, ProxyInput, ProxyTestResult } from '../http.js'
+import type { CliVersion } from '../providers/npm-cli-version.js'
 
 /**
  * Endpoint-name prefix under the shared `/api` channel: endpoint `status`
@@ -95,6 +96,8 @@ export interface ProviderStatus {
   accounts: AccountStatus[]
   /** The last login error, shown until the next success. */
   detail?: string
+  /** The CLI version this route presents (Codex, Claude), and where it came from. */
+  clientVersion?: CliVersion
 }
 
 /** How a Claude login should acquire credentials (other providers ignore it). */

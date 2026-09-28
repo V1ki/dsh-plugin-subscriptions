@@ -14,6 +14,7 @@ test('Codex version lookup deduplicates, caches and refreshes public metadata wi
     return Response.json({ version: '0.155.0' })
   }, () => now)
   assert.deepEqual(await Promise.all([cache.resolve(), cache.resolve()]), ['0.155.0', '0.155.0'])
+  assert.deepEqual(cache.current(), { version: '0.155.0', source: 'npm' })
   await cache.resolve()
   assert.equal(calls, 1)
   now += 6 * 60 * 60_000
@@ -31,6 +32,7 @@ test('Codex version lookup rejects invalid, prerelease and regressed versions wi
     assert.equal(await cache.resolve(), CODEX_CLIENT_VERSION)
     assert.equal(await cache.resolve(), CODEX_CLIENT_VERSION)
     assert.equal(calls, 1)
+    assert.deepEqual(cache.current(), { version: CODEX_CLIENT_VERSION, source: 'fallback' })
   }
 })
 
