@@ -43,6 +43,7 @@ import {
 import { AccountTokenManager, DISCOVERY_TIMEOUT_MS, unionAccountCatalogs } from './accounts.js'
 import type { CatalogPersistence, DiscoveredModel, FetchFn, ModelEntry, ProviderUsage, UsageWindow } from './common.js'
 import { proxiedFetch } from '../http.js'
+import { compareVersions } from './npm-cli-version.js'
 import {
   DEFAULT_RATE_LIMIT_WAIT,
   DEFAULT_RETRY,
@@ -99,9 +100,11 @@ export const claudeRateLimitReset: RateLimitResetReader = (response, body, now) 
 /**
  * The subscription endpoint only serves requests presenting as Claude Code,
  * so these headers impersonate the CLI; the harness attribution user-agent
- * cannot be sent here (one user-agent slot, and the CLI's wins).
+ * cannot be sent here (one user-agent slot, and the CLI's wins). The endpoint
+ * also gates new models on the CLI version, so the version normally comes
+ * from npm (`ClaudeCliVersionCache`); this is only the offline floor.
  */
-export const CLAUDE_CLI_FALLBACK_VERSION = '2.1.263'
+export const CLAUDE_CLI_FALLBACK_VERSION = '2.1.283'
 
 /**
  * Candidate invocations, in order of preference. Windows npm installs expose
@@ -138,16 +141,30 @@ export function detectClaudeVersion(): string {
   return CLAUDE_CLI_FALLBACK_VERSION
 }
 
-// Lazy + memoized: detectClaudeVersion() shells out to `claude --version`,
-// so this must not run at module-evaluation time (it would fire for every
-// consumer of this module regardless of whether Claude is a configured
-// provider). Computed on first use of getClaudeCliUserAgent() instead.
-let claudeCliUserAgent: string | undefined
-function getClaudeCliUserAgent(): string {
-  if (claudeCliUserAgent === undefined) {
-    claudeCliUserAgent = `claude-cli/${detectClaudeVersion()} (external, cli)`
-  }
-  return claudeCliUserAgent
+/**
+ * The lowest version to present: the local CLI or the bundled fallback,
+ * whichever is newer. An outdated local install must not pin requests to a
+ * version the endpoint already rejects for new models.
+ * @param detect - local CLI probe (injectable for tests).
+ */
+export function claudeCliVersionFloor(detect: () => string = detectClaudeVersion): string {
+  const local = detect()
+  return compareVersions(local, CLAUDE_CLI_FALLBACK_VERSION) > 0 ? local : CLAUDE_CLI_FALLBACK_VERSION
+}
+
+/** The User-Agent Claude Code sends at `version`. */
+export function claudeCliUserAgent(version: string): string {
+  return `claude-cli/${version} (external, cli)`
+}
+
+// Lazy + memoized: the floor shells out to `claude --version`, so this must
+// not run at module-evaluation time (it would fire for every consumer of this
+// module regardless of whether Claude is a configured provider). Used when no
+// npm-backed resolver is wired in.
+let localCliVersion: string | undefined
+async function localClaudeCliVersion(): Promise<string> {
+  localCliVersion ??= claudeCliVersionFloor()
+  return localCliVersion
 }
 export const CLAUDE_BETA_FALLBACK = [
   'claude-code-20250219',
@@ -363,20 +380,23 @@ function claudeLimitsWindows(value: unknown): UsageWindow[] {
  * @param session - the stored session (used as-is; never refreshed here).
  * @param fetchFn - fetch implementation (injectable for tests).
  * @param signal - caller cancellation from the RPC transport.
+ * @param cliVersion - resolves the Claude Code version to present; defaults to the local floor.
  * @returns the mapped usage snapshot.
  */
 export async function fetchClaudeUsage(
   session: ClaudeSession,
   fetchFn: FetchFn = proxiedFetch,
   signal?: AbortSignal,
+  cliVersion: () => Promise<string> = localClaudeCliVersion,
 ): Promise<ProviderUsage> {
+  const userAgent = claudeCliUserAgent(await cliVersion())
   const response = await fetchFn(CLAUDE_USAGE_URL, {
     headers: {
       'authorization': `Bearer ${session.accessToken}`,
       'anthropic-beta': 'oauth-2025-04-20',
       // Unrecognized clients are aggressively rate-limited on this endpoint,
       // so it presents as the CLI like every other subscription request.
-      'user-agent': getClaudeCliUserAgent(),
+      'user-agent': userAgent,
       'accept': 'application/json',
     },
     ...signal === undefined ? {} : { signal },
@@ -450,17 +470,23 @@ function positiveTokenCount(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined
 }
 
-/** Fetch the live model catalog from the subscription endpoint. `signal` cancels the request. */
+/**
+ * Fetch the live model catalog from the subscription endpoint. `signal`
+ * cancels the request; `cliVersion` resolves the Claude Code version to
+ * present (defaults to the local floor).
+ */
 export async function fetchClaudeModels(
   session: ClaudeSession,
   fetchFn: FetchFn = proxiedFetch,
   signal?: AbortSignal,
+  cliVersion: () => Promise<string> = localClaudeCliVersion,
 ): Promise<DiscoveredModel[]> {
+  const userAgent = claudeCliUserAgent(await cliVersion())
   const response = await fetchFn(CLAUDE_MODELS_URL, {
     headers: {
       'authorization': `Bearer ${session.accessToken}`,
       'anthropic-version': '2023-06-01',
-      'user-agent': getClaudeCliUserAgent(),
+      'user-agent': userAgent,
       'anthropic-dangerous-direct-browser-access': 'true',
       'accept': 'application/json',
     },
@@ -528,6 +554,8 @@ export interface ClaudeAdapterOptions {
    * the provider's own default.
    */
   defaultEffortOf?: (model: string) => string | undefined
+  /** Resolves the Claude Code version to present (npm-backed); absent means the local floor. */
+  resolveCliVersion?: () => Promise<string>
 }
 
 /** The Claude 4.5 family accepts image input. */
@@ -586,7 +614,12 @@ export class ClaudeAdapter extends LlmAdapter {
   }
 
   private async fetchCatalog(account?: string, signal?: AbortSignal): Promise<DiscoveredModel[]> {
-    return fetchClaudeModels(await this.options.tokens.session(account), this.options.fetchFn, signal)
+    return fetchClaudeModels(
+      await this.options.tokens.session(account),
+      this.options.fetchFn,
+      signal,
+      this.options.resolveCliVersion,
+    )
   }
 
   /** Drop cached catalogs after login/logout so the next list does not reuse a stale plan. */
@@ -790,13 +823,14 @@ export class ClaudeAdapter extends LlmAdapter {
       ? String(options.reasoningEffort)
       : undefined
     const body = claudeRequestBody(options, messages, maxTokens, thinking, effort)
+    const cliVersion = await (this.options.resolveCliVersion ?? localClaudeCliVersion)()
     return proxiedFetch(CLAUDE_API_URL, {
       method: 'POST',
       headers: {
         'authorization': `Bearer ${session.accessToken}`,
         'anthropic-version': '2023-06-01',
         'anthropic-beta': CLAUDE_BETA_FLAGS,
-        'user-agent': getClaudeCliUserAgent(),
+        'user-agent': claudeCliUserAgent(cliVersion),
         'x-app': 'cli',
         'anthropic-dangerous-direct-browser-access': 'true',
         'accept': 'text/event-stream',

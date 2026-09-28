@@ -91,6 +91,8 @@ Codex 编辑走 `/backend-api/codex/images/edits`，Grok 编辑走 `/v1/images/e
 
 Codex 的目录可见性受请求中的 `client_version` 影响。默认自动读取 npm 官方 `@openai/codex` 包公开元数据中的稳定版本，不安装 CLI，也不向 npm 发送订阅登录凭据。查询成功后在内存缓存六小时；失败后五分钟再试，保留上次成功版本，首次失败则回退到已验证的 `0.153.4`。查询最多等待 5 秒，多账号共用查询，忽略预发布版和低于当前已知版本的结果。插件加载时还会把 Node 的 Happy Eyeballs 单地址建连尝试超时提高到至少 1.5 秒（不会降低宿主已设的更大值），因为默认 250ms 在一次 TCP 握手就超过该值的高延迟链路上会让所有连接失败。手动刷新模型列表也会重新检查版本。显式配置 `codexClientVersion: '0.153.4'` 时优先使用该值，并关闭自动查询；更改配置后需重启 DSH。模型仍以账号实际权限为准，详见[验证记录](docs/codex-catalog-refresh.md)。
 
+Claude 请求以 Claude Code 的身份发出，接口会按 Claude Code 版本放行新模型（例如 Opus 5.5 要求 2.1.280 或更新）。因此插件会读取 npm 官方 `@anthropic-ai/claude-code` 包公开元数据中的 `latest` 版本，缓存、超时和重试规则与 Codex 查询相同，也不会向 npm 发送订阅登录凭据。上报的版本不会低于本机安装的 `claude` CLI 或插件内置的兜底版本；npm 不可达时就使用这个下限。手动刷新模型列表也会重新检查版本。
+
 ### 安装命令
 
 本机已有 `dsh` CLI 时,从 npm 安装(预构建产物,无需构建授权):

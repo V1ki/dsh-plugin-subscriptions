@@ -68,6 +68,7 @@ import type { AccountAwareAdapter } from './providers/accounts.js'
 import { DEFAULT_RATE_LIMIT_MAX_WAIT_MS, resolveRateLimitWait } from './providers/rate-limit.js'
 import type { RateLimitConfig } from './providers/rate-limit.js'
 import { accountCatalogStore, catalogStore } from './providers/catalog-store.js'
+import { ClaudeCliVersionCache } from './providers/claude-cli-version.js'
 import { CodexClientVersionCache } from './providers/codex-client-version.js'
 import { CodexWebSearchProvider } from './providers/codex-search.js'
 import { PoolAdapter } from './providers/pool.js'
@@ -645,6 +646,7 @@ export function apply(ctx: Context, config: Config): void {
   ctx.effect(() => () => { restoreConnectAttemptTimeout(previousAttemptTimeout) }, 'dsh-plugin-subscriptions: connect attempt timeout')
   const preferences = new ProviderSettingsStore()
   const codexVersion = new CodexClientVersionCache()
+  const claudeVersion = new ClaudeCliVersionCache()
   const providers = [...new Set(config.providers ?? [...PROVIDER_IDS])]
   const streamIdleTimeoutMs = config.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS
   if (!Number.isFinite(streamIdleTimeoutMs) || streamIdleTimeoutMs <= 0) {
@@ -793,7 +795,7 @@ export function apply(ctx: Context, config: Config): void {
         claudeTokens = tokens
         accountTokens.set('claude', tokens as AccountTokenManager<StoredSession>)
         usageFetchers.claude = async (account, signal) =>
-          fetchClaudeUsage(await tokens.session(account), proxiedFetch, signal)
+          fetchClaudeUsage(await tokens.session(account), proxiedFetch, signal, () => claudeVersion.resolve())
         const adapter = new ClaudeAdapter({
           models: catalog.claude,
           streamIdleTimeoutMs,
@@ -804,6 +806,7 @@ export function apply(ctx: Context, config: Config): void {
           resolveAttachments,
           catalogStore: catalogStore('claude'),
           defaultEffortOf: (model: string) => defaultEffortOf('claude', model),
+          resolveCliVersion: () => claudeVersion.resolve(),
           pool: () => poolAdapter,
         })
         adapters.set('claude', adapter)
@@ -930,7 +933,12 @@ export function apply(ctx: Context, config: Config): void {
         case 'claude': {
           const tokens = claudeTokens
           return tokens === undefined ? undefined : async () =>
-            fetchClaudeUsage(await tokens.session(account), proxiedFetch, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS))
+            fetchClaudeUsage(
+              await tokens.session(account),
+              proxiedFetch,
+              AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS),
+              () => claudeVersion.resolve(),
+            )
         }
         case 'grok': {
           const tokens = grokTokens
@@ -1039,6 +1047,7 @@ export function apply(ctx: Context, config: Config): void {
     async catalog(force = false): Promise<ModelDefaultsCatalog[]> {
       if (force) {
         codexVersion.invalidate()
+        claudeVersion.invalidate()
         // This is not an auth transition: retain health, usage and Copilot
         // reasoning replay, but bypass every account's discovery cache.
         for (const adapter of adapters.values()) adapter.clearAccountCatalog()
@@ -1129,6 +1138,7 @@ export function apply(ctx: Context, config: Config): void {
       if (!adapter) throw new BadRequest(`provider ${provider} is not configured`)
       if (force) {
         if (provider === 'codex') codexVersion.invalidate()
+        if (provider === 'claude') claudeVersion.invalidate()
         adapter.clearAccountCatalog()
         poolAdapter?.invalidate()
         handles.get(provider)?.replace([provider])
