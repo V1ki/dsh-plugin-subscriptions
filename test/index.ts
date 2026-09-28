@@ -4,6 +4,7 @@
  */
 import './keep-alive.js'
 import './translate.spec.js'
+import './image-request-limit.spec.js'
 import './chat-completions.spec.js'
 import './models.spec.js'
 import './codex-client-version.spec.js'

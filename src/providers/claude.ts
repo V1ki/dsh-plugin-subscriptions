@@ -558,6 +558,14 @@ export interface ClaudeAdapterOptions {
   resolveCliVersion?: () => Promise<string>
 }
 
+/**
+ * Anthropic rejects any image edge over 2000px once a request carries many
+ * images, and every later turn resends the history, so one oversized
+ * screenshot would fail the session for good (#110). Images are sent within
+ * this cap; 3.75MB encoded stays under the 5MB base64 per-image limit.
+ */
+const CLAUDE_IMAGE_LIMIT = { maxEdge: 2000, maxBytes: 3_750_000 }
+
 /** The Claude 4.5 family accepts image input. */
 const CLAUDE_MODALITIES: readonly ('text' | 'image')[] = ['text', 'image']
 
@@ -814,7 +822,7 @@ export class ClaudeAdapter extends LlmAdapter {
   }
 
   private async request(options: GenerateOptions, session: ClaudeSession, signal: AbortSignal): Promise<Response> {
-    const messages = await resolveImages(options.messages, this.options.resolveAttachments?.(), signal)
+    const messages = await resolveImages(options.messages, this.options.resolveAttachments?.(), signal, CLAUDE_IMAGE_LIMIT)
     const disc = await this.discovered(options.model)
     const maxTokens = options.maxTokens
       ?? claudeMaxTokens(this.options.models.find(entry => entry.id === options.model), disc)
