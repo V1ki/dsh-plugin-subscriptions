@@ -41,15 +41,11 @@ export function UsageBadgeDisplaySetting({ t }: { t: Translate }) {
 
 const styles: Record<string, CSSProperties> = {
   card: {
-    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 12,
+    border: '0.5px solid var(--dsw-alias-settings-card-stroke, var(--dsw-alias-border-l4))',
+    borderRadius: 'var(--dsw-radius-xl, 20px)', background: 'var(--dsw-alias-settings-card-fill, var(--dsw-alias-bg-layer-2))',
     padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 6,
   },
-  field: { display: 'flex', flexDirection: 'column', gap: 4, fontSize: 14, lineHeight: '22px' },
-  select: {
-    height: 32, width: '100%', boxSizing: 'border-box',
-    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8,
-    padding: '0 10px', font: 'inherit',
-    background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)',
-  },
+  field: { display: 'flex', flexDirection: 'column', gap: 6, fontSize: 13, fontWeight: 500, lineHeight: '20px' },
+  select: { width: '100%' },
   hint: { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
 }
