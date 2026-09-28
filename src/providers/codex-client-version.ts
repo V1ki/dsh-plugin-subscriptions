@@ -33,7 +33,7 @@ export class CodexClientVersionCache {
     try {
       const lookup = async (): Promise<string> => {
         const response = await this.fetchFn(CODEX_VERSION_URL, {
-          headers: { accept: 'application/json' },
+          headers: { accept: 'application/json', 'accept-encoding': 'identity' },
           redirect: 'error',
           signal: controller.signal,
         })
