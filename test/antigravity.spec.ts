@@ -550,6 +550,54 @@ test('Antigravity uses JSON Schema for Gemini and a detached custom-tool subset 
   assert.deepEqual(input.tools, original, 'do not mutate DSH registry schemas')
 })
 
+test('Antigravity custom tools widen alternatives instead of rejecting the request (#93)', () => {
+  const parameters = {
+    type: 'object',
+    properties: {
+      // DSH spreadsheet/document tools declare cell values like this.
+      cell: { description: 'value', oneOf: [{ type: 'string' }, { type: 'number' }, { type: 'boolean' }, { type: 'null' }] },
+      count: { anyOf: [{ type: 'integer' }, { type: 'number' }] },
+      loose: { type: ['string', 'number'] },
+      label: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+      ids: { anyOf: [{ type: 'array', items: { type: 'string' } }, { type: 'array', items: { type: 'integer' } }] },
+      source: { oneOf: [
+        { type: 'object', properties: { kind: { type: 'string', const: 'url' }, url: { type: 'string' } }, required: ['kind', 'url'] },
+        { type: 'object', properties: { kind: { type: 'string', const: 'path' }, path: { oneOf: [{ type: 'string' }, { type: 'null' }] } }, required: ['kind'] },
+      ] },
+      range: { allOf: [
+        { type: 'object', properties: { start: { type: 'integer' } }, required: ['start'] },
+        { properties: { end: { type: 'integer' } }, required: ['end'] },
+      ] },
+    },
+    required: ['cell'],
+  }
+  const original = structuredClone(parameters)
+  for (const model of ['claude-sonnet-4-6', 'claude-opus-4-6-thinking', 'gpt-oss-120b-medium']) {
+    const input = { ...options([]), model, tools: [{ name: 'sheet', description: '', parameters }] }
+    const declaration = toAntigravityRequest(input, [], session.projectId).request.tools![0].functionDeclarations[0]
+    const properties = (declaration.parameters as { properties: Record<string, unknown> }).properties
+    // Heterogeneous alternatives are unconstrained rather than narrowed to one branch.
+    assert.deepEqual(properties.cell, { description: 'value' })
+    assert.deepEqual(properties.count, { type: 'number' })
+    assert.deepEqual(properties.loose, {})
+    assert.deepEqual(properties.label, { type: 'string' })
+    assert.deepEqual(properties.ids, { type: 'array', items: {} })
+    // Object alternatives keep every property, a discriminator's choices, and only shared requirements.
+    assert.deepEqual(properties.source, {
+      type: 'object',
+      properties: { kind: { type: 'string', enum: ['url', 'path'] }, url: { type: 'string' }, path: { type: 'string' } },
+      required: ['kind'],
+    })
+    // An intersection keeps every member's properties and requirements.
+    assert.deepEqual(properties.range, {
+      type: 'object',
+      properties: { start: { type: 'integer' }, end: { type: 'integer' } },
+      required: ['start', 'end'],
+    })
+  }
+  assert.deepEqual(parameters, original, 'do not mutate DSH registry schemas')
+})
+
 test('Antigravity rejects unresolved and recursive tool references before provider I/O', () => {
   for (const parameters of [
     { type: 'object', properties: { path: { $ref: '#/$defs/missing' } } },

@@ -33,20 +33,83 @@ function resolve(value: unknown, root: Schema, refs = new Set<string>()): unknow
       : resolve(item, root, refs)]))
 }
 
+/** Numeric types widen to `number`: every integer is also a number. */
+const NUMERIC = new Set(['integer', 'number'])
+
+/** The strings one alternative is limited to (`enum` or `const`), or undefined when unconstrained. */
+function stringChoices(schema: Schema): string[] | undefined {
+  if (typeof schema.const === 'string') return [schema.const]
+  return Array.isArray(schema.enum) && schema.enum.every(entry => typeof entry === 'string') ? schema.enum : undefined
+}
+
+/**
+ * Fold schema alternatives into one shape this bridge can express, never
+ * narrower than any alternative: picking one branch would make the tool
+ * uncallable with the others' values, which is worse than a looser contract
+ * the tool still validates. Objects keep the union of their properties and
+ * only the fields every alternative requires; scalars of one type keep that
+ * type (and a string choice union); anything heterogeneous is unconstrained.
+ */
+function widen(variants: readonly unknown[]): Schema {
+  const members = variants.filter(object)
+  if (members.length === 0 || members.length !== variants.length) return {}
+  const types = new Set(members.map(member => member.type))
+  const type = types.size === 1 ? [...types][0]
+    : [...types].every(entry => typeof entry === 'string' && NUMERIC.has(entry)) ? 'number' : undefined
+  if (typeof type !== 'string') return {}
+  if (type === 'object') {
+    const properties: Schema = {}
+    for (const member of members) {
+      if (!object(member.properties)) continue
+      for (const [name, property] of Object.entries(member.properties)) {
+        properties[name] = !Object.hasOwn(properties, name) || JSON.stringify(properties[name]) === JSON.stringify(property)
+          ? property
+          : widen([properties[name], property])
+      }
+    }
+    const required = members
+      .map(member => Array.isArray(member.required) ? member.required.filter(entry => typeof entry === 'string') : [])
+      .reduce((shared, next) => shared.filter(name => next.includes(name)))
+    return {
+      type,
+      ...Object.keys(properties).length === 0 ? {} : { properties },
+      ...required.length === 0 ? {} : { required },
+    }
+  }
+  if (type === 'array') {
+    return { type, items: widen(members.map(member => member.items ?? {})) }
+  }
+  const choices = members.map(stringChoices)
+  return choices.every(entry => entry !== undefined)
+    ? { type, enum: [...new Set(choices.flat())] }
+    : { type }
+}
+
+/** Merge `extra` into `schema`: properties and required accumulate, other keywords override. */
+function absorb(schema: Schema, extra: Schema): void {
+  const { properties, required, ...rest } = extra
+  Object.assign(schema, rest)
+  if (object(properties)) schema.properties = { ...object(schema.properties) ? schema.properties : {}, ...properties }
+  if (Array.isArray(required)) {
+    schema.required = [...new Set([...Array.isArray(schema.required) ? schema.required : [], ...required])]
+  }
+}
+
 /** Keep property names intact while reducing schema keywords for Claude/GPT-OSS. */
 function custom(value: unknown): unknown {
   if (!object(value)) return value
   const schema = { ...value }
+  // An intersection holds every member's constraints at once.
+  if (Array.isArray(schema.allOf)) {
+    const members = schema.allOf.filter(object)
+    delete schema.allOf
+    for (const member of members) absorb(schema, member)
+  }
   for (const keyword of ['anyOf', 'oneOf']) {
     if (!Array.isArray(schema[keyword])) continue
     const variants = schema[keyword].filter(item => !object(item) || item.type !== 'null')
-    if (variants.length !== 1 || !object(variants[0])) {
-      throw new LlmError(`Antigravity custom tools cannot represent ${keyword} with multiple alternatives`, 'INVALID_REQUEST')
-    }
-    Object.assign(schema, variants[0])
-  }
-  if (schema.allOf !== undefined) {
-    throw new LlmError('Antigravity custom tools cannot represent allOf', 'INVALID_REQUEST')
+    delete schema[keyword]
+    absorb(schema, variants.length === 1 && object(variants[0]) ? variants[0] : widen(variants))
   }
   const out: Schema = {}
   for (const [key, value] of Object.entries(schema)) {
@@ -56,8 +119,9 @@ function custom(value: unknown): unknown {
     } else if (key === 'items') out[key] = custom(value)
     else if (key === 'type' && Array.isArray(value)) {
       const types = value.filter(type => type !== 'null')
-      if (types.length !== 1) throw new LlmError('Antigravity custom tool type must have one non-null alternative', 'INVALID_REQUEST')
-      out[key] = types[0]
+      const type = types.length === 1 ? types[0]
+        : types.length > 0 && types.every(entry => NUMERIC.has(entry as string)) ? 'number' : undefined
+      if (type !== undefined) out[key] = type
     } else if (key !== 'enum' || Array.isArray(value) && value.every(entry => typeof entry === 'string')) {
       out[key] = value
     }
