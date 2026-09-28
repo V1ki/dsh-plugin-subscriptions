@@ -5,6 +5,28 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ProviderSettingsStore, validatePreferences } from '../src/provider-settings.js'
 
+test('display names persist per provider, trim whitespace and clear back to defaults', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'display-names-'))
+  try {
+    const store = new ProviderSettingsStore(join(dir, 'settings.json'))
+    await store.set('grok', { displayName: '  我的 Grok  ', modelDisplayNames: { shared: '主力模型', gone: '暂不可用' } })
+    await store.set('codex', { modelDisplayNames: { shared: '工作模型' } })
+    const reload = new ProviderSettingsStore(store.path)
+    assert.equal(reload.get('grok').displayName, '我的 Grok')
+    assert.equal(reload.get('grok').modelDisplayNames?.shared, '主力模型')
+    assert.equal(reload.get('codex').modelDisplayNames?.shared, '工作模型')
+    assert.equal(reload.get('grok').modelDisplayNames?.gone, '暂不可用')
+    await reload.set('grok', { displayName: '  ', modelDisplayNames: { shared: '' } })
+    assert.equal(reload.get('grok').displayName, undefined)
+    assert.equal(reload.get('grok').modelDisplayNames?.shared, undefined)
+    for (const input of [{ displayName: 7 }, { displayName: 'x'.repeat(81) }, { modelDisplayNames: [] }, { modelDisplayNames: { m: false } }]) {
+      assert.throws(() => validatePreferences('grok', input))
+    }
+    const safe = validatePreferences('grok', JSON.parse('{"modelDisplayNames":{"__proto__":"Safe","toString":"Also safe"}}'))
+    assert.equal(safe.modelDisplayNames?.['__proto__'], 'Safe')
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
 test('provider selections survive refresh-independent reloads and concurrent provider saves', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'provider-settings-'))
   try {

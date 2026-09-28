@@ -125,8 +125,16 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
 
   const allModels = catalog?.models ?? []
   const known = new Set(allModels.map(model => model.id))
-  const missing = (draft.visibleModels ?? []).filter(id => !known.has(id)).map(id => ({ id, name: id } as ModelRow))
-  const models = [...allModels, ...missing].filter(model => `${model.name} ${model.id}`.toLowerCase().includes(query.trim().toLowerCase()))
+  const savedIds = new Set([...(draft.visibleModels ?? []), ...Object.keys(draft.modelDisplayNames ?? {})])
+  const missing = [...savedIds].filter(id => !known.has(id)).map(id => ({ id, name: id } as ModelRow))
+  const customName = (id: string) => Object.hasOwn(draft.modelDisplayNames ?? {}, id) ? draft.modelDisplayNames![id] : ''
+  const editName = (id: string, value: string) => {
+    const names: Record<string, string> = Object.assign(Object.create(null), draft.modelDisplayNames)
+    if (value.trim()) names[id] = value
+    else delete names[id]
+    edit({ ...draft, modelDisplayNames: names })
+  }
+  const models = [...allModels, ...missing].filter(model => `${model.name} ${model.id} ${customName(model.id)}`.toLowerCase().includes(query.trim().toLowerCase()))
   const selected = new Set(draft.visibleModels ?? allModels.map(model => model.id))
   return <div style={{ borderTop: border, marginTop: 12, paddingTop: 12 }}>
     <h3 style={{ margin: 0, fontSize: 15 }}>{t('modelsEdit')}</h3>
@@ -157,6 +165,19 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
               if (event.target.checked) next.add(model.id); else next.delete(model.id)
               edit({ ...draft, visibleModels: [...next] })
             }} /> {model.name}{!known.has(model.id) && ` (${t('modelsUnavailable')})`}</label>
+            <small style={{ color: 'var(--dsw-alias-label-tertiary)', overflowWrap: 'anywhere' }}>ID: {model.id}</small>
+            <div style={actions}>
+              <label style={{ display: 'grid', gap: 6, flex: '1 1 200px', minWidth: 0 }}>
+                <span style={{ fontSize: 12 }}>{t('modelDisplayName')}</span>
+                <input style={control} maxLength={80} aria-label={`${model.name} ${t('modelDisplayName')}`}
+                  placeholder={model.name} value={customName(model.id)}
+                  onChange={event => editName(model.id, event.target.value)} />
+              </label>
+              <button type="button" style={{ ...control, alignSelf: 'end' }}
+                aria-label={`${model.name} ${t('displayNameReset')}`} disabled={!customName(model.id)}
+                onClick={() => editName(model.id, '')}>{t('displayNameReset')}</button>
+            </div>
+            <small style={{ color: 'var(--dsw-alias-label-tertiary)' }}>{t('modelDisplayNameHint')}</small>
             <div style={actions}>
             {(model.efforts?.length ?? 0) > 0 && <label style={actions}>{t('modelDefaultsTitle')}
               <select style={control} aria-label={`${model.name} ${t('modelDefaultsTitle')}`}

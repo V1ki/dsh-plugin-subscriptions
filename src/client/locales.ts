@@ -3,7 +3,12 @@
 /** English strings (the key-set source of truth for this pair). */
 export const en = {
   accountsManage: 'Manage',
-  accountsTitle: 'Manage {provider} accounts',
+  accountsTitle: 'Manage {provider}',
+  subscriptionDisplayName: 'Subscription display name',
+  subscriptionDisplayNameHint: 'Used in the quota bar and subscription headings. Leave blank for the default.',
+  modelDisplayName: 'Model display name',
+  modelDisplayNameHint: 'Leave blank for the original name. Reasoning effort stays separate.',
+  displayNameReset: 'Restore default',
   accountsHint: 'Choose which accounts serve pooled LLM requests. Pool exclusion applies only to LLM routing, not tools or session-wide isolation.',
   accountsLoading: 'Loading accounts…',
   accountsLoadFailed: 'Could not load account settings: {message}',
@@ -161,7 +166,12 @@ export const en = {
 /** zh strings, one per {@link en} key. */
 export const zh = {
   accountsManage: '管理',
-  accountsTitle: '管理 {provider} 账号',
+  accountsTitle: '管理 {provider}',
+  subscriptionDisplayName: '订阅显示名',
+  subscriptionDisplayNameHint: '用于底部额度栏与订阅标题，留空使用默认名称。',
+  modelDisplayName: '模型显示名',
+  modelDisplayNameHint: '留空使用原名，推理档位仍单独显示。',
+  displayNameReset: '恢复默认',
   accountsHint: '选择参与账号池 LLM 请求的账号。退出账号池仅影响 LLM 路由，不影响工具，也不代表整个会话隔离。',
   accountsLoading: '加载账号中…',
   accountsLoadFailed: '账号设置加载失败：{message}',

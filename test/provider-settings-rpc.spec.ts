@@ -58,6 +58,22 @@ test('provider settings RPC edits picker visibility without losing the editor ca
     assert.equal((await call('setProviderSettings', { provider: 'codex', settings: { contextWindows: { m1: 0 } } })).ok, false)
     assert.equal((await call('setProviderSettings', { provider: 'claude', settings: {} })).ok, false)
 
+    const names = { displayName: '我的 Codex', modelDisplayNames: { m1: '主力模型' },
+      visibleModels: ['m1'], tools: { image_generate: false, web_search: false } }
+    assert.equal((await call('setProviderSettings', { provider: 'codex', settings: names })).ok, true)
+    const status = await call('status', {})
+    assert.ok(status.ok)
+    assert.equal((status.value as { providers: { codex: { displayName?: string } } }).providers.codex.displayName, '我的 Codex')
+    assert.equal((await adapters.get('codex')!.listModels('codex'))[0].name, '主力模型')
+    const fresh = await call('providerSettings', { provider: 'codex', force: true })
+    assert.ok(fresh.ok)
+    assert.equal((fresh.value as { settings: { displayName: string } }).settings.displayName, '我的 Codex')
+    assert.equal((fresh.value as { models: { name: string }[] }).models[0].name, 'Model 1')
+    const renamed = await adapters.get('codex')!.resolveModel('codex', 'm1')
+    assert.equal(renamed.id, 'm1')
+    assert.equal(renamed.name, '主力模型')
+    assert.deepEqual(renamed.reasoning?.efforts.map(e => e.id), ['high'])
+
     const create = (at: number) => {
       const denied: string[] = []
       const agent = { session: { header: { createdAt: at } }, ctx: { tools: { restrict: ({ deny }: { deny: string[] }) => { denied.push(...deny) } } } }

@@ -23,6 +23,31 @@ class Raw extends LlmAdapter {
 const options = (model: string) => ({ provider: 'codex', model } as GenerateOptions)
 async function consume(route: LlmAdapter, id: string) { for await (const _ of route.stream(options(id))) { /* collect */ } }
 
+test('model display names decorate list and resolution without changing routing or capabilities', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'model-display-names-'))
+  try {
+    const settings = new ProviderSettingsStore(join(dir, 'settings.json'))
+    const raw = new Raw()
+    const route = new AccountPreferencesAdapter({ provider: 'codex', adapter: raw, settings,
+      accounts: async () => [{ key: 'a', label: 'A' }], pool: () => undefined })
+    await settings.set('codex', { modelDisplayNames: { 'm:/模型': '主力模型' }, accounts: { a: { alias: '主账号', independentEntry: true } } })
+    const id = accountModelId('a', 'm:/模型')
+    const models = await route.listModels('codex')
+    assert.equal(models.find(m => m.id === 'm:/模型')?.name, '主力模型')
+    assert.equal(models.find(m => m.id === id)?.name, '主账号 · 主力模型')
+    const resolved = await route.resolveModel('codex', 'm:/模型')
+    assert.equal(resolved.name, '主力模型')
+    assert.equal(resolved.id, 'm:/模型')
+    assert.equal(resolved.context?.contextWindow, 100)
+    assert.equal((await route.resolveModel('codex', id)).name, '主账号 · 主力模型')
+    await consume(route, id)
+    assert.ok(raw.calls.includes('stream:a:m:/模型'))
+    assert.equal((await raw.listOwnModels('codex'))[0].name, 'Model')
+    await settings.set('codex', {})
+    assert.equal((await route.listModels('codex'))[0].name, 'Model')
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
 test('account preferences validate, persist and distinguish absent and empty allowlists', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'account-preferences-'))
   try {

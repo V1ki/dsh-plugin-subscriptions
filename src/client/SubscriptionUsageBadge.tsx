@@ -35,6 +35,7 @@ import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
 import { hostIcon } from './host-icons.js'
 import { useUsageBadgeMode } from './usage-badge-preferences.js'
+import { DISPLAY_NAME_CHANGED, type DisplayNameChange } from './display-name-events.js'
 
 /** DSH renamed the data icon in 0.1.7; retain older supported hosts too. */
 export function usageBadgeIcon(icons: {
@@ -277,10 +278,13 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
   // account actually logs out or a fetch succeeds but reports the window as
   // unsupported.
   const lastKnownRef = useRef(new Map<string, UsageWindow[]>())
+  const namesRevision = useRef(0)
+  const recentNames = useRef(new Map<SubscriptionProvider, { revision: number; name: string }>())
 
   const refresh = useCallback(async (): Promise<void> => {
     if (rpc === undefined || inflightRef.current) return
     inflightRef.current = true
+    const revision = namesRevision.current
     try {
       const statusResp = await callSubscriptionsAuth<{
         providers: Record<SubscriptionProvider, ProviderStatus>
@@ -344,16 +348,31 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
           windows,
         }
         const display = byProvider.get(provider)
-        if (display === undefined) byProvider.set(provider, { provider, name: PROVIDER_NAMES[provider], accounts: [row] })
+        if (display === undefined) byProvider.set(provider, { provider, name: statusResp.providers[provider]?.displayName || PROVIDER_NAMES[provider], accounts: [row] })
         else display.accounts.push(row)
       }
-      setDisplays([...byProvider.values()])
+      // A save during a slow quota poll wins over that poll's old status snapshot.
+      setDisplays([...byProvider.values()].map(row => {
+        const saved = recentNames.current.get(row.provider)
+        return saved && saved.revision > revision ? { ...row, name: saved.name } : row
+      }))
     } catch {
       // A failed poll must not crash the badge; keep last known state.
     } finally {
       inflightRef.current = false
     }
   }, [rpc])
+
+  useEffect(() => {
+    const update = (event: Event) => {
+      const { provider, displayName } = (event as CustomEvent<DisplayNameChange>).detail
+      recentNames.current.set(provider, { revision: ++namesRevision.current, name: displayName || PROVIDER_NAMES[provider] })
+      setDisplays(current => current.map(row => row.provider === provider
+        ? { ...row, name: displayName || PROVIDER_NAMES[provider] } : row))
+    }
+    window.addEventListener(DISPLAY_NAME_CHANGED, update)
+    return () => { window.removeEventListener(DISPLAY_NAME_CHANGED, update) }
+  }, [])
 
   useEffect(() => {
     mountedRef.current = true
