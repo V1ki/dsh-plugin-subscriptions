@@ -98,3 +98,27 @@ test('singleton and explicit families/tiers enforce account and model exclusion 
     assert.ok(raw.calls.includes('stream:b:m:/模型'))
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
+
+test('a timed-out discovery falls back to the account\'s last known catalog', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'account-timeout-'))
+  try {
+    class Hanging extends Raw {
+      known: string[] | undefined = ['m:/模型']
+      override listOwnModels(provider: string, account?: string, signal?: AbortSignal) {
+        if (account === undefined) return super.listOwnModels(provider, account)
+        return new Promise<{ provider: string; id: string; name: string }[]>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
+        })
+      }
+      async lastKnownOwnModels(provider: string) { return this.known?.map(id => ({ provider, id, name: 'Model' })) }
+    }
+    const settings = new ProviderSettingsStore(join(dir, 'settings.json'))
+    const raw = new Hanging()
+    const route = new AccountPreferencesAdapter({ provider: 'codex', adapter: raw, settings, accounts: async () => [{ key: 'a', label: 'A' }], pool: () => undefined, discoveryTimeoutMs: 20 })
+    assert.deepEqual((await route.listModels('codex')).map(model => model.id), ['m:/模型'])
+    await consume(route, 'm:/模型')
+    assert.ok(raw.calls.includes('stream:a:m:/模型'))
+    raw.known = undefined
+    await assert.rejects(consume(route, 'm:/模型'), /No eligible/)
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})

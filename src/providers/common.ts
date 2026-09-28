@@ -755,8 +755,13 @@ export function isDiscoveryAborted(error: unknown, signal?: AbortSignal): boolea
     && (error.name === 'AbortError' || error.name === 'TimeoutError')
 }
 
-/** Whether discovery failed because the access token was rejected. */
-function isDiscoveryAuthFailure(error: unknown): boolean {
+/**
+ * Whether discovery failed because the access token was rejected. After
+ * {@link discoverOrRetryAuth} this means the token was rejected AGAIN right
+ * after a forced refresh: the login is dead server-side (revoked) even though
+ * the refresh grant still answers, so the store keeps the session.
+ */
+export function isDiscoveryAuthFailure(error: unknown): boolean {
   return (error instanceof OAuthEndpointError && error.status === 401)
     || (error instanceof LlmError && error.code === 'AUTH')
 }

@@ -11,7 +11,7 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import { catalogStore, sanitizeSnapshot } from '../src/providers/catalog-store.js'
+import { accountCatalogStore, catalogStore, sanitizeSnapshot } from '../src/providers/catalog-store.js'
 
 async function tempStorePath(): Promise<string> {
   return join(await mkdtemp(join(tmpdir(), 'dsh-models-')), 'models.json')
@@ -155,4 +155,39 @@ test('sanitizeSnapshot drops malformed snapshots wholesale', () => {
   ]) {
     assert.equal(sanitizeSnapshot(malformed), undefined, JSON.stringify(malformed))
   }
+})
+
+test('account catalog store keeps per-account snapshots apart from the provider entry', async () => {
+  const path = await tempStorePath()
+  const provider = catalogStore('codex', path)
+  const key = '["379d","user","user-m09"]'
+  const account = accountCatalogStore('codex', key, path)
+  const other = accountCatalogStore('codex', 'other', path)
+  await provider.save({ at: 1, models: [{ id: 'gpt-5.1', name: 'GPT-5.1' }] })
+  await account.save({ at: 2, models: [{ id: 'gpt-6-astra', name: 'GPT-6 Astra', priority: 1 }] })
+  await other.save({ at: 3, models: [{ id: 'gpt-5.5', name: 'GPT-5.5' }] })
+
+  assert.deepEqual((await provider.load())?.models.map(model => model.id), ['gpt-5.1'])
+  assert.deepEqual((await account.load())?.models.map(model => model.id), ['gpt-6-astra'])
+  assert.deepEqual((await other.load())?.models.map(model => model.id), ['gpt-5.5'])
+  assert.equal(await accountCatalogStore('grok', key, path).load(), undefined)
+
+  await account.clear()
+  assert.equal(await account.load(), undefined)
+  assert.deepEqual((await other.load())?.models.map(model => model.id), ['gpt-5.5'], 'clearing one account keeps its siblings')
+  assert.deepEqual((await provider.load())?.models.map(model => model.id), ['gpt-5.1'])
+  await provider.clear()
+  assert.deepEqual((await other.load())?.models.map(model => model.id), ['gpt-5.5'], 'clearing the provider entry keeps account snapshots')
+})
+
+test('account catalog store treats a malformed accounts section as absent', async () => {
+  const path = await tempStorePath()
+  await writeFile(path, JSON.stringify({ codex: { at: 1, models: [{ id: 'a', name: 'A' }] }, accounts: [] }))
+  const account = accountCatalogStore('codex', 'x', path)
+  assert.equal(await account.load(), undefined)
+  await account.clear()
+  await account.save({ at: 2, models: [{ id: 'b', name: 'B' }] })
+  const file = JSON.parse(await readFile(path, 'utf8')) as { codex: unknown; accounts: { codex: Record<string, unknown> } }
+  assert.deepEqual(Object.keys(file.accounts.codex), ['x'])
+  assert.notEqual(file.codex, undefined, 'the provider entry survives the rewrite')
 })

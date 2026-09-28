@@ -31,6 +31,8 @@ interface Options {
   settings: ProviderSettingsStore
   accounts: () => Promise<readonly { key: string; label: string }[]>
   pool: () => PoolAdapter | undefined
+  /** Per-account discovery bound (defaults to {@link DISCOVERY_TIMEOUT_MS}; tests shorten it). */
+  discoveryTimeoutMs?: number
 }
 
 /** Keeps the registered route separate from raw adapters and pool member seams. */
@@ -41,7 +43,14 @@ export class AccountPreferencesAdapter extends LlmAdapter {
     return accounts && Object.hasOwn(accounts, account) ? accounts[account] : undefined
   }
   private async models(account: string): Promise<readonly LlmModelInfo[]> {
-    return await withTimeout(signal => this.options.adapter.listOwnModels(this.options.provider, account, signal), DISCOVERY_TIMEOUT_MS) ?? []
+    const models = await withTimeout(
+      signal => this.options.adapter.listOwnModels(this.options.provider, account, signal),
+      this.options.discoveryTimeoutMs ?? DISCOVERY_TIMEOUT_MS,
+    )
+    if (models !== undefined) return models
+    // Discovery timed out: the catalog this account listed last time beats
+    // "no models", which would fail the turn with "No eligible account".
+    return await this.options.adapter.lastKnownOwnModels?.(this.options.provider, account) ?? []
   }
   private async requireAccount(account: string, model: string, independent: boolean): Promise<void> {
     if (!(await this.options.accounts()).some(entry => entry.key === account)

@@ -27,8 +27,20 @@ export function modelsFilePath(): string {
   return dshHomePath('plugins', 'subscriptions', 'models.json')
 }
 
-/** The raw file shape: one unvalidated snapshot per provider. */
-type CatalogFile = Partial<Record<ProviderId, unknown>>
+/**
+ * The raw file shape: one unvalidated snapshot per provider (the default
+ * account's), plus `accounts[provider][account]` for every other account.
+ */
+type CatalogFile = Partial<Record<ProviderId, unknown>> & { accounts?: unknown }
+
+/** The per-account section of the file, or undefined when absent or malformed. */
+function accountSection(store: CatalogFile, provider: ProviderId): Record<string, unknown> | undefined {
+  const accounts = store.accounts
+  if (typeof accounts !== 'object' || accounts === null || Array.isArray(accounts)) return undefined
+  const section = (accounts as Record<string, unknown>)[provider]
+  if (typeof section !== 'object' || section === null || Array.isArray(section)) return undefined
+  return section as Record<string, unknown>
+}
 
 /** Validate one persisted reasoning block, or undefined when malformed. */
 function sanitizeReasoning(value: unknown): NonNullable<DiscoveredModel['reasoning']> | undefined {
@@ -182,6 +194,43 @@ export function catalogStore(provider: ProviderId, path = modelsFilePath()): Cat
       const store = await readCatalogFile(path)
       if (store[provider] === undefined) return
       delete store[provider]
+      await writeCatalogFile(store, path)
+    },
+  }
+}
+
+/**
+ * The durable half of one NON-default account's catalog cache. The provider
+ * entry belongs to the default account; every other account keeps its own
+ * snapshot under `accounts[provider][account]`, so a working secondary login
+ * survives restarts and network failures even when the default login is dead.
+ * @param provider - the provider route.
+ * @param account - the canonical account key.
+ * @param path - store file path; defaults to {@link modelsFilePath}.
+ * @returns the persistence hooks for {@link ModelCatalogCache}.
+ */
+export function accountCatalogStore(provider: ProviderId, account: string, path = modelsFilePath()): CatalogPersistence {
+  return {
+    async load() {
+      const section = accountSection(await readCatalogFile(path), provider)
+      return section !== undefined && Object.hasOwn(section, account) ? sanitizeSnapshot(section[account]) : undefined
+    },
+    async save(snapshot) {
+      const store = await readCatalogFile(path)
+      const accounts = typeof store.accounts === 'object' && store.accounts !== null && !Array.isArray(store.accounts)
+        ? store.accounts as Record<string, unknown>
+        : {}
+      const section = { ...accountSection(store, provider) ?? {}, [account]: snapshot }
+      store.accounts = { ...accounts, [provider]: section }
+      await writeCatalogFile(store, path)
+    },
+    async clear() {
+      const store = await readCatalogFile(path)
+      const section = accountSection(store, provider)
+      if (section === undefined || !Object.hasOwn(section, account)) return
+      const rest = { ...section }
+      delete rest[account]
+      store.accounts = { ...store.accounts as Record<string, unknown>, [provider]: rest }
       await writeCatalogFile(store, path)
     },
   }

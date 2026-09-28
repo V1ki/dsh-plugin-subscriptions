@@ -42,6 +42,11 @@ export interface AccountAwareAdapter extends LlmAdapter {
    */
   listOwnModels(provider: string, account?: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]>
   /**
+   * The last catalog one account successfully listed, with no network.
+   * Routing falls back to it when a live `listOwnModels` times out.
+   */
+  lastKnownOwnModels?(provider: string, account: string): Promise<readonly LlmModelInfo[] | undefined>
+  /**
    * Capability resolution of the provider's OWN models, bypassing the pool
    * delegation. The pool resolves its members through this — an account pool
    * reuses the catalog wire id (e.g. `gpt-5.4`), so resolveModel would

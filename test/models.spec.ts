@@ -1677,6 +1677,114 @@ test('withTimeout returns the value when work finishes in time', async () => {
   assert.deepEqual(models, ['ok'])
 })
 
+const STALE_CODEX_SNAPSHOT: CatalogSnapshot = {
+  at: 1,
+  models: [{ id: 'gpt-6-astra', name: 'GPT-6 Astra', priority: 1 }, { id: 'gpt-5.5', name: 'GPT-5.5', priority: 12 }],
+}
+
+test('codex discovery failure serves the last discovered catalog instead of the built-in one', async () => {
+  // The default account's persisted snapshot is stale (TTL lapsed), so the
+  // list refetches; the network is down. The account listed gpt-6-astra
+  // last time, and the built-in catalog does not know that model at all:
+  // demoting to it would fail every request with "No eligible account".
+  const warnings: string[] = []
+  const { fetchFn } = fakeFetch({ error: 'boom' }, 500)
+  const adapter = new CodexAdapter({
+    models: STATIC_CODEX,
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens(codexSession),
+    discovery: true,
+    fetchFn,
+    catalogStore: memoryCatalogStore(STALE_CODEX_SNAPSHOT),
+    onWarn: message => { warnings.push(message) },
+  })
+  const models = await adapter.listOwnModels('codex', 'acct')
+  assert.deepEqual(models.map(model => model.id), ['gpt-6-astra', 'gpt-5.5'])
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0], /using the last discovered catalog/)
+  assert.deepEqual(await adapter.lastKnownOwnModels('codex', 'acct').then(known => known?.map(model => model.id)), ['gpt-6-astra', 'gpt-5.5'])
+})
+
+test('codex hides an account whose token is rejected again after a forced refresh', async () => {
+  // A revoked login: the refresh grant still answers, but /models rejects
+  // the new token too. Listing the built-in catalog would route requests to
+  // the dead account and show phantom rows in the picker.
+  const warnings: string[] = []
+  const { fetchFn, calls } = fakeFetch({ error: { code: 'token_revoked' } }, 401)
+  const store = memoryCatalogStore(STALE_CODEX_SNAPSHOT)
+  const adapter = new CodexAdapter({
+    models: STATIC_CODEX,
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens(codexSession),
+    discovery: true,
+    fetchFn,
+    catalogStore: store,
+    onWarn: message => { warnings.push(message) },
+  })
+  assert.deepEqual(await adapter.listOwnModels('codex', 'acct'), [])
+  assert.equal(calls(), 2, 'one attempt, one retry after the forced refresh')
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0], /rejected the login/)
+  assert.equal(store.saved(), undefined, 'the invalidated catalog is dropped from disk too')
+  assert.equal(await adapter.lastKnownOwnModels('codex', 'acct'), undefined)
+})
+
+test('codex persists a non-default account catalog and reads it back when discovery fails', async () => {
+  const stores = new Map<string, ReturnType<typeof memoryCatalogStore>>()
+  const storeFor = (account: string): ReturnType<typeof memoryCatalogStore> => {
+    const existing = stores.get(account)
+    if (existing !== undefined) return existing
+    const store = memoryCatalogStore()
+    stores.set(account, store)
+    return store
+  }
+  const live = new CodexAdapter({
+    models: STATIC_CODEX,
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens(codexSession),
+    discovery: true,
+    fetchFn: fakeFetch(CODEX_MODELS_PAYLOAD).fetchFn,
+    catalogStore: memoryCatalogStore(),
+    accountCatalogStore: storeFor,
+  })
+  // 'other' is not the default ('acct'), so its snapshot lands in its own store.
+  const discovered = await live.listOwnModels('codex', 'other')
+  assert.ok(discovered.length > 0)
+  assert.deepEqual(stores.get('other')?.saved()?.models.map(model => model.id), discovered.map(model => model.id))
+  assert.equal(stores.has('acct'), false, 'the default account keeps using the provider entry')
+
+  // A restart with the network down: the persisted snapshot is stale, the
+  // refetch fails, and the account still lists what it listed before.
+  const warnings: string[] = []
+  stores.get('other')!.save({ ...stores.get('other')!.saved()!, at: 1 })
+  const restarted = new CodexAdapter({
+    models: STATIC_CODEX,
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens(codexSession),
+    discovery: true,
+    fetchFn: fakeFetch({ error: 'boom' }, 500).fetchFn,
+    catalogStore: memoryCatalogStore(),
+    accountCatalogStore: storeFor,
+    onWarn: message => { warnings.push(message) },
+  })
+  assert.deepEqual((await restarted.listOwnModels('codex', 'other')).map(model => model.id), discovered.map(model => model.id))
+  assert.match(warnings[0], /last discovered catalog/)
+
+  // Logging the account out drops its snapshot from disk as well.
+  restarted.clearAccountCatalog('other')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(stores.get('other')?.saved(), undefined)
+})
+
+test('codex lastKnownOwnModels is empty before any discovery and after logout', async () => {
+  const adapter = codexAdapter({ session: codexSession, fetchFn: fakeFetch(CODEX_MODELS_PAYLOAD).fetchFn })
+  assert.equal(await adapter.lastKnownOwnModels('codex', 'acct'), undefined)
+  await adapter.listOwnModels('codex', 'acct')
+  assert.ok((await adapter.lastKnownOwnModels('codex', 'acct'))!.length > 0)
+  const loggedOut = codexAdapter({ fetchFn: fakeFetch(CODEX_MODELS_PAYLOAD).fetchFn })
+  assert.equal(await loggedOut.lastKnownOwnModels('codex', 'acct'), undefined)
+})
+
 test('oauthEndpointError reads the code from both the RFC 6749 and the OpenAI envelope shapes', async () => {
   const rfc = await oauthEndpointError(
     new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'gone' }), { status: 400 }),
