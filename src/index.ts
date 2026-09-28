@@ -334,13 +334,26 @@ export class SubscriptionsAuthController implements AuthController {
   /** Last login failure per provider, surfaced as `detail` until the next success. */
   private lastError = new Map<ProviderId, string>()
   /**
-   * Device-flow logins whose poll already settled but whose token exchange +
-   * persist is still running. Between those two moments the attempt is gone
-   * from the flow manager (busy=false) while no session exists yet
-   * (loggedIn=false) — counting this window as busy keeps the Settings page
-   * polling until the card can show the real outcome.
+   * Logins per provider whose attempt has left its flow manager (the code
+   * arrived, or the device poll settled) but whose token exchange + persist
+   * is still running. In that window the flow manager says busy=false while
+   * no session exists yet (loggedIn=false); the Settings page polls only
+   * while busy, so without counting it the card would stop at "not logged
+   * in" one tick before the session lands and never refresh on its own. A
+   * count rather than a set: a superseded attempt finishing late must not
+   * clear the window of the attempt that replaced it.
    */
-  private finalizing = new Set<ProviderId>()
+  private finalizing = new Map<ProviderId, number>()
+
+  private beginFinalizing(provider: ProviderId): void {
+    this.finalizing.set(provider, (this.finalizing.get(provider) ?? 0) + 1)
+  }
+
+  private endFinalizing(provider: ProviderId): void {
+    const left = (this.finalizing.get(provider) ?? 1) - 1
+    if (left <= 0) this.finalizing.delete(provider)
+    else this.finalizing.set(provider, left)
+  }
 
   /** In-flight OAuth completions, one per provider at most. */
   private completions = new Map<ProviderId, Promise<void>>()
@@ -468,7 +481,7 @@ export class SubscriptionsAuthController implements AuthController {
       // Device flow: no redirect URI — the UI shows the user code while the
       // background task polls GitHub for the token.
       const attempt = await this.deviceFlows.start(provider, copilotDeviceFlow())
-      this.finalizing.add(provider)
+      this.beginFinalizing(provider)
       void this.completeDevice(provider, attempt)
       return { authorizeUrl: attempt.verificationUrl, userCode: attempt.userCode }
     }
@@ -480,6 +493,7 @@ export class SubscriptionsAuthController implements AuthController {
     const attempt = await this.flows.start(provider, spec)
     // Claimed only once the attempt exists: a rejected `start()` (one attempt
     // per provider) must not supersede the attempt already running.
+    this.beginFinalizing(provider)
     this.completions.set(provider, this.complete(provider, attempt, this.claim(provider)))
     return { authorizeUrl: attempt.authorizeUrl }
   }
@@ -527,6 +541,8 @@ export class SubscriptionsAuthController implements AuthController {
       if (!(error instanceof Error && error.message === 'login cancelled')) {
         this.lastError.set(provider, errorChain(error))
       }
+    } finally {
+      this.endFinalizing(provider)
     }
   }
 
@@ -544,11 +560,12 @@ export class SubscriptionsAuthController implements AuthController {
         this.lastError.set(provider, errorChain(error))
       }
     } finally {
-      this.finalizing.delete(provider)
+      this.endFinalizing(provider)
     }
   }
 
-  private exchange(provider: ProviderId, code: string, attempt: OAuthAttempt): Promise<StoredSession> {
+  /** Token exchange for one OAuth code; `protected` so tests can stand in for the provider endpoint. */
+  protected exchange(provider: ProviderId, code: string, attempt: OAuthAttempt): Promise<StoredSession> {
     switch (provider) {
       case 'codex':
         return exchangeCodexCode(code, attempt.pkce.verifier, attempt.redirectUri)

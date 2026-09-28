@@ -31,7 +31,7 @@ import {
   CLAUDE_AUTHORIZE_URL, CLAUDE_CALLBACK_PATH, CLAUDE_CLIENT_ID, CLAUDE_SCOPE, CLAUDE_TOKEN_URL,
 } from '../src/providers/claude.js'
 import { accountKeyOf, authFilePath, listAccounts } from '../src/auth/store.js'
-import type { ClaudeSession } from '../src/auth/store.js'
+import type { ClaudeSession, StoredSession } from '../src/auth/store.js'
 
 const TEMP_DIRS: string[] = []
 
@@ -283,6 +283,49 @@ test('login(claude): credentials absent → OAuth fallback with Claude Code para
       assert.ok((params.get('state') ?? '').length >= 43, 'state carries at least 32 bytes of entropy')
     } finally {
       await controller.cancel('claude')
+    }
+  })
+})
+
+test('login(codex): status stays busy through the token exchange so the Settings page keeps polling', async () => {
+  await inIsolatedHome(async () => {
+    // The loopback flow drops its attempt the moment the code arrives, while
+    // the exchange + persist still runs for seconds on a slow link. The page
+    // polls only while busy: a poll landing in that window used to see
+    // busy=false with no account, stop polling, and leave the card at
+    // "not logged in" although the session landed one second later.
+    let releaseExchange: ((session: StoredSession) => void) | undefined
+    let exchanged = 0
+    class Probe extends SubscriptionsAuthController {
+      protected override exchange(): Promise<StoredSession> {
+        exchanged += 1
+        return new Promise(resolve => { releaseExchange = resolve })
+      }
+    }
+    const flows = new OAuthFlowManager()
+    const controller = new Probe(flows, new DeviceFlowManager(), () => {}, () => undefined, {}, () => undefined)
+    try {
+      const { authorizeUrl } = await controller.login('codex')
+      const attempt = flows.pending('codex')
+      assert.ok(attempt !== undefined)
+      assert.equal((await controller.status('codex')).busy, true, 'busy while waiting for the code')
+
+      attempt.manual(`${attempt.redirectUri}?code=abc&state=${new URL(authorizeUrl).searchParams.get('state') ?? ''}`)
+      await new Promise(resolve => setImmediate(resolve))
+      assert.equal(flows.isBusy('codex'), false, 'the flow manager has already let go of the attempt')
+      assert.equal(exchanged, 1, 'the exchange is running')
+      const during = await controller.status('codex')
+      assert.equal(during.busy, true, 'the exchange window still reads as busy')
+      assert.equal(during.accounts.length, 0)
+
+      releaseExchange!({ accessToken: 'at', refreshToken: 'rt', expiresAt: Date.now() + 3600_000, accountId: 'acct-1', emailAddress: 'me@example.com' } as StoredSession)
+      await new Promise(resolve => setTimeout(resolve, 50))
+      const after = await controller.status('codex')
+      assert.equal(after.busy, false, 'settled once the session is stored')
+      assert.equal(after.accounts.length, 1)
+      assert.equal(after.accounts[0]?.account, 'me@example.com')
+    } finally {
+      await controller.cancel('codex')
     }
   })
 })
