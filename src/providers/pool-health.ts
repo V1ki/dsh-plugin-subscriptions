@@ -41,12 +41,14 @@ export type PoolFailureAction =
 
 /**
  * Providers whose quota windows are model-scoped, so a quota failure on one
- * model says nothing about its siblings (Claude's Opus/Sonnet lanes). Every
- * other provider meters the account as a whole: one member hitting the wall
- * means its siblings on the SAME account would too, so the cooldown parks
- * the account (other accounts of the provider are unaffected).
+ * model says nothing about its siblings (Claude's Opus/Sonnet lanes;
+ * Antigravity's per-model quotas, whose 429 names the exhausted model and
+ * can disclose a reset 35 hours out that must not park its Gemini siblings).
+ * Every other provider meters the account as a whole: one member hitting the
+ * wall means its siblings on the SAME account would too, so the cooldown
+ * parks the account (other accounts of the provider are unaffected).
  */
-const MODEL_SCOPED_QUOTA_PROVIDERS: ReadonlySet<ProviderId> = new Set(['claude'])
+const MODEL_SCOPED_QUOTA_PROVIDERS: ReadonlySet<ProviderId> = new Set(['claude', 'antigravity'])
 
 /** The `retry-after` an adapter propagated through `httpLlmError`, when any. */
 function retryAfterMs(error: LlmError): number | undefined {

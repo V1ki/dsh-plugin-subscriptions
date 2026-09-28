@@ -43,6 +43,17 @@ test('classifyPoolFailure: claude quota failures stay member-scoped (per-model l
   })
 })
 
+test('classifyPoolFailure: an Antigravity quota parks only the exhausted model', () => {
+  // One model's 35-hour quota reset must not park the account's other models.
+  const error = new LlmError('quota', 'RATE_LIMIT', { providerRetryAfterMs: 35 * 3_600_000 })
+  assert.deepEqual(classifyPoolFailure(error, 'antigravity'), {
+    action: 'switch',
+    cooldownMs: 35 * 3_600_000,
+    reason: 'RATE_LIMIT',
+    scope: 'member',
+  })
+})
+
 test('classifyPoolFailure: the provider retry-after wins over the default cooldown', () => {
   const error = new LlmError('slow down', 'RATE_LIMIT', { providerRetryAfterMs: 42_000 })
   assert.deepEqual(classifyPoolFailure(error, 'codex'), {
