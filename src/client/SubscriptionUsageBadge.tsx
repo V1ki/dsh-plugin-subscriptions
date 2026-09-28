@@ -33,6 +33,7 @@ import type { AccountStatus, ProviderStatus, ProviderUsage, SubscriptionProvider
 import type { ModelDirectoriesLike } from './SpeedSelect.js'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
+import { hostIcon } from './host-icons.js'
 import { useUsageBadgeMode } from './usage-badge-preferences.js'
 
 /** DSH renamed the data icon in 0.1.7; retain older supported hosts too. */
@@ -40,7 +41,7 @@ export function usageBadgeIcon(icons: {
   IconDataOutlineRegular?: ComponentType
   IconDataOutline16?: ComponentType
 }): ComponentType {
-  return icons.IconDataOutlineRegular ?? icons.IconDataOutline16 ?? (() => null)
+  return hostIcon(icons, 'DataOutline')
 }
 const UsageBadgeIcon = usageBadgeIcon(primitives)
 
