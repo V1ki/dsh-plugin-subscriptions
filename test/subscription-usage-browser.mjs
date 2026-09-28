@@ -52,7 +52,12 @@ try {
   await badge.click()
   await panel.waitFor()
   const anti = panel.locator('section').filter({ hasText: 'Antigravity' })
-  assert.equal(await anti.locator('dt:visible').count(), 0)
+  // The dialog follows the retained subscription the badge shows: first, with
+  // its model previewed, but not tagged current while an API model is selected.
+  assert.match(await panel.locator('section').first().innerText(), /^Antigravity/)
+  assert.equal(await anti.getByText('current', { exact: true }).count(), 0)
+  assert.equal(await anti.locator('dt:visible').count(), 1)
+  assert.match(await anti.locator('dt:visible').innerText(), /gemini-model-29/)
   await anti.locator('summary').click()
   assert.equal(await anti.locator('dt:visible').count(), 30)
   await page.keyboard.press('Escape')
@@ -75,6 +80,8 @@ try {
   assert.equal(await control.inputValue(), 'hidden')
   await choose('codex', 'codex')
   assert.equal(await badge.count(), 0)
+  // A page that loads hidden never asks for usage; showing it refreshes at once.
+  assert.equal(await page.evaluate(() => document.documentElement.dataset.statusCalls), undefined)
   await control.selectOption('recent')
   await badge.waitFor()
   assert.equal(await page.getByRole('dialog').count(), 0, 'unhiding does not reopen the previous dialog')

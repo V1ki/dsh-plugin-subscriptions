@@ -13,12 +13,14 @@ const selections = {
 }
 let selection = selections.api
 let reads = 0
+let statusCalls = 0
 const currentModel = async () => {
   document.documentElement.dataset.modelReads = String(++reads)
   document.documentElement.dataset.lastRead = selection.provider
   return selection
 }
 const rpc = { call: async (_channel: string, method: string, payload: { provider?: string }) => {
+  if (method.endsWith('.status')) document.documentElement.dataset.statusCalls = String(++statusCalls)
   if (method.endsWith('.status')) return { ok: true, value: { providers: {
     codex: { accounts: [{ key: 'codex-test', isDefault: true }] },
     grok: { accounts: [{ key: 'grok-test', isDefault: true }] },

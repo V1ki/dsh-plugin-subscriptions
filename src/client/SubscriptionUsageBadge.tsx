@@ -356,13 +356,16 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
 
   useEffect(() => {
     mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+
+  // Hidden renders nothing, so it polls nothing; showing it again refreshes at once.
+  useEffect(() => {
+    if (displayMode === 'hidden') return
     void refresh()
     const timer = setInterval(() => { void refresh() }, USAGE_POLL_INTERVAL_MS)
-    return () => {
-      mountedRef.current = false
-      clearInterval(timer)
-    }
-  }, [refresh])
+    return () => { clearInterval(timer) }
+  }, [refresh, displayMode])
 
   useEffect(() => {
     if (currentRef.current === undefined) return
@@ -429,7 +432,9 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
   if (displayMode === 'hidden' || collapsed.length === 0) return seat
 
   const label = compactSegment(collapsed[0]!, badgeSelection?.model, translate)
-  const expanded = expandedDisplays(displays, current)
+  // The dialog opens from the badge, so it follows the provider and model the
+  // badge shows (a retained subscription when the current model is not one).
+  const expanded = expandedDisplays(displays, badgeSelection?.provider)
   const title = translate('usageBadgeTitle')
 
   const toggle = (): void => {
@@ -485,9 +490,9 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
                     </div>
                   )}
                   <AccountWindows
-                    key={`${d.provider}:${selection?.model ?? ''}`}
+                    key={`${d.provider}:${badgeSelection?.model ?? ''}`}
                     windows={account.windows}
-                    model={d.provider === current ? selection?.model : undefined}
+                    model={d.provider === badgeSelection?.provider ? badgeSelection.model : undefined}
                     provider={d.provider}
                     translate={translate}
                   />
