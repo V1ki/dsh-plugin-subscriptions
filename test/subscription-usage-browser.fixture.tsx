@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { SubscriptionUsageBadge } from '../src/client/SubscriptionUsageBadge.js'
 import type { SubscriptionUsageBadgeInjected } from '../src/client/SubscriptionUsageBadge.js'
 import { UsageBadgeDisplaySetting } from '../src/client/UsageBadgeDisplaySetting.js'
+import { notifyDisplayNameChange } from '../src/client/display-name-events.js'
 import { en, zh } from '../src/client/locales.js'
 
 const selections = {
@@ -12,6 +13,7 @@ const selections = {
   antigravity: { provider: 'antigravity', model: 'gemini-model-29' },
 }
 let selection = selections.api
+let grokDisplayName: string | undefined
 let reads = 0
 let statusCalls = 0
 const currentModel = async () => {
@@ -23,7 +25,7 @@ const rpc = { call: async (_channel: string, method: string, payload: { provider
   if (method.endsWith('.status')) document.documentElement.dataset.statusCalls = String(++statusCalls)
   if (method.endsWith('.status')) return { ok: true, value: { providers: {
     codex: { accounts: [{ key: 'codex-test', isDefault: true }] },
-    grok: { accounts: [{ key: 'grok-test', isDefault: true }] },
+    grok: { displayName: grokDisplayName, accounts: [{ key: 'grok-test', isDefault: true }] },
     antigravity: { accounts: [{ key: 'anti-test', isDefault: true }] },
   } } }
   if (method.endsWith('.usage')) return { ok: true, value: {
@@ -40,6 +42,8 @@ function App() {
   const t = (key: keyof typeof en, params?: Record<string, unknown>) => dictionary[key]
     .replace(/\{(\w+)\}/g, (_, name: string) => String(params?.[name] ?? ''))
   return <>
+    <button onClick={() => { grokDisplayName = '我的 Grok'; notifyDisplayNameChange('grok', grokDisplayName) }}>Rename Grok</button>
+    <button onClick={() => { grokDisplayName = undefined; notifyDisplayNameChange('grok', '') }}>Reset Grok</button>
     <button onClick={() => setLocale(locale === 'en' ? 'zh' : 'en')}>Locale</button>
     {Object.entries(selections).map(([name, next]) => <button key={name} onClick={() => { selection = next }}>{name}</button>)}
     <UsageBadgeDisplaySetting t={t} />

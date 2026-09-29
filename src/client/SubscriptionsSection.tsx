@@ -46,6 +46,7 @@ export interface AccountStatus {
 
 /** One provider's login state as answered by the `status` endpoint. */
 export interface ProviderStatus {
+  displayName?: string
   busy: boolean
   accounts: AccountStatus[]
   detail?: string
@@ -823,7 +824,8 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
           <div key={id} style={styles.card}>
             <div style={styles.cardHeader}>
               <span style={{ ...styles.dot, background: dotColor(status) }} />
-              <span style={styles.name}>{name}</span>
+              <span style={styles.name}>{status?.displayName || name}</span>
+              {status?.displayName && <small style={styles.statusLine}>{name}</small>}
               <ClientVersionTag clientVersion={status?.clientVersion} t={t} />
             </div>
             <p style={styles.statusLine}>{statusText(t, status)}</p>
@@ -990,7 +992,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
         )
       })}
       {managedProvider && <ProviderAccountManager provider={managedProvider.id} name={managedProvider.name}
-        rpc={rpc} t={t} onClose={() => setManagedProvider(undefined)} />}
+        rpc={rpc} t={t} onClose={() => { setManagedProvider(undefined); void refresh() }} />}
       {proxyOpen && (
         <div style={styles.modalOverlay} onClick={() => setProxyOpen(false)}>
           <div style={styles.modal} onClick={event => event.stopPropagation()}>

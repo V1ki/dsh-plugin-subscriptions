@@ -1,5 +1,5 @@
 import { LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
-import type { GenerateOptions, LlmModelInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { ProviderId } from '../auth/store.js'
 import type { ProviderSettingsStore, AccountPreferences } from '../provider-settings.js'
 import type { AccountAwareAdapter } from './accounts.js'
@@ -38,6 +38,11 @@ interface Options {
 /** Keeps the registered route separate from raw adapters and pool member seams. */
 export class AccountPreferencesAdapter extends LlmAdapter {
   constructor(private readonly options: Options) { super() }
+  override providerInfo(provider: string): LlmProviderInfo {
+    const info = this.options.adapter.providerInfo(provider)
+    // Native model groups read provider metadata, separately from model names.
+    return { ...info, name: this.options.settings.get(this.options.provider).displayName ?? info.name }
+  }
   private preference(account: string): AccountPreferences | undefined {
     const accounts = this.options.settings.get(this.options.provider).accounts
     return accounts && Object.hasOwn(accounts, account) ? accounts[account] : undefined
@@ -102,7 +107,7 @@ export class AccountPreferencesAdapter extends LlmAdapter {
         if (accountAllowsPool(preferences, model.id) && this.options.settings.visible(this.options.provider, model.id) && !result.has(model.id)) result.set(model.id, model)
         if (preferences?.independentEntry === true && this.options.settings.visible(this.options.provider, model.id)) {
           const id = accountModelId(key, model.id)
-          result.set(id, { ...model, id, name: `${preferences.alias || label} · ${model.name}` })
+          result.set(id, { ...model, id, name: `${preferences.alias || label} · ${this.options.settings.modelName(this.options.provider, model.id, model.name)}` })
         }
       }
     }
@@ -111,7 +116,9 @@ export class AccountPreferencesAdapter extends LlmAdapter {
       try { await this.options.pool()!.resolveModel(provider, model.id); result.set(model.id, model) } catch { /* excluded tier */ }
     }
     const priority = (model: LlmModelInfo): number => (model as LlmModelInfo & { priority?: number }).priority ?? Number.MAX_SAFE_INTEGER
-    return [...result.values()].sort((left, right) => priority(left) - priority(right))
+    return [...result.values()].map(model => ({ ...model,
+      name: this.options.settings.modelName(this.options.provider, model.id, model.name),
+    })).sort((left, right) => priority(left) - priority(right))
   }
   override async resolveModel(provider: string, id: string): Promise<LlmResolvedModelInfo> {
     const independent = parseAccountModelId(id)
@@ -119,11 +126,13 @@ export class AccountPreferencesAdapter extends LlmAdapter {
       await this.requireAccount(independent.account, independent.model, true)
       const info = await this.options.adapter.resolveOwnModel(provider, independent.model, independent.account)
       const label = (await this.options.accounts()).find(entry => entry.key === independent.account)?.label ?? independent.account
-      return { ...info, id, name: `${this.preference(independent.account)?.alias || label} · ${info.name}` }
+      return { ...info, id, name: `${this.preference(independent.account)?.alias || label} · ${this.options.settings.modelName(this.options.provider, independent.model, info.name)}` }
     }
     const pool = this.options.pool()
-    if (pool && await pool.owns(this.options.provider, id)) return pool.resolveModel(provider, id)
-    return this.options.adapter.resolveOwnModel(provider, id, await this.fallback(id))
+    const info = pool && await pool.owns(this.options.provider, id)
+      ? await pool.resolveModel(provider, id)
+      : await this.options.adapter.resolveOwnModel(provider, id, await this.fallback(id))
+    return { ...info, name: this.options.settings.modelName(this.options.provider, id, info.name) }
   }
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     const independent = parseAccountModelId(options.model)
