@@ -618,7 +618,7 @@ export async function discoverAcrossAccounts(
   return undefined
 }
 
-/** How long a discovered catalog is trusted before re-fetching. */
+/** Skip scheduled refreshes when the last successful catalog is this recent. */
 export const DISCOVERY_TTL_MS = 5 * 60_000
 
 /** A durable snapshot of one provider's discovered catalog. */
@@ -643,10 +643,10 @@ export interface CatalogPersistence {
  * when to REFRESH; it never makes the cache forget: capability metadata
  * (reasoning efforts) must stay stable for a session that selected an effort,
  * or mid-conversation calls fail UNSUPPORTED_REASONING_EFFORT the moment the
- * cache goes stale. `listModels` awaits freshness via {@link get};
- * `resolveModel` uses {@link resolve}, which serves the last-known catalog
- * while a stale entry refreshes in the background, and only awaits the fetch
- * when nothing is known yet. An optional {@link CatalogPersistence} seeds the
+ * cache goes stale. `get` awaits freshness unless its caller opts into
+ * cache-only picker/routing reads. The startup/hourly job owns automatic
+ * refreshes; `resolveModel` uses {@link resolve}, which serves the last-known
+ * catalog and only awaits the fetch when nothing is known yet. An optional {@link CatalogPersistence} seeds the
  * last-known state across restarts and receives every successful fetch. A 401
  * that still fails after a forced token refresh must call {@link invalidate}.
  */
@@ -663,6 +663,7 @@ export class ModelCatalogCache {
   constructor(
     private readonly persistence?: CatalogPersistence,
     private readonly ttlMs = DISCOVERY_TTL_MS,
+    private readonly onChanged?: () => void,
   ) {}
 
   /**
@@ -704,10 +705,12 @@ export class ModelCatalogCache {
     const pending = fetcher()
       .then((models) => {
         if (this.generation !== gen) return models
+        const changed = this.entry === undefined || JSON.stringify(this.entry.models) !== JSON.stringify(models)
         const snapshot: CatalogSnapshot = { at: Date.now(), models }
         this.entry = snapshot
         // Write-through is fire-and-forget: a failed save only costs durability.
         void this.persistence?.save(snapshot).catch(() => undefined)
+        if (changed) this.onChanged?.()
         return models
       })
       .finally(() => {
@@ -720,19 +723,27 @@ export class ModelCatalogCache {
   /**
    * Return the cached catalog when fresh, otherwise fetch and cache it.
    * @param fetcher - performs the provider's model-list request.
+   * @param preferCached - serve saved metadata; the startup/hourly job owns automatic refreshes.
    * @returns the discovered models.
    * @throws the fetcher's failure (the `listModels` caller warns and falls back).
    */
-  async get(fetcher: () => Promise<DiscoveredModel[]>): Promise<readonly DiscoveredModel[]> {
+  async get(fetcher: () => Promise<DiscoveredModel[]>, preferCached = false): Promise<readonly DiscoveredModel[]> {
     await this.ensureSeeded()
-    return this.cached() ?? this.refresh(fetcher)
+    const fresh = this.cached()
+    if (fresh !== undefined) return fresh
+    if (preferCached && this.entry !== undefined) {
+      // Menu reads do not increase network frequency. Scheduled and explicit
+      // refreshes call get without preferCached and still honor the five-minute TTL.
+      return this.entry.models
+    }
+    return this.refresh(fetcher)
   }
 
   /**
    * The models for capability resolution. A fresh cache answers directly; a
-   * stale one answers immediately from the last-known catalog while a
-   * background refresh runs (a mid-conversation `resolveModel` must neither
-   * block on nor fail with the network); a cold cache awaits one fetch.
+   * stale one answers immediately from the last-known catalog. Only the
+   * startup/hourly job refreshes known metadata automatically; a cold cache
+   * awaits one fetch.
    * @param fetcher - performs the provider's model-list request.
    * @returns the models, or `undefined` when nothing is known (the caller
    *   falls back to its static metadata). Never throws.
@@ -742,11 +753,7 @@ export class ModelCatalogCache {
     const fresh = this.cached()
     if (fresh !== undefined) return fresh
     const known = this.entry?.models
-    if (known !== undefined) {
-      // Stale-while-revalidate: the refresh outcome serves the NEXT resolve.
-      this.refresh(fetcher).catch(() => undefined)
-      return known
-    }
+    if (known !== undefined) return known
     try {
       return await this.refresh(fetcher)
     } catch {

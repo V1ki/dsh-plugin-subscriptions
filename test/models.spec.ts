@@ -881,7 +881,7 @@ test('grok discovery keeps last-known reasoning when the CLI catalog fails', asy
     onWarn: message => warnings.push(message),
     catalogStore: store,
   })
-  await adapter.listModels('grok')
+  await adapter.listOwnModels('grok')
   const resolved = await adapter.resolveModel('grok', 'grok-4.6')
   assert.deepEqual(resolved.reasoning?.efforts.map(effort => effort.id), ['xhigh', 'high'])
   assert.equal(resolved.reasoning?.defaultEffort, 'high')
@@ -914,7 +914,7 @@ test('grok discovery keeps last-known reasoning when the CLI catalog omits a mod
     fetchFn: grokDualFetch({ data: GROK_CLI_PAYLOAD.data.filter(entry => entry.id === 'grok-4.5') }),
     catalogStore: store,
   })
-  await adapter.listModels('grok')
+  await adapter.listOwnModels('grok')
   const g46 = await adapter.resolveModel('grok', 'grok-4.6')
   assert.deepEqual(g46.reasoning?.efforts.map(effort => effort.id), ['xhigh', 'high'])
   const g45 = await adapter.resolveModel('grok', 'grok-4.5')
@@ -974,20 +974,17 @@ function settle(): Promise<void> {
   return new Promise(resolve => setImmediate(resolve))
 }
 
-test('ModelCatalogCache serves the last-known catalog while a refresh runs or fails', async () => {
-  // ttlMs 0 makes every entry instantly stale, so each resolve exercises the
-  // stale-while-revalidate path.
+test('ModelCatalogCache keeps last-known metadata until a scheduled or explicit refresh', async () => {
   const cache = new ModelCatalogCache(undefined, 0)
   const first = await cache.resolve(() => Promise.resolve([{ id: 'a', name: 'A' }]))
   assert.deepEqual(first?.map(model => model.id), ['a'])
-  // A stale entry answers immediately even when the background refresh fails.
-  const second = await cache.resolve(() => Promise.reject(new Error('offline')))
+  let reads = 0
+  const second = await cache.resolve(async () => { reads++; return [{ id: 'b', name: 'B' }] })
   assert.deepEqual(second?.map(model => model.id), ['a'])
-  await settle()
-  // A successful background refresh serves the NEXT resolve.
-  const third = await cache.resolve(() => Promise.resolve([{ id: 'b', name: 'B' }]))
-  assert.deepEqual(third?.map(model => model.id), ['a'])
-  await settle()
+  assert.equal(reads, 0)
+  await assert.rejects(cache.get(() => Promise.reject(new Error('offline'))))
+  assert.deepEqual(cache.lastKnown()?.map(model => model.id), ['a'])
+  await cache.get(() => Promise.resolve([{ id: 'b', name: 'B' }]))
   const fourth = await cache.resolve(() => Promise.reject(new Error('unused')))
   assert.deepEqual(fourth?.map(model => model.id), ['b'])
 })
@@ -1100,7 +1097,7 @@ test('grok discovery writes the fetched catalog through to the store', async () 
   assert.equal(g46?.reasoning?.defaultEffort, 'high')
 })
 
-test('grok listModels retries a 401 after a forced refresh before invalidating', async () => {
+test('grok scheduled discovery retries a 401 after a forced refresh before invalidating', async () => {
   const store = memoryCatalogStore({
     at: Date.now() - 3_600_000,
     models: [{
@@ -1132,7 +1129,7 @@ test('grok listModels retries a 401 after a forced refresh before invalidating',
     fetchFn,
     catalogStore: store,
   })
-  const models = await adapter.listModels('grok')
+  const models = await adapter.listOwnModels('grok')
   assert.deepEqual(models.map(model => model.id), ['grok-4.6', 'grok-4.5', 'grok-build-0.1'])
   assert.equal(modelsCalls, 2)
   await settle()
@@ -1140,7 +1137,7 @@ test('grok listModels retries a 401 after a forced refresh before invalidating',
   assert.equal((await adapter.resolveModel('grok', 'grok-4.6')).reasoning?.defaultEffort, 'high')
 })
 
-test('grok listModels invalidates the catalog after a 401 that survives forced refresh', async () => {
+test('grok scheduled discovery invalidates the catalog after a 401 that survives forced refresh', async () => {
   const store = memoryCatalogStore({
     at: Date.now() - 3_600_000,
     models: [{
@@ -1167,7 +1164,7 @@ test('grok listModels invalidates the catalog after a 401 that survives forced r
     fetchFn,
     catalogStore: store,
   })
-  const models = await adapter.listModels('grok')
+  const models = await adapter.listOwnModels('grok')
   assert.deepEqual(models.map(model => model.id), ['grok-4'])
   await settle()
   assert.equal(store.saved(), undefined)

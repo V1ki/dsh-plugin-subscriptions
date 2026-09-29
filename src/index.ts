@@ -62,6 +62,7 @@ import type {
   StoredSession,
 } from './auth/store.js'
 import { DISCOVERY_TIMEOUT_MS, validateModels, withTimeout } from './providers/common.js'
+import { startCatalogRefresh } from './providers/catalog-refresh.js'
 import type { ModelEntry, ProviderUsage } from './providers/common.js'
 import { AccountTokenManager } from './providers/accounts.js'
 import type { AccountAwareAdapter } from './providers/accounts.js'
@@ -721,6 +722,10 @@ export function apply(ctx: Context, config: Config): void {
     enabled: config.pool?.enabled !== false && (config.pool?.autoAccounts ?? config.pool?.autoFamilies ?? true),
     onWarn,
   })
+  const catalogChanged = (): void => {
+    poolAdapter?.invalidate()
+    for (const [route, handle] of handles) handle.replace([route])
+  }
   const authChanged = (provider: ProviderId, account?: string): void => {
     if (provider === 'codex' || provider === 'grok') imagePool.clear(provider, account)
     // Login, logout, and credential death all pass through here; a copilot
@@ -795,6 +800,7 @@ export function apply(ctx: Context, config: Config): void {
           // Durable catalog: capability metadata (reasoning efforts) survives
           // restarts, so a resumed session's selected effort keeps resolving.
           catalogStore: catalogStore('codex'),
+          onCatalogChanged: catalogChanged,
           accountCatalogStore: account => accountCatalogStore('codex', account),
           defaultEffortOf: (model: string) => defaultEffortOf('codex', model),
           contextWindowOf: model => preferences.contextWindow(model),
@@ -837,6 +843,8 @@ export function apply(ctx: Context, config: Config): void {
           onWarn,
           resolveAttachments,
           catalogStore: catalogStore('claude'),
+          onCatalogChanged: catalogChanged,
+          accountCatalogStore: account => accountCatalogStore('claude', account),
           defaultEffortOf: (model: string) => defaultEffortOf('claude', model),
           resolveCliVersion: () => claudeVersion.resolve(),
           pool: () => poolAdapter,
@@ -871,6 +879,8 @@ export function apply(ctx: Context, config: Config): void {
           // Durable catalog: capability metadata (reasoning efforts) survives
           // restarts, so a resumed session's selected effort keeps resolving.
           catalogStore: catalogStore('grok'),
+          onCatalogChanged: catalogChanged,
+          accountCatalogStore: account => accountCatalogStore('grok', account),
           defaultEffortOf: (model: string) => defaultEffortOf('grok', model),
           pool: () => poolAdapter,
         })
@@ -901,6 +911,8 @@ export function apply(ctx: Context, config: Config): void {
           // Durable catalog: capability metadata (per-model vision support,
           // context windows) survives restarts and network failures.
           catalogStore: catalogStore('copilot'),
+          onCatalogChanged: catalogChanged,
+          accountCatalogStore: account => accountCatalogStore('copilot', account),
           defaultEffortOf: (model: string) => defaultEffortOf('copilot', model),
           pool: () => poolAdapter,
         })
@@ -933,6 +945,8 @@ export function apply(ctx: Context, config: Config): void {
           onWarn,
           resolveAttachments,
           catalogStore: catalogStore('antigravity'),
+          onCatalogChanged: catalogChanged,
+          accountCatalogStore: account => accountCatalogStore('antigravity', account),
           defaultEffortOf: model => defaultEffortOf('antigravity', model),
           pool: () => poolAdapter,
         })
@@ -1003,7 +1017,7 @@ export function apply(ctx: Context, config: Config): void {
             if (accounts.length === 0) return
             const catalogs = (await Promise.all(accounts.map(async account => {
               const models = await withTimeout(
-                signal => adapter.listOwnModels(provider, account, signal),
+                signal => adapter.listOwnModels(provider, account, signal, true),
                 POOL_USAGE_TIMEOUT_MS,
               )
               const settings = preferences.get(provider).accounts
@@ -1188,7 +1202,7 @@ export function apply(ctx: Context, config: Config): void {
       const accounts = await accountTokens.get(provider)?.list() ?? []
       const accountCatalogs = await Promise.all(accounts.map(async account => ({
         account: account.key,
-        models: await withTimeout(signal => adapter.listOwnModels(provider, account.key, signal), DISCOVERY_TIMEOUT_MS).catch(() => undefined),
+        models: await withTimeout(signal => adapter.listOwnModels(provider, account.key, signal, !force), DISCOVERY_TIMEOUT_MS).catch(() => undefined),
       })))
       const tierIds = new Set((await poolAdapter?.modelsForProvider(provider).catch(() => []) ?? []).map(model => model.id))
       const rows = await Promise.all(models.map(async model => {
@@ -1233,6 +1247,17 @@ export function apply(ctx: Context, config: Config): void {
       for (const [route, handle] of handles) handle.replace([route])
     },
   })
+
+  // OpenCode-style cadence: a startup check (five-minute cache freshness),
+  // then one hour between completed runs. Picker reads never schedule refreshes.
+  ctx.effect(() => startCatalogRefresh(async signal => {
+    await Promise.all([...adapters].map(async ([provider, adapter]) => {
+      if (signal.aborted || overridden.has(provider)) return
+      // Account unions bound each discovery and omit logged-out accounts.
+      await adapter.listOwnModels(provider, undefined, signal)
+    }))
+  }, () => onWarn('background model catalog refresh failed; next automatic attempt is in one hour')),
+  'dsh-plugin-subscriptions: hourly model catalog refresh')
 
   // Proactively keep keychain-bound Claude accounts synced with Claude Code's
   // own store (Keychain/file) every 5 minutes, so a session left idle between

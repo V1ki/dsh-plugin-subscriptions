@@ -532,6 +532,7 @@ export interface CodexAdapterOptions {
   resolveAttachments?: () => AttachmentStore | undefined
   /** Durable catalog store seeding capability metadata across restarts. */
   catalogStore?: CatalogPersistence
+  onCatalogChanged?: () => void
   /** Durable store for one NON-default account's catalog (the default's lives in `catalogStore`). */
   accountCatalogStore?: (account: string) => CatalogPersistence
   /** Per-account catalog bound for the picker union (defaults to {@link DISCOVERY_TIMEOUT_MS}). */
@@ -697,13 +698,15 @@ export class CodexAdapter extends LlmAdapter {
   private readonly catalog: ModelCatalogCache
   /** In-memory catalogs for non-default accounts (the persisted cache is the default's). */
   private readonly accountCatalogs = new Map<string, ModelCatalogCache>()
+  private accountCatalogsInvalidated = false
+  private readonly invalidatedAccounts = new Set<string>()
   /** Account whose snapshot currently lives in {@link catalog}; cleared on default change. */
   private catalogOwner: string | undefined
 
   constructor(private readonly options: CodexAdapterOptions) {
     super()
     codexClientVersion(options.clientVersion)
-    this.catalog = new ModelCatalogCache(options.catalogStore)
+    this.catalog = new ModelCatalogCache(options.catalogStore, undefined, options.onCatalogChanged)
   }
 
   /** Discovery fetcher: resolves the session through the refresh-aware path. */
@@ -715,6 +718,8 @@ export class CodexAdapter extends LlmAdapter {
 
   /** Drop cached catalogs after login/logout so the next list does not reuse a stale plan. */
   clearAccountCatalog(account?: string): void {
+    if (account === undefined) { this.accountCatalogsInvalidated = true; this.invalidatedAccounts.clear() }
+    else this.invalidatedAccounts.add(account)
     // invalidate() also drops the persisted snapshot, so a logged-out account
     // cannot resurface its models from disk.
     if (account === undefined) {
@@ -730,7 +735,7 @@ export class CodexAdapter extends LlmAdapter {
     }
   }
 
-  /** Persisted cache for the default account; a throwaway cache for any other. */
+  /** Default and secondary accounts each seed their own persisted catalog. */
   private async catalogFor(account?: string): Promise<ModelCatalogCache> {
     const defaultKey = await this.options.tokens.defaultAccount()
     const key = account ?? defaultKey
@@ -743,7 +748,9 @@ export class CodexAdapter extends LlmAdapter {
     }
     let cache = this.accountCatalogs.get(key)
     if (cache === undefined) {
-      cache = new ModelCatalogCache(this.options.accountCatalogStore?.(key))
+      cache = new ModelCatalogCache(this.options.accountCatalogStore?.(key), undefined, this.options.onCatalogChanged)
+      const invalidated = this.invalidatedAccounts.delete(key)
+      if (this.accountCatalogsInvalidated || invalidated) cache.invalidate()
       this.accountCatalogs.set(key, cache)
     }
     return cache
@@ -794,7 +801,7 @@ export class CodexAdapter extends LlmAdapter {
   }
 
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    const own = await this.listOwnModels(provider)
+    const own = await this.listOwnModels(provider, undefined, undefined, true)
     const pool = this.options.pool?.()
     if (pool === undefined) return own
     const extra = await pool.modelsForProvider(provider as ProviderId)
@@ -804,13 +811,13 @@ export class CodexAdapter extends LlmAdapter {
   }
 
   /** The provider's own catalog: union of every account, or one account when named. */
-  async listOwnModels(provider: string, account?: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]> {
+  async listOwnModels(provider: string, account?: string, signal?: AbortSignal, preferCached = false): Promise<readonly LlmModelInfo[]> {
     if (account === undefined) {
       const accounts = (await this.options.tokens.list()).map(entry => entry.key)
       if (accounts.length === 0) return []
       return unionAccountCatalogs(
         accounts,
-        (key, accountSignal) => this.listOwnModels(provider, key, accountSignal),
+        (key, accountSignal) => this.listOwnModels(provider, key, accountSignal, preferCached),
         { timeoutMs: this.options.discoveryTimeoutMs ?? DISCOVERY_TIMEOUT_MS, ...signal === undefined ? {} : { signal } },
       )
     }
@@ -823,11 +830,11 @@ export class CodexAdapter extends LlmAdapter {
       // The fetcher runs only on a cache miss, and resolves the session
       // through the refresh-aware path so an expired access token renews here
       // instead of failing discovery into the static fallback.
-      const discovered = await discoverOrRetryAuth(
+      const discovered = await catalog.get(() => discoverOrRetryAuth(
         force => this.options.tokens.session(account, force),
         catalog,
-        () => catalog.get(() => this.fetchCatalog(account, signal)),
-      )
+        () => this.fetchCatalog(account, signal),
+      ), preferCached)
       return this.listed(provider, discovered)
     } catch (error: unknown) {
       // A cancelled discovery must not fall back to the static catalog — the
