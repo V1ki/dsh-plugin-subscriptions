@@ -494,6 +494,8 @@ export interface AntigravityAdapterOptions {
   fetchFn?: FetchFn
   resolveAttachments?: () => AttachmentStore | undefined
   catalogStore?: CatalogPersistence
+  onCatalogChanged?: () => void
+  accountCatalogStore?: (account: string) => CatalogPersistence
   defaultEffortOf?: (model: string) => string | undefined
 }
 
@@ -501,11 +503,13 @@ export interface AntigravityAdapterOptions {
 export class AntigravityAdapter extends LlmAdapter {
   private readonly catalog: ModelCatalogCache
   private readonly accountCatalogs = new Map<string, ModelCatalogCache>()
+  private accountCatalogsInvalidated = false
+  private readonly invalidatedAccounts = new Set<string>()
   private catalogOwner: string | undefined
 
   constructor(private readonly options: AntigravityAdapterOptions) {
     super()
-    this.catalog = new ModelCatalogCache(options.catalogStore)
+    this.catalog = new ModelCatalogCache(options.catalogStore, undefined, options.onCatalogChanged)
   }
 
   override providerInfo(provider: string): LlmProviderInfo {
@@ -514,15 +518,22 @@ export class AntigravityAdapter extends LlmAdapter {
 
   /** Drop cached catalogs after login/logout so the next list does not reuse a stale plan. */
   clearAccountCatalog(account?: string): void {
-    if (account === undefined) this.accountCatalogs.clear()
-    else this.accountCatalogs.delete(account)
+    if (account === undefined) { this.accountCatalogsInvalidated = true; this.invalidatedAccounts.clear() }
+    else this.invalidatedAccounts.add(account)
+    if (account === undefined) {
+      for (const cache of this.accountCatalogs.values()) cache.invalidate()
+      this.accountCatalogs.clear()
+    } else {
+      this.accountCatalogs.get(account)?.invalidate()
+      this.accountCatalogs.delete(account)
+    }
     if (account === undefined || this.catalogOwner === account || this.catalogOwner === undefined) {
       this.catalogOwner = undefined
       this.catalog.invalidate()
     }
   }
 
-  /** Persisted cache for the default account; a throwaway cache for any other. */
+  /** Default and secondary accounts each seed their own persisted catalog. */
   private async catalogFor(account?: string): Promise<ModelCatalogCache> {
     const defaultKey = await this.options.tokens.defaultAccount()
     const key = account ?? defaultKey
@@ -535,7 +546,9 @@ export class AntigravityAdapter extends LlmAdapter {
     }
     let cache = this.accountCatalogs.get(key)
     if (cache === undefined) {
-      cache = new ModelCatalogCache()
+      cache = new ModelCatalogCache(this.options.accountCatalogStore?.(key), undefined, this.options.onCatalogChanged)
+      const invalidated = this.invalidatedAccounts.delete(key)
+      if (this.accountCatalogsInvalidated || invalidated) cache.invalidate()
       this.accountCatalogs.set(key, cache)
     }
     return cache
@@ -562,7 +575,7 @@ export class AntigravityAdapter extends LlmAdapter {
   }
 
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    const own = await this.listOwnModels(provider)
+    const own = await this.listOwnModels(provider, undefined, undefined, true)
     const pool = this.options.pool?.()
     if (pool === undefined) return own
     const extra = await pool.modelsForProvider(provider as ProviderId)
@@ -572,13 +585,13 @@ export class AntigravityAdapter extends LlmAdapter {
   }
 
   /** The provider's own catalog: union of every account, or one account when named. */
-  async listOwnModels(provider: string, account?: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]> {
+  async listOwnModels(provider: string, account?: string, signal?: AbortSignal, preferCached = false): Promise<readonly LlmModelInfo[]> {
     if (account === undefined) {
       const accounts = (await this.options.tokens.list()).map(entry => entry.key)
       if (accounts.length === 0) return []
       return unionAccountCatalogs(
         accounts,
-        (key, accountSignal) => this.listOwnModels(provider, key, accountSignal),
+        (key, accountSignal) => this.listOwnModels(provider, key, accountSignal, preferCached),
         { timeoutMs: DISCOVERY_TIMEOUT_MS, ...signal === undefined ? {} : { signal } },
       )
     }
@@ -586,11 +599,11 @@ export class AntigravityAdapter extends LlmAdapter {
     if (!this.options.discovery) return this.staticModels(provider)
     const catalog = await this.catalogFor(account)
     try {
-      const models = await discoverOrRetryAuth(
+      const models = await catalog.get(() => discoverOrRetryAuth(
         force => this.options.tokens.session(account, force),
         catalog,
-        () => catalog.get(() => this.fetchCatalog(account, signal)),
-      )
+        () => this.fetchCatalog(account, signal),
+      ), preferCached)
       return models.map(model => ({
         provider,
         id: model.id,
