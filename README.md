@@ -8,6 +8,8 @@ Use your **ChatGPT (Codex)**, **Claude**, **Grok (X Premium)**, **GitHub Copilot
 
 Open **Settings → Subscriptions → Manage** to set a subscription display name, or edit a model's display name under **Edit model list**. Both share the existing Save/Cancel actions; clearing a name or choosing Reset to default and saving restores the original name. Names are single-line text of up to 80 characters, stored per provider and model ID in `provider-settings.json`, and survive restarts and catalog refreshes. They only change presentation: provider IDs, model IDs, reasoning settings, and account routing remain unchanged. Existing account aliases continue to work independently.
 
+Subscription display names also label provider groups in the native model picker. Saving a cleared name restores the provider's default group title.
+
 ## Demo
 
 Settings → **Subscriptions**: per-provider login/logout, no API keys. Claude imports credentials from Claude Code when available and otherwise uses OAuth, as Codex and Grok always do (settings screenshots use demo accounts and catalog data):

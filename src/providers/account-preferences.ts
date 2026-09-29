@@ -1,5 +1,5 @@
 import { LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
-import type { GenerateOptions, LlmModelInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { ProviderId } from '../auth/store.js'
 import type { ProviderSettingsStore, AccountPreferences } from '../provider-settings.js'
 import type { AccountAwareAdapter } from './accounts.js'
@@ -38,6 +38,11 @@ interface Options {
 /** Keeps the registered route separate from raw adapters and pool member seams. */
 export class AccountPreferencesAdapter extends LlmAdapter {
   constructor(private readonly options: Options) { super() }
+  override providerInfo(provider: string): LlmProviderInfo {
+    const info = this.options.adapter.providerInfo(provider)
+    // Native model groups read provider metadata, separately from model names.
+    return { ...info, name: this.options.settings.get(this.options.provider).displayName ?? info.name }
+  }
   private preference(account: string): AccountPreferences | undefined {
     const accounts = this.options.settings.get(this.options.provider).accounts
     return accounts && Object.hasOwn(accounts, account) ? accounts[account] : undefined
