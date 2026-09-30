@@ -49,6 +49,28 @@ export const CACHE_BLOCK_STRIDE = 15
  */
 export const MESSAGE_CACHE_BREAKPOINTS = 3
 
+/**
+ * How long Anthropic keeps a cache entry after its last use: five minutes
+ * (the API default) or one hour. A one-hour entry is written at twice the base
+ * input price instead of 1.25×, and reads cost the same either way.
+ */
+export type PromptCacheTtl = '5m' | '1h'
+
+/** The API default; a marker at this TTL carries no `ttl` field at all. */
+export const DEFAULT_PROMPT_CACHE_TTL: PromptCacheTtl = '5m'
+
+/**
+ * Build one `cache_control` marker.
+ *
+ * Five minutes is spelled by omitting `ttl`, so a request that does not opt in
+ * stays byte-identical to what earlier releases sent.
+ * @param ttl - cache lifetime; defaults to five minutes.
+ * @returns a fresh marker object (callers attach it to one block each).
+ */
+export function cacheControl(ttl: PromptCacheTtl = DEFAULT_PROMPT_CACHE_TTL): Record<string, unknown> {
+  return ttl === '1h' ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' }
+}
+
 /** One Anthropic request message. */
 export interface AnthropicMessage {
   role: 'user' | 'assistant'
@@ -233,13 +255,14 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[]): A
  * Marks are counted across the flattened block sequence, not per message,
  * because the lookback window Anthropic walks counts blocks the same way.
  * @param messages - assembled Anthropic messages, marked in place.
+ * @param ttl - cache lifetime for every mark; defaults to five minutes.
  */
-export function markMessageCache(messages: readonly AnthropicMessage[]): void {
+export function markMessageCache(messages: readonly AnthropicMessage[], ttl?: PromptCacheTtl): void {
   const blocks = messages.flatMap(message => message.content)
   for (let mark = 0; mark < MESSAGE_CACHE_BREAKPOINTS; mark++) {
     const at = blocks.length - 1 - mark * CACHE_BLOCK_STRIDE
     if (at < 0) return
-    blocks[at].cache_control = { type: 'ephemeral' }
+    blocks[at].cache_control = cacheControl(ttl)
   }
 }
 
@@ -249,9 +272,14 @@ export function markMessageCache(messages: readonly AnthropicMessage[]): void {
  * @param system - explicit system prompt, when set.
  * @param messages - conversation messages; the system-role text preceding the
  * conversation is appended, and a later one is left to {@link toAnthropicMessages}.
+ * @param ttl - cache lifetime for the tools+system mark; defaults to five minutes.
  * @returns the system content blocks.
  */
-export function toAnthropicSystem(system?: string, messages?: readonly TranslatableMessage[]): Record<string, unknown>[] {
+export function toAnthropicSystem(
+  system?: string,
+  messages?: readonly TranslatableMessage[],
+  ttl?: PromptCacheTtl,
+): Record<string, unknown>[] {
   const blocks: Record<string, unknown>[] = [{ type: 'text', text: CLAUDE_CODE_IDENTITY }]
   if (system !== undefined && system.length > 0) blocks.push({ type: 'text', text: system })
   const history = messages ?? []
@@ -263,7 +291,11 @@ export function toAnthropicSystem(system?: string, messages?: readonly Translata
   // `tools` renders ahead of `system`, so this one marker caches both. It is
   // deliberately separate from the message marks: a tool_choice or thinking
   // change invalidates the messages tier only, and this entry survives it.
-  blocks[blocks.length - 1].cache_control = { type: 'ephemeral' }
+  //
+  // Anthropic processes `tools`, `system`, then `messages`, and rejects a
+  // one-hour mark that follows a five-minute one (HTTP 400). This mark and the
+  // message marks therefore share one TTL, which can never hit that ordering.
+  blocks[blocks.length - 1].cache_control = cacheControl(ttl)
   return blocks
 }
 

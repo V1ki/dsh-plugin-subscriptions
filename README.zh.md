@@ -179,6 +179,7 @@ Codex 模型还可填写上下文 token 数，留空跟随服务商。插件读�
   config:
     providers: [codex, claude]        # 子集;默认五个全启用
     streamIdleTimeoutMs: 300000
+    claudePromptCacheTtl: 5m           # Claude 提示缓存时长:5m(默认)或 1h
     rateLimit:
       wait: true                       # 等待限流窗口重开(默认开启)
       maxWaitMs: 21600000              # 单次等待上限;6 小时,足够覆盖 5 小时会话窗口
@@ -188,6 +189,18 @@ Codex 模型还可填写上下文 token 数，留空跟随服务商。插件读�
       copilot:                         # 手工条目会关闭 Copilot 目录发现
         - { id: gpt-5.6-sol, wire: responses }   # 仅 copilot:强制指定上游协议
 ```
+
+`claudePromptCacheTtl` 决定 Anthropic 在最近一次使用之后保留 Claude 对话缓存多久。默认 `5m` 发送的请求
+与之前的版本完全一致。设为 `1h` 时，每个缓存断点（工具+系统提示前缀，以及对话中的三个标记）都会带上
+`ttl: "1h"`；它们刻意使用同一个值，因为 Anthropic 会拒绝排在 5 分钟断点之后的 1 小时断点。缓存读取
+无论哪档价格相同，并会刷新该条目；区别在于 1 小时档的*写入*按基础输入价的 2 倍计费，而不是 1.25 倍。
+如果你经常在两条消息之间停顿超过 5 分钟（每次停顿都会让整段对话被重新写入缓存），`1h` 更划算；如果
+总是在 5 分钟内回复，则会略贵。Claude Code 自己在订阅下对主对话默认请求 1 小时，见
+[Claude Code 的提示缓存说明](https://code.claude.com/docs/en/prompt-caching#which-ttl-each-request-gets)。
+在已有缓存的对话上修改该设置会多付一次重写：测试中，5 分钟写入之后的第一个 1 小时请求无法复用它们，
+而 5 分钟请求可以读取 1 小时的条目。压缩（compaction）和会话标题请求始终使用 5 分钟，因为它们的前缀只写入一次、不会再被读取。子代理
+（subagent）的请求没有插件可见的标记，因此与主对话一样遵循该设置。修改后需重启 DSH 生效，且只影响
+Claude；Codex、Grok、Copilot 与 Antigravity 使用各自的缓存机制。
 
 `wire`（仅 copilot 条目）把模型固定到 `chat-completions` 或 `responses`。不加该字段手工条目照常
 工作——它存在的原因是:实时目录不认识的手工模型否则会默认走 `/chat/completions`，而

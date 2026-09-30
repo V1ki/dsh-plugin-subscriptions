@@ -180,6 +180,7 @@ Existing defaults continue to load from and save to `~/.dsh/plugins/subscription
   config:
     providers: [codex, claude]        # subset; default all five
     streamIdleTimeoutMs: 300000
+    claudePromptCacheTtl: 5m           # Claude prompt-cache lifetime: 5m (default) or 1h
     rateLimit:
       wait: true                       # wait out a closed rate-limit window (default)
       maxWaitMs: 21600000              # ceiling on one wait; 6 h, covers a 5-hour session window
@@ -189,6 +190,23 @@ Existing defaults continue to load from and save to `~/.dsh/plugins/subscription
       copilot:                         # manual entries disable Copilot catalog discovery
         - { id: gpt-5.6-sol, wire: responses }   # copilot only: force the upstream protocol
 ```
+
+`claudePromptCacheTtl` sets how long Anthropic keeps the Claude conversation cache after its last use.
+The default, `5m`, sends exactly the request earlier releases sent. `1h` marks every cache breakpoint
+(the tools+system prefix and the three conversation marks) with `ttl: "1h"`. The same TTL is used for
+all of them on purpose: Anthropic rejects a one-hour breakpoint that follows a five-minute one.
+A cache read costs the same either way and refreshes the entry, but a one-hour *write* is billed at 2×
+the base input price instead of 1.25×. It pays off when you often pause longer than five minutes
+between messages (each such pause otherwise re-writes the whole conversation), and costs slightly more
+if you always reply within five minutes. Claude Code itself requests the one-hour TTL for the main
+conversation on a subscription; see
+[Claude Code's prompt-caching notes](https://code.claude.com/docs/en/prompt-caching#which-ttl-each-request-gets).
+Changing the setting on a conversation that is already cached costs one re-write: the first one-hour request
+after five-minute writes could not reuse them in testing, whereas a five-minute request does read a one-hour
+entry. Compaction and session-title requests always stay on five minutes, since their prefix is written once
+and never read again. Requests from subagents carry no marker the plugin can see, so they follow the setting
+along with the main conversation. It takes effect after restarting DSH and affects Claude only; Codex, Grok,
+Copilot and Antigravity use their own caching.
 
 `wire` (copilot entries only) pins a model to `chat-completions` or `responses`. Manual
 entries keep working without it — the field exists because a configured model the live
