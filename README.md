@@ -195,16 +195,17 @@ Existing defaults continue to load from and save to `~/.dsh/plugins/subscription
 The default, `5m`, sends exactly the request earlier releases sent. `1h` marks every cache breakpoint
 (the tools+system prefix and the three conversation marks) with `ttl: "1h"`. The same TTL is used for
 all of them on purpose: Anthropic rejects a one-hour breakpoint that follows a five-minute one.
-A cache read costs the same either way and refreshes the entry, but a one-hour *write* is billed at 2×
-the base input price instead of 1.25×. It pays off when you often pause longer than five minutes
-between messages (each such pause otherwise re-writes the whole conversation), and costs slightly more
-if you always reply within five minutes. Claude Code itself requests the one-hour TTL for the main
-conversation on a subscription; see
+Cache reads have the same price for either TTL, but a one-hour *write* is priced at 2×
+the base input price instead of 1.25×. One hour may pay off when you often pause for 5–60 minutes
+between messages and can reuse the prefix; the benefit depends on the workload and does not establish
+subscription quota savings. With frequent reuse inside five minutes, the higher write price may not pay off.
+Claude Code itself requests the one-hour TTL for the main conversation on a subscription; see
 [Claude Code's prompt-caching notes](https://code.claude.com/docs/en/prompt-caching#which-ttl-each-request-gets).
-Changing the setting on a conversation that is already cached costs one re-write: the first one-hour request
-after five-minute writes could not reuse them in testing, whereas a five-minute request does read a one-hour
-entry. Compaction and session-title requests always stay on five minutes, since their prefix is written once
-and never read again. Requests from subagents carry no marker the plugin can see, so they follow the setting
+Changing the setting on an already-cached conversation may cause one prefix rewrite: with a conversation-tail
+breakpoint, the first one-hour request after five-minute writes rewrote the prefix in testing, while a
+system-only breakpoint could hit. A five-minute request can read a one-hour entry, but a one-hour-marked
+read does not upgrade a five-minute entry's lifetime. Compaction and session-title requests stay on five
+minutes to preserve their existing auxiliary-request behavior. Requests from subagents carry no marker the plugin can see, so they follow the setting
 along with the main conversation. It takes effect after restarting DSH and affects Claude only; Codex, Grok,
 Copilot and Antigravity use their own caching.
 

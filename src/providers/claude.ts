@@ -590,9 +590,8 @@ const CLAUDE_MODALITIES: readonly ('text' | 'image')[] = ['text', 'image']
  * @param effort - the reasoning effort, when the model advertises efforts.
  * @param cacheTtl - lifetime of every cache breakpoint; defaults to five minutes.
  * Requests that carry a `purpose` (compaction, session titles) always use five
- * minutes: their prefix is written once and never read again, so the dearer
- * one-hour write would buy nothing. A five-minute mark still reads an entry a
- * one-hour mark wrote.
+ * minutes to preserve their existing auxiliary-request behavior. A five-minute
+ * mark can still read an entry a one-hour mark wrote.
  * @returns the JSON body to POST.
  */
 export function claudeRequestBody(

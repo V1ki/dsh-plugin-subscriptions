@@ -743,7 +743,7 @@ test('claudeRequestBody never puts a one-hour mark after a five-minute one', () 
 })
 
 test('claudeRequestBody keeps auxiliary calls (compaction, session titles) on five minutes even when 1h is set', () => {
-  // Their prefix is written once and never read again, so the dearer write buys nothing.
+  // Preserve the existing auxiliary-request TTL rather than applying the 1h option.
   for (const purpose of ['compaction', 'session-title'] as const) {
     const history = claudeHistory(16)
     const body = claudeRequestBody(
