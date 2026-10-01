@@ -14,7 +14,29 @@
  */
 
 import * as llm from '@deepseek-ai/dsh-llm'
-import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, Message as HostMessage } from '@deepseek-ai/dsh-llm'
+
+/** Tool-result blocks used by older hosts and imported histories. */
+export interface LegacyToolResultBlock {
+  type: 'tool-result'
+  toolCallId: ToolCallId
+  content: readonly CompatibleContentBlock[]
+  isError?: boolean
+}
+
+/** Accept both the current host vocabulary and legacy nested tool results. */
+export type CompatibleContentBlock = ContentBlock | LegacyToolResultBlock
+
+/** Adapter input also accepts one-shot requests without durable identity. */
+export interface CompatibleMessage {
+  id?: HostMessage['id']
+  role: HostMessage['role'] | 'tool'
+  content: readonly CompatibleContentBlock[]
+  source?: HostMessage['source']
+  toolCallId?: string
+  tool_call_id?: string
+  isError?: boolean
+}
 
 /** The branded tool-call id of whichever dsh-llm line is installed. */
 export type ToolCallId = Extract<ContentBlock, { type: 'tool-call' }>['id']

@@ -681,8 +681,9 @@ function toolRoundTripHistory(callId = 'call_A'): GenerateOptions['messages'] {
     },
     {
       id: MessageId('m-b'),
-      role: 'user',
-      content: [{ type: 'tool-result', toolCallId: ToolCallId(callId), content: [{ type: 'text', text: 'file-a' }] }],
+      role: 'tool',
+      toolCallId: ToolCallId(callId),
+      content: [{ type: 'text', text: 'file-a' }],
       source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   ]
@@ -703,8 +704,9 @@ function twoRoundHistory(): GenerateOptions['messages'] {
     },
     {
       id: MessageId('m-d'),
-      role: 'user',
-      content: [{ type: 'tool-result', toolCallId: ToolCallId('call_B'), content: [{ type: 'text', text: 'match' }] }],
+      role: 'tool',
+      toolCallId: ToolCallId('call_B'),
+      content: [{ type: 'text', text: 'match' }],
       source: { kind: 'tool', callId: ToolCallId('call_B') },
     },
   ]
@@ -1155,6 +1157,25 @@ test('concurrent call-id collisions stay isolated per conversation', async () =>
     }
     assert.deepEqual(replayedEncrypted(inputOf(calls, 2)), ['ENC_S1'])
     assert.deepEqual(replayedEncrypted(inputOf(calls, 3)), ['ENC_S2'])
+  } finally {
+    restore()
+  }
+})
+
+test('identity-free requests cannot replay reasoning from another request', async () => {
+  const { calls, restore } = recordingSseFetch([reasoningToolCallSse('PRIVATE'), COMPLETED_SSE])
+  try {
+    const adapter = responsesAdapter()
+    const { sessionId: omitted, ...bare } = STREAM_OPTIONS
+    void omitted
+    const request: GenerateOptions = { ...bare, messages: [{ role: 'user', content: [{ type: 'text', text: 'first request' }] }] }
+    for await (const chunk of adapter.stream(request)) void chunk
+    const other: GenerateOptions = { ...bare, messages: [
+      { role: 'user', content: [{ type: 'text', text: 'independent request' }] },
+      ...toolRoundTripHistory(),
+    ] }
+    for await (const chunk of adapter.stream(other)) void chunk
+    assert.deepEqual(replayedEncrypted(inputOf(calls, 1)), [])
   } finally {
     restore()
   }

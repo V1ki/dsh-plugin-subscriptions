@@ -1,16 +1,52 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { MessageId } from '@deepseek-ai/dsh-llm'
+import { AttachmentId } from '@deepseek-ai/dsh-attachment'
+import { ToolCallId } from '../src/compat.js'
 import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
 import { imageRequestTarget, resolveImages } from '../src/translate/resolved.js'
 import { ClaudeAdapter } from '../src/providers/claude.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
 import type { ClaudeSession } from '../src/auth/store.js'
+import type { CompatibleMessage } from '../src/compat.js'
 
 const LIMIT = { maxEdge: 2000, maxBytes: 3_750_000 }
 const WIDE = { attachmentId: 'wide', mediaType: 'image/png', bytes: 9, width: 2560, height: 1215 }
 const TALL = { attachmentId: 'tall', mediaType: 'image/png', bytes: 9, width: 1800, height: 2329 }
 const SMALL = { attachmentId: 'small', mediaType: 'image/png', bytes: 9, width: 800, height: 600 }
+
+test('offloaded request images remain text without reading attachments or requiring a store', async () => {
+  const messages: GenerateOptions['messages'] = [{
+    role: 'user',
+    content: [{ type: 'image', attachment: { ...SMALL, mediaType: 'image/png', attachmentId: AttachmentId('small') }, offloaded: true }],
+  }]
+  const { attachments, calls } = store()
+  for (const backend of [attachments, undefined]) {
+    const result = await resolveImages(messages, backend)
+    assert.equal(result[0]?.content.some(block => block.type === 'image'), false)
+    assert.match(JSON.stringify(result), /image omitted to fit request image limits/)
+  }
+  assert.deepEqual(calls, [])
+  assert.equal(messages[0]?.content[0]?.type, 'image', 'durable input is not rewritten')
+})
+
+test('legacy nested tool images honor offload while retained occurrences still resolve', async () => {
+  const attachment = { ...SMALL, mediaType: 'image/png' as const, attachmentId: AttachmentId('small') }
+  const messages: CompatibleMessage[] = [{ role: 'user', content: [{
+    type: 'tool-result', toolCallId: ToolCallId('call'), content: [
+      { type: 'image', attachment, offloaded: true },
+      { type: 'image', attachment },
+    ],
+  }] }]
+  const { attachments, calls } = store()
+  const result = await resolveImages(messages, attachments)
+  assert.deepEqual(calls, ['stored:small'])
+  const block = result[0]?.content[0]
+  assert.equal(block?.type, 'tool-result')
+  if (block?.type !== 'tool-result') throw new Error('missing tool result')
+  assert.equal(block.content.filter(part => part.type === 'image').length, 1)
+  assert.match(JSON.stringify(block.content[0]), /image omitted/)
+})
 
 function withImages(...refs: object[]): Message[] {
   return [{

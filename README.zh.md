@@ -79,6 +79,8 @@ Codex 编辑走 `/backend-api/codex/images/edits`，Grok 编辑走 `/v1/images/e
 
 ### DSH 兼容性
 
+`0.9.7` 版本新增对 DSH `0.2.0-rc.2` 的支持，开发依赖已固定到该版本。适配请求态消息、独立工具结果、工具准备状态和已省略图片的文本占位，同时保留旧历史格式转换。不会自动放行其他 `0.2` 预发布版本。
+
 当前版本支持已发布的 DSH `0.1.1-rc.2`、`0.1.2-alpha`/`rc`、`0.1.3-alpha`、`0.1.5-alpha`/`rc` 和 `0.1.7-rc` 版本线，包括 `0.1.5-rc.2` 和 `0.1.7-rc.2`。peer 范围使用 `0.1.5-alpha.1` 作为锚点，按照 npm semver 规则也覆盖之后的 `0.1.5-alpha`、`0.1.5-rc` 和稳定版 `0.1.5`；`0.1.7-rc.1` 锚点同样覆盖之后的 `0.1.7-rc` 和稳定版 `0.1.7`。DSH `0.1.6-alpha` 和 `0.1.7-alpha` 尚未单独验证，因此暂不纳入支持范围。
 
 ### 管理账号与 Pool 模型
@@ -279,12 +281,14 @@ DSH `v0.1.3-alpha.1` 新增宿主统一代理支持。建议在启动环境或 `
 ## 开发
 
 ```sh
-pnpm install   # devDependencies 用 link: 指向本地 deepseek-harness 检出 —— 先改成你的路径
+pnpm install   # 开发基线：已发布的 DSH 0.2.0-rc.2 依赖
 pnpm build     # tsc(lib/)+ tsdown(lib/client.js 浏览器 bundle)
 pnpm test      # 编译后跑 node --test 单测
 ```
 
 `prepare`(git 安装时触发)执行 `tsdown.prepare.config.ts`:自包含打包两个面,所有 `@deepseek-ai/*` 依赖外部化 —— 运行时从 dsh 安装解析,保证不会引入第二份 cordis。
+
+pnpm 的 package extension 为 Node 组件测试补齐已发布 UI primitives 的浏览器依赖；实际浏览器运行时仍由 DSH 提供这些库。
 
 改了代码后 `pnpm build` 并重启 `dsh web` 生效。
 

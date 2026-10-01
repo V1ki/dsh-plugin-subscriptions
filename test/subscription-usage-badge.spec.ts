@@ -12,10 +12,20 @@ const css = registerHooks({ load(url, context, nextLoad) {
 } })
 const { AccountWindows, compactSegment, createCurrentModelReader, previewWindows,
   collapsedDisplays, expandedDisplays, retainSubscriptionSelection, usageBadgeIcon } = await import('../src/client/SubscriptionUsageBadge.js')
+const { ImageGenerateToolview } = await import('../src/client/ImageGenerateToolview.js')
+const { VideoGenerateToolview } = await import('../src/client/VideoGenerateToolview.js')
 css.deregister()
 import type { ProviderUsageDisplay } from '../src/client/SubscriptionUsageBadge.js'
 import type { UsageWindow } from '../src/client/SubscriptionsSection.js'
 import { en, zh } from '../src/client/locales.js'
+
+test('media tool views render the preparing phase before arguments are available', () => {
+  for (const [Component, name] of [[ImageGenerateToolview, 'image_generate'], [VideoGenerateToolview, 'video_generate']] as const) {
+    const block = { phase: 'preparing' as const, callId: 'media-call', name, turn: 0, step: 0, time: 0, subCalls: [] }
+    const html = renderToStaticMarkup(createElement(Component, { block }))
+    assert.ok(html.includes(name))
+  }
+})
 
 const windows: UsageWindow[] = Array.from({ length: 60 }, (_, i) => ({
   kind: 'other', scope: `gemini-model-${i}`, usedPercent: i,

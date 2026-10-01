@@ -451,6 +451,21 @@ export type FetchFn = typeof fetch
 /** Bound on one account catalog fetch or usage poll — a hang must not block the picker. */
 export const DISCOVERY_TIMEOUT_MS = 10_000
 
+/** Cancel one caller's wait without cancelling catalog work shared with other callers. */
+export async function withAbortSignal<T>(work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  signal?.throwIfAborted()
+  if (signal === undefined) return work()
+  return new Promise<T>((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener('abort', abort)
+    const abort = () => { cleanup(); reject(signal.reason) }
+    signal.addEventListener('abort', abort, { once: true })
+    Promise.resolve().then(() => { signal.throwIfAborted(); return work() }).then(
+      value => { cleanup(); resolve(value) },
+      error => { cleanup(); reject(error) },
+    )
+  })
+}
+
 /**
  * Run `work` with an aborting signal. Resolves undefined when the timeout
  * fires (the fetch is aborted); other failures propagate.

@@ -1318,6 +1318,7 @@ export function apply(ctx: Context, config: Config): void {
         if (registered !== undefined) deny.push(registered)
       }
       if (deny.length) agent.ctx.tools.restrict({ deny })
+      return undefined
     })
   })
 }

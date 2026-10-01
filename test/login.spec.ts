@@ -18,7 +18,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
+import type { SubscriptionsRpcHandler as ConnectionRpcHandler } from '../src/auth/rpc.js'
 import type { RpcResult } from '../src/compat.js'
 import { createFakeConnection } from './fake-connection.js'
 

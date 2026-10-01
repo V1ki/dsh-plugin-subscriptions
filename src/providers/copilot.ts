@@ -808,17 +808,19 @@ export class CopilotAdapter extends LlmAdapter {
    * account identity is the session's long-lived GitHub token (stable across
    * Copilot-token refreshes, different per GitHub login); the conversation is
    * the loop-stamped `sessionId`, falling back to the first message's id
-   * when a hand-built request carries no session stamp; the model separates
+   * when a hand-built request carries no session stamp. Identity-free
+   * requests have no replay scope; the model separates
    * wire families. A call id captured in one scope is invisible to every
    * other scope, so reused ids cannot leak reasoning across accounts,
    * conversations, or models.
    */
-  private replayScope(tokenKey: string, options: GenerateOptions): string {
+  private replayScope(tokenKey: string, options: GenerateOptions): string | undefined {
     const conversation = options.sessionId !== undefined
       ? `session:${String(options.sessionId)}`
-      : options.messages[0] !== undefined
+      : options.messages[0]?.id !== undefined
         ? `anchor:${String(options.messages[0].id)}`
-        : 'conversation:none'
+        : undefined
+    if (conversation === undefined) return undefined
     return `${tokenKey}\u0000${conversation}\u0000${options.model}`
   }
 
@@ -833,10 +835,11 @@ export class CopilotAdapter extends LlmAdapter {
    * per call.
    */
   private captureReasoning(
-    scope: string,
+    scope: string | undefined,
     callIds: readonly string[],
     items: readonly ReasoningReplayItem[],
   ): void {
+    if (scope === undefined) return
     let entries = this.replayByScope.get(scope)
     if (entries === undefined) {
       entries = new Map<string, ReasoningReplayEntry>()
@@ -876,7 +879,8 @@ export class CopilotAdapter extends LlmAdapter {
    * absent or aged-out entry answers `undefined` — the no-replay
    * degradation, never an error.
    */
-  private replayFor(scope: string, callId: string): readonly ReasoningReplayItem[] | undefined {
+  private replayFor(scope: string | undefined, callId: string): readonly ReasoningReplayItem[] | undefined {
+    if (scope === undefined) return undefined
     const entries = this.replayByScope.get(scope)
     const entry = entries?.get(callId)
     if (entries === undefined || entry === undefined) return undefined
@@ -1007,7 +1011,7 @@ export class CopilotAdapter extends LlmAdapter {
     session: CopilotSession,
     signal: AbortSignal,
     wire: CopilotWire,
-    replayScopeKey: string,
+    replayScopeKey: string | undefined,
   ): Promise<Response> {
     const messages = await resolveImages(options.messages, this.options.resolveAttachments?.(), signal)
     const hasVision = messages.some(message => message.content.some(block => block.type === 'image'))

@@ -27,6 +27,35 @@ const SessionId = (id: string): NonNullable<GenerateOptions['sessionId']> =>
 
 const OPTIONS: GenerateOptions = { provider: 'codex', model: 'm', messages: [] }
 
+test('prepared pools dispatch only members whose capabilities were resolved', async () => {
+  const adapter = new FakeAdapter(() => serveOk())
+  adapter.resolveOwnModel = async (provider, model, account?: string) => {
+    if (account === 'a1') throw new Error('capabilities unavailable')
+    return { provider, id: model, name: model, context: { contextWindow: 100 } }
+  }
+  let families = freshAccounts()
+  const { pool } = makePool({ codex: adapter }, { familiesFn: async () => families })
+  const prepared = await pool.prepareCall('codex', 'm')
+  families = new Map([[poolKey('codex', 'm'), { members: [{ provider: 'codex', account: 'new', model: 'm' }] }]])
+  pool.invalidate()
+  await collect(prepared.stream(OPTIONS))
+  assert.deepEqual(adapter.accounts, ['a2'])
+})
+
+for (const withUsage of [false, true]) test(`pool handles terminal failure before content (usage=${withUsage}) like a thrown failure`, async () => {
+  const adapter = new FakeAdapter(async function* (_options, account) {
+    if (account === 'a1') {
+      if (withUsage) yield { type: 'usage', usage: { inputTokens: 1, outputTokens: 0 } }
+      yield { type: 'finish', reason: { kind: 'error', failure: { code: 'EMPTY_RESPONSE', message: 'empty' } } }
+    } else yield* serveOk()
+  })
+  const { pool } = makePool({ codex: adapter })
+  const chunks = await collect(pool.stream(OPTIONS))
+  assert.deepEqual(adapter.accounts, ['a1', 'a2'])
+  assert.equal(chunks.at(-1)?.type, 'finish')
+  assert.ok(chunks.some(chunk => chunk.type === 'text-delta' && chunk.text === 'hi'))
+})
+
 test('pool canonicalizes legacy aliases before deduplication', async () => {
   const adapter = new FakeAdapter(() => serveOk())
   const pool = new PoolAdapter({

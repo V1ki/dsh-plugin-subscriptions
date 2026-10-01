@@ -57,6 +57,9 @@ export async function* parseSse(
       }
     }
   } finally {
+    // A terminal SSE frame can precede HTTP EOF; returning or decoding failure
+    // must close the remaining body rather than leave the connection reading.
+    try { await reader.cancel() } catch { /* preserve the original stream outcome */ }
     reader.releaseLock()
   }
 }
