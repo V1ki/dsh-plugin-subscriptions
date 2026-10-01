@@ -16,6 +16,7 @@ import type { CSSProperties } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import { callSubscriptionsAuth } from './SubscriptionsSection.js'
+import { subscriptionChromeCss } from './provider-settings-styles.js'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
 
@@ -206,6 +207,7 @@ export function SpeedSelect({ loadSpeed, setSpeed, t }: SpeedSelectProps) {
   return (
     <div
       ref={rootRef}
+      className="dsh-subscription-speed"
       style={styles.root}
       onKeyDown={(event) => {
         if (event.key === 'Escape' && open) {
@@ -214,6 +216,7 @@ export function SpeedSelect({ loadSpeed, setSpeed, t }: SpeedSelectProps) {
         }
       }}
     >
+      <style>{subscriptionChromeCss}</style>
       {open && (
         <div style={styles.menu} role="menu" aria-label={translate('speed')}>
           {TIERS.map(tier => (
@@ -256,20 +259,20 @@ export function SpeedSelect({ loadSpeed, setSpeed, t }: SpeedSelectProps) {
 const styles: Record<string, CSSProperties> = {
   root: { position: 'relative', display: 'inline-flex' },
   trigger: {
-    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8,
-    background: 'transparent', color: 'var(--dsw-alias-label-secondary)',
+    border: '0.5px solid var(--dsw-alias-border-l3)', borderRadius: 'var(--dsw-radius-sm, 8px)',
+    background: 'var(--dsh-subscription-speed-hover, transparent)', color: 'var(--dsw-alias-label-secondary)',
     font: 'inherit', fontSize: 12, lineHeight: '18px',
     padding: '2px 8px', cursor: 'pointer', whiteSpace: 'nowrap',
   },
   menu: {
     position: 'absolute', bottom: '100%', right: 0, marginBottom: 4,
     minWidth: 180, padding: 4, zIndex: 20,
-    background: 'var(--dsw-alias-bg-layer-1)', border: '1px solid var(--dsw-alias-border-l2)',
-    borderRadius: 8, display: 'flex', flexDirection: 'column', gap: 2,
+    background: 'var(--dsw-specific-menu, var(--dsw-alias-bg-layer-2))', border: 0,
+    boxShadow: 'var(--dsw-elevation-prominent)', borderRadius: 'var(--dsw-radius-lg, 16px)', display: 'flex', flexDirection: 'column', gap: 2,
   },
   item: {
     display: 'flex', alignItems: 'flex-start', gap: 6, width: '100%',
-    border: 'none', borderRadius: 6, background: 'transparent',
+    border: 'none', borderRadius: 'var(--dsw-radius-sm, 8px)', background: 'var(--dsh-subscription-speed-hover, transparent)',
     padding: '6px 8px', cursor: 'pointer', font: 'inherit', textAlign: 'left',
   },
   itemCheck: {
