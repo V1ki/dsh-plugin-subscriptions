@@ -18,6 +18,7 @@ import type { ReasoningReplayItem, ResponsesStreamEvent } from '../src/translate
 import {
   AnthropicStreamTranslator,
   CLAUDE_CODE_IDENTITY,
+  cacheControl,
   markMessageCache,
   toAnthropicMessages,
   toAnthropicSystem,
@@ -646,6 +647,29 @@ test('markMessageCache marks a tool_result block when the turn ends on one', () 
   markMessageCache([{ role: 'user', content }])
   assert.equal(content[0].cache_control, undefined)
   assert.deepEqual(content[1].cache_control, { type: 'ephemeral' })
+})
+
+test('cacheControl spells five minutes by omitting ttl, and one hour explicitly', () => {
+  assert.deepEqual(cacheControl(), { type: 'ephemeral' })
+  assert.deepEqual(cacheControl('5m'), { type: 'ephemeral' })
+  assert.deepEqual(cacheControl('1h'), { type: 'ephemeral', ttl: '1h' })
+  assert.notEqual(cacheControl('1h'), cacheControl('1h'), 'every mark is its own object')
+})
+
+test('markMessageCache and toAnthropicSystem apply one TTL to every mark they place', () => {
+  const content: Record<string, unknown>[] = Array.from(
+    { length: 40 },
+    (_, index) => ({ type: 'text', text: `b${index}` }),
+  )
+  markMessageCache([{ role: 'user', content }], '1h')
+  const marked = content.filter(block => 'cache_control' in block)
+  assert.equal(marked.length, 3)
+  for (const block of marked) assert.deepEqual(block.cache_control, { type: 'ephemeral', ttl: '1h' })
+
+  assert.deepEqual(toAnthropicSystem('explicit', undefined, '1h'), [
+    { type: 'text', text: CLAUDE_CODE_IDENTITY },
+    { type: 'text', text: 'explicit', cache_control: { type: 'ephemeral', ttl: '1h' } },
+  ])
 })
 
 test('toAnthropicTools maps to input_schema tools', () => {
