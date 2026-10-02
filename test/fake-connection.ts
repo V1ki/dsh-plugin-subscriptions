@@ -7,7 +7,7 @@
  * out — so the specs keep asserting on plain RpcResult values.
  */
 
-import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
+import type { SubscriptionsRpcHandler as ConnectionRpcHandler } from '../src/auth/rpc.js'
 import type { RpcResult } from '../src/compat.js'
 
 interface FakeRoute {

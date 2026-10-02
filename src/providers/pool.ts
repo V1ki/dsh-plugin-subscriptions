@@ -5,7 +5,7 @@
  * one account is pinned to it. Tiers are extra picker rows. Member
  * selection is sticky per session (so prompt caches survive) and optionally
  * quota-aware; failures fail over to the next member as long as no stream
- * chunk has been emitted.
+ * content chunk has been emitted (leading usage remains buffered).
  */
 
 import {
@@ -18,6 +18,7 @@ import type {
   GenerateOptions,
   LlmModelInfo,
   LlmResolvedModelInfo,
+  PreparedAdapterCall,
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import type { ProviderId } from '../auth/store.js'
@@ -26,6 +27,8 @@ import type { ConcretePoolMember, PoolDefinition, PoolMemberRef } from './pool-f
 import { poolKey } from './pool-family.js'
 import { accountKey, classifyPoolFailure, memberKey, PoolHealthRegistry } from './pool-health.js'
 import type { MemberQuota, PoolUsageTracker } from './pool-usage.js'
+import { withAbortSignal } from './common.js'
+import { streamAccountWithReplay } from './replay.js'
 
 /** Member-selection strategy: plain priority failover or quota-aware scheduling. */
 export type PoolStrategy = 'priority' | 'quota_aware'
@@ -197,12 +200,17 @@ export class PoolAdapter extends LlmAdapter {
    * so a request valid for the pool stays valid after a failover. Capability
    * metadata is account-specific, so every distinct member is resolved.
    */
-  override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
-    const definition = (await this.pools()).get(poolKey(provider, model))
+  override async resolveModel(provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
+    return (await this.prepareCall(provider, model, signal)).model
+  }
+
+  override async prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<PreparedAdapterCall> {
+    const definition = (await withAbortSignal(() => this.pools(), signal)).get(poolKey(provider, model))
     if (definition === undefined) throw new LlmError(`unknown pool model "${model}"`, 'NO_ADAPTER')
     const resolved: LlmResolvedModelInfo[] = []
     let lastFailure: unknown
-    const members = await this.concrete(definition.members)
+    const members = await withAbortSignal(() => this.concrete(definition.members), signal)
+    const eligible: ConcretePoolMember[] = []
     for (const member of members) {
       const adapter = this.options.adapters[member.provider]
       if (adapter === undefined) continue
@@ -210,8 +218,10 @@ export class PoolAdapter extends LlmAdapter {
       // logged-out provider throwing AUTH): the pool serves as long as ONE
       // member resolves, mirroring stream()'s failover semantics.
       try {
-        resolved.push(await adapter.resolveOwnModel(member.provider, member.model, member.account))
+        resolved.push(await withAbortSignal(() => adapter.resolveOwnModel(member.provider, member.model, member.account), signal))
+        eligible.push(member)
       } catch (error: unknown) {
+        signal?.throwIfAborted()
         lastFailure = error
         this.warnOnce(
           `pool "${model}": member ${memberLabel(member)} failed to resolve`
@@ -228,7 +238,7 @@ export class PoolAdapter extends LlmAdapter {
     const maxTokens = resolved.map(info => info.defaultMaxTokens).filter(isNumber)
     const reasoning = intersectReasoning(resolved)
     const modalities = intersectModalities(resolved)
-    return {
+    const info: LlmResolvedModelInfo = {
       provider,
       id: model,
       name: definition.name ?? model,
@@ -238,29 +248,47 @@ export class PoolAdapter extends LlmAdapter {
       ...reasoning === undefined ? {} : { reasoning },
       ...modalities === undefined ? {} : { inputModalities: modalities },
     }
+    return { model: info, stream: options => this.streamMembers(options, eligible) }
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    const definition = (await this.pools()).get(poolKey(options.provider, options.model))
+    const definition = (await withAbortSignal(() => this.pools(), options.signal)).get(poolKey(options.provider, options.model))
     if (definition === undefined) throw new LlmError(`unknown pool model "${options.model}"`, 'NO_ADAPTER')
-    const members = await this.concrete(definition.members)
-    const candidates = await this.select(options.model, members, options.sessionId)
+    const members = await withAbortSignal(() => this.concrete(definition.members), options.signal)
+    yield* this.streamMembers(options, members)
+  }
+
+  private async *streamMembers(options: GenerateOptions, members: ConcretePoolMember[]): AsyncIterable<StreamChunk> {
+    const candidates = await withAbortSignal(() => this.select(options.model, members, options.sessionId), options.signal)
     if (candidates.length === 0) throw this.exhausted(options.model, members)
     let lastError: unknown
     for (const member of candidates) {
+      options.signal?.throwIfAborted()
       const adapter = this.options.adapters[member.provider]
       if (adapter === undefined) continue
-      const iterator = adapter.streamAccount(
-        { ...options, provider: member.provider, model: member.model },
-        member.account,
+      const iterator = streamAccountWithReplay(
+        adapter, { ...options, provider: member.provider }, member.account, member.model,
       )[Symbol.asyncIterator]()
       let first: IteratorResult<StreamChunk>
+      const leadingUsage: StreamChunk[] = []
       try {
         first = await iterator.next()
+        // Usage is metadata, not delivered model content. Empty completions
+        // commonly send usage before their terminal failure.
+        while (!first.done && first.value.type === 'usage') {
+          leadingUsage.push(first.value)
+          first = await iterator.next()
+        }
         if (first.done === true) {
           throw new LlmError(`${memberLabel(member)} returned an empty stream`, EMPTY_RESPONSE_CODE)
         }
+        if (first.value.type === 'finish' && first.value.reason.kind === 'error') {
+          const failure = first.value.reason.failure
+          throw new LlmError(failure.message, failure.code, failure)
+        }
       } catch (error: unknown) {
+        try { await iterator.return?.() } catch { /* preserve the attempt failure */ }
+        options.signal?.throwIfAborted()
         const classification = classifyPoolFailure(error, member.provider)
         if (classification.action === 'throw') throw error
         if ('cooldownMs' in classification) {
@@ -286,13 +314,14 @@ export class PoolAdapter extends LlmAdapter {
         continue
       }
       this.remember(options.model, options.sessionId, member)
-      // Past the first chunk there is no clean attempt boundary: whatever
+      // Past the first content chunk there is no clean attempt boundary: whatever
       // the member does next (including failing) reaches the caller as-is.
       // The finally closes the member stream when the CALLER walks away
       // early (break / .return()) — manual iteration does not propagate
       // closure the way `yield*` would, and a half-consumed member stream
       // must not linger holding its connection.
       try {
+        yield* leadingUsage
         yield first.value
         for (let next = await iterator.next(); next.done !== true; next = await iterator.next()) {
           yield next.value

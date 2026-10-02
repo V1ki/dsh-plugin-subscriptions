@@ -8,7 +8,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { ConnectionRpcHandler, HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
+import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
 import type { RpcResult } from '../compat.js'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
@@ -16,6 +16,13 @@ import { PROVIDER_IDS, type ProviderId } from './store.js'
 import type { ProviderUsage } from '../providers/common.js'
 import type { ProxyConfigView, ProxyDraft, ProxyInput, ProxyTestResult } from '../http.js'
 import type { CliVersion } from '../providers/npm-cli-version.js'
+
+/** Internal endpoint dispatcher used after the host authenticates an exact Fetch route. */
+export type SubscriptionsRpcHandler = (
+  endpoint: string,
+  payload: unknown,
+  signal: AbortSignal,
+) => Promise<RpcResult<unknown>>
 
 /**
  * Endpoint-name prefix under the shared `/api` channel: endpoint `status`
@@ -256,7 +263,7 @@ function serverResponse(rpcId: string, result: RpcResult<unknown>): Response {
  * `rpc.call('/api', 'subscriptions-auth.<endpoint>', payload)` keeps working
  * unchanged on the browser side.
  */
-function fetchRouteFor(endpoint: string, handler: ConnectionRpcHandler): FetchRouteCompat {
+function fetchRouteFor(endpoint: string, handler: SubscriptionsRpcHandler): FetchRouteCompat {
   const method = `${SUBSCRIPTIONS_AUTH_PREFIX}${endpoint}`
   return {
     path: `/api/${method}`,
@@ -626,7 +633,7 @@ export function registerAuthRpc(
   // routes below it work on both dsh lines.
   ctx.inject(['connection'], (ctx) => {
     const connection = ctx.get('connection') as HostConnectionHandle
-    const handler: ConnectionRpcHandler = async (endpoint, payload, signal) => {
+    const handler: SubscriptionsRpcHandler = async (endpoint, payload, signal) => {
       try {
         return await dispatch(controller, speed, proxy, modelDefaults, endpoint, payload, signal, providerSettings)
       } catch (error) {

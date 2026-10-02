@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
+import { LlmAdapter, LlmError, LlmRuntime, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
+import { Context } from '@deepseek-ai/cordis'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { AccountPreferencesAdapter, accountModelId, parseAccountModelId, accountAllowsPool } from '../src/providers/account-preferences.js'
 import { ProviderSettingsStore, validatePreferences } from '../src/provider-settings.js'
@@ -20,8 +21,80 @@ class Raw extends LlmAdapter {
   async *stream(): AsyncIterable<StreamChunk> { throw new Error('default path forbidden') }
   async *streamAccount(options: GenerateOptions, account: string): AsyncIterable<StreamChunk> { this.calls.push(`stream:${account}:${options.model}`); if (this.failAccount === account) throw new LlmError('quota exhausted', 'RATE_LIMIT'); yield { type: 'text-delta', index: 0, text: 'ok' }; yield { type: 'finish', reason: { kind: 'stop' } } }
 }
-const options = (model: string) => ({ provider: 'codex', model } as GenerateOptions)
+const options = (model: string): GenerateOptions => ({ provider: 'codex', model, messages: [] })
 async function consume(route: LlmAdapter, id: string) { for await (const _ of route.stream(options(id))) { /* collect */ } }
+
+test('registered account routes preserve provider retry policy in the DSH runtime', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'account-runtime-'))
+  const raw = new Raw()
+  const policy = resolveRetryPolicy({ mode: 'normal', maxRetries: 9, backoff: { maxDelayMs: 7200000 } }, 'test')
+  raw.providerRetryPolicy = () => policy
+  const route = new AccountPreferencesAdapter({ provider: 'codex', adapter: raw,
+    settings: new ProviderSettingsStore(join(dir, 'settings.json')), accounts: async () => [{ key: 'a', label: 'A' }], pool: () => undefined })
+  const llm = new LlmRuntime(new Context())
+  const dispose = llm.registerAdapter(['codex'], route)
+  try { assert.deepEqual(llm.providerRetryPolicy('codex'), policy) }
+  finally { dispose(); await rm(dir, { recursive: true, force: true }) }
+})
+
+test('DSH prepared calls keep the account whose capabilities were resolved', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'account-prepared-'))
+  const raw = new Raw()
+  let order = ['a', 'b']
+  const route = new AccountPreferencesAdapter({ provider: 'codex', adapter: raw,
+    settings: new ProviderSettingsStore(join(dir, 'settings.json')), accounts: async () => order.map(key => ({ key, label: key })), pool: () => undefined })
+  const llm = new LlmRuntime(new Context())
+  const dispose = llm.registerAdapter(['codex'], route)
+  try {
+    const prepared = await llm.prepareCall({ provider: 'codex', model: 'm:/模型' })
+    assert.equal(prepared.context?.contextWindow, 100)
+    order = ['b', 'a']
+    for await (const _ of prepared.stream({ ...prepared.config, messages: [] })) { /* drain */ }
+    assert.ok(raw.calls.includes('stream:a:m:/模型'), raw.calls.join(', '))
+    assert.equal(raw.calls.some(call => call.startsWith('stream:b:')), false)
+  } finally { dispose(); await rm(dir, { recursive: true, force: true }) }
+})
+
+test('DSH capability preparation promptly settles when cancelled during discovery', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'account-abort-'))
+  const raw = new Raw()
+  let release!: () => void
+  let enter!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const entered = new Promise<void>(resolve => { enter = resolve })
+  raw.listOwnModels = async provider => { enter(); await gate; return [{ provider, id: 'm:/模型', name: 'Model' }] }
+  const route = new AccountPreferencesAdapter({ provider: 'codex', adapter: raw,
+    settings: new ProviderSettingsStore(join(dir, 'settings.json')), accounts: async () => [{ key: 'a', label: 'A' }], pool: () => undefined })
+  const llm = new LlmRuntime(new Context())
+  const dispose = llm.registerAdapter(['codex'], route)
+  const controller = new AbortController()
+  const reason = new DOMException('Test cancelled', 'AbortError')
+  try {
+    const pending = llm.prepareCall({ provider: 'codex', model: 'm:/模型' }, controller.signal).then(() => 'resolved', error => error)
+    await entered
+    controller.abort(reason)
+    const result = await Promise.race([pending, new Promise(resolve => setTimeout(() => resolve('hung'), 100))])
+    assert.equal(result, reason)
+  } finally { release(); dispose(); await rm(dir, { recursive: true, force: true }) }
+})
+
+test('revoking a prepared account refuses dispatch rather than bypassing preferences', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'account-revoked-'))
+  const raw = new Raw()
+  const settings = new ProviderSettingsStore(join(dir, 'settings.json'))
+  const route = new AccountPreferencesAdapter({ provider: 'codex', adapter: raw, settings,
+    accounts: async () => ['a', 'b'].map(key => ({ key, label: key })), pool: () => undefined })
+  const llm = new LlmRuntime(new Context())
+  const dispose = llm.registerAdapter(['codex'], route)
+  try {
+    const prepared = await llm.prepareCall({ provider: 'codex', model: 'm:/模型' })
+    await settings.set('codex', { accounts: { a: { poolEnabled: false } } })
+    const chunks: StreamChunk[] = []
+    for await (const chunk of prepared.stream({ ...prepared.config, messages: [] })) chunks.push(chunk)
+    assert.ok(chunks.some(chunk => chunk.type === 'finish' && chunk.reason.kind === 'error' && chunk.reason.failure.code === 'NO_ADAPTER'))
+    assert.equal(raw.calls.some(call => call.startsWith('stream:')), false)
+  } finally { dispose(); await rm(dir, { recursive: true, force: true }) }
+})
 
 test('account preferences validate, persist and distinguish absent and empty allowlists', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'account-preferences-'))

@@ -61,7 +61,7 @@ test('provider settings RPC edits picker visibility without losing the editor ca
     const create = (at: number) => {
       const denied: string[] = []
       const agent = { session: { header: { createdAt: at } }, ctx: { tools: { restrict: ({ deny }: { deny: string[] }) => { denied.push(...deny) } } } }
-      ctx.emit('agent/created', { agent: agent as never })
+      ctx.emit('agent/created', { agent: agent as never, source: 'startup' })
       return denied
     }
     const old = create(Date.now() - 1000)

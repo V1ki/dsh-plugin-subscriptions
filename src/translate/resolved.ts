@@ -7,7 +7,8 @@
  */
 
 import { LlmError } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, Message, ToolResultBlock } from '@deepseek-ai/dsh-llm'
+import * as llm from '@deepseek-ai/dsh-llm'
+import type { CompatibleContentBlock as ContentBlock, CompatibleMessage as Message, LegacyToolResultBlock as ToolResultBlock } from '../compat.js'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 
 /** An image block with its bytes resolved to inline base64 for the wire. */
@@ -71,7 +72,7 @@ export interface TranslatableMessage {
   tool_call_id?: string
   isError?: boolean
   /** Preserved for adapters whose provider-private replay metadata is required. */
-  source?: Message['source']
+  source?: NonNullable<Message['source']>
 }
 
 /** A route's cap on outgoing image size; stored attachments are never changed. */
@@ -123,7 +124,10 @@ export async function resolveImages(
   if (!messages.some(message => message.content.some(hasImage))) {
     return messages
   }
-  if (attachments === undefined) {
+  const hasRetainedImage = (block: ContentBlock): boolean => block.type === 'image'
+    ? !('offloaded' in block && block.offloaded === true)
+    : block.type === 'tool-result' && block.content.some(hasRetainedImage)
+  if (attachments === undefined && messages.some(message => message.content.some(hasRetainedImage))) {
     throw new LlmError(
       'dsh-plugin-subscriptions: the request carries an image but no attachments service is mounted; '
       + 'image input requires the harness attachment store',
@@ -131,6 +135,7 @@ export async function resolveImages(
     )
   }
   const readForRequest = async (ref: ImageAttachmentRef) => {
+    if (attachments === undefined) throw new LlmError('No attachment service for retained image', 'UNSUPPORTED')
     const target = limit === undefined ? undefined : imageRequestTarget(ref, limit)
     if (target !== undefined) {
       try {
@@ -149,6 +154,13 @@ export async function resolveImages(
       return [{ ...block, content: (await Promise.all(block.content.map(resolveBlock))).flat() }]
     }
     if (block.type !== 'image') return [block]
+    if ('offloaded' in block && block.offloaded === true) {
+      // New hosts own the omission decision. Never restore omitted bytes,
+      // including when the original attachment is no longer readable.
+      const format = (llm as { offloadedImageText?: (ref: ImageAttachmentRef) => string }).offloadedImageText
+      return [{ type: 'text', text: format?.(block.attachment)
+        ?? `[image omitted to fit request image limits; ${block.attachment.attachmentId}]` }]
+    }
     const { data, mediaType: sentType, ref } = await readForRequest(block.attachment)
     const { attachmentId, mediaType, bytes, width, height, name } = ref
     return [{

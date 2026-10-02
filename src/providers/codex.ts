@@ -11,10 +11,10 @@ import type {
   LlmModelInfo,
   LlmProviderInfo,
   LlmResolvedModelInfo,
-  Message,
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '../compat.js'
+import type { CompatibleMessage as Message } from '../compat.js'
 import { decodeJwtPayload } from '../auth/jwt.js'
 import type { FlowSpec } from '../auth/oauth-flow.js'
 import type { CodexSession } from '../auth/store.js'
@@ -678,10 +678,10 @@ export function projectCodexMessages(messages: readonly Message[]): Message[] {
     if (String(message.role) !== 'tool') return message
     const current = message as Message & { toolCallId?: string; isError?: boolean }
     const callId = current.toolCallId
-      ?? (current.source.kind === 'tool' ? String(current.source.callId) : undefined)
+      ?? (current.source?.kind === 'tool' ? String(current.source.callId) : undefined)
     if (callId === undefined) throw new LlmError('Codex tool result has no call id', 'INVALID_REQUEST')
     return {
-      id: message.id,
+      ...message.id === undefined ? {} : { id: message.id },
       role: 'user',
       source: { kind: 'tool', callId: ToolCallId(callId) },
       content: [{

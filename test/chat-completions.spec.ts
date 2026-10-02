@@ -9,7 +9,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { LlmError, MessageId } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '../src/compat.js'
-import type { ContentBlock, Message, MessageSource, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { CompatibleContentBlock as ContentBlock, CompatibleMessage as Message } from '../src/compat.js'
+import type { MessageSource, StreamChunk } from '@deepseek-ai/dsh-llm'
 import {
   ChatCompletionsStreamTranslator,
   mapChatCompletionsUsage,

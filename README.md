@@ -80,7 +80,9 @@ Image generation and editing share same-provider account scheduling: try the def
 
 ### DSH compatibility
 
-The current release supports the published DSH `0.1.1-rc.2`, `0.1.2-alpha`/`rc`, `0.1.3-alpha`, `0.1.5-alpha`/`rc`, and `0.1.7-rc` lines, including `0.1.5-rc.2` and `0.1.7-rc.2`. The `0.1.5-alpha.1` peer-range anchor intentionally covers the later `0.1.5-alpha`, `0.1.5-rc`, and stable `0.1.5` builds under npm semver rules; the `0.1.7-rc.1` anchor likewise covers the later `0.1.7-rc` and stable `0.1.7` builds. DSH `0.1.6-alpha` and `0.1.7-alpha` are not included until they have been separately verified. This local fork also admits the exact DSH `0.2.0-rc.2`: its runtime peers are byte-identical to `0.1.7-rc.2`, and the client primitives only gained exports.
+Version `0.9.7` adds support for DSH `0.2.0-rc.2`, with development dependencies pinned to that runtime. It handles request-only messages, first-class tool results, preparing tool views, and offloaded image placeholders while retaining legacy history translation. Other `0.2` prereleases are not implicitly allowed.
+
+The current release supports the published DSH `0.1.1-rc.2`, `0.1.2-alpha`/`rc`, `0.1.3-alpha`, `0.1.5-alpha`/`rc`, and `0.1.7-rc` lines, including `0.1.5-rc.2` and `0.1.7-rc.2`. The `0.1.5-alpha.1` peer-range anchor intentionally covers the later `0.1.5-alpha`, `0.1.5-rc`, and stable `0.1.5` builds under npm semver rules; the `0.1.7-rc.1` anchor likewise covers the later `0.1.7-rc` and stable `0.1.7` builds. DSH `0.1.6-alpha` and `0.1.7-alpha` are not included until they have been separately verified.
 
 ### Managing accounts and pool models
 
@@ -281,12 +283,14 @@ This plugin only supplies model routes. Approval policy lives elsewhere:
 ## Develop
 
 ```sh
-pnpm install   # devDependencies link into a local deepseek-harness checkout — edit the paths first
+pnpm install   # development baseline: published DSH 0.2.0-rc.2 packages
 pnpm build     # tsc (lib/) + tsdown (lib/client.js browser bundle)
 pnpm test      # node --test over compiled unit specs
 ```
 
 For the optional offline quota UI check, point `PLAYWRIGHT_PATH` at an installed Playwright package and run `node test/subscription-usage-browser.mjs`. It uses synthetic accounts and intercepted browser routes, without a DSH server or credentials.
+
+The pnpm package extension supplies the published UI primitives' browser dependencies for Node component tests. DSH supplies those libraries to the browser at runtime.
 
 `prepare` (used by git installs) runs `tsdown.prepare.config.ts`: a self-contained bundle build of both faces with all `@deepseek-ai/*` specifiers external — they resolve from the dsh installation at runtime, so this package never carries a second cordis copy.
 
