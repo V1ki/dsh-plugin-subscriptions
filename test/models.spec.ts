@@ -190,6 +190,7 @@ const CODEX_MODELS_PAYLOAD = {
       supported_reasoning_levels: [
         { effort: 'low', description: 'fast' },
         { effort: 'high', description: 'thorough' },
+        { effort: 'ultra', description: 'client-side delegation mode' },
       ],
       default_reasoning_level: 'high',
       visibility: 'list',
@@ -303,6 +304,7 @@ test('resolveModel prefers discovered context window and reasoning efforts', asy
   assert.deepEqual(
     resolved.reasoning?.efforts.map(effort => effort.id),
     ['low', 'high'],
+    'the client-only ultra mode is dropped',
   )
   assert.equal(resolved.reasoning?.defaultEffort, 'high')
   // A model the catalog did not advertise falls back to static defaults.
