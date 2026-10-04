@@ -918,12 +918,17 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                         <p style={styles.errorLine}>{t('resetCreditsError', { message: usage.resetCreditsError })}</p>
                       )}
                       {id === 'codex' && usage?.resetCredits !== undefined && (
-                        <details style={styles.usageRow}>
-                          <summary style={{ cursor: 'pointer' }}>
-                            <span style={{ ...styles.usageMeta, display: 'inline-flex', width: 'calc(100% - 24px)' }}>
-                              <span>{t('resetCreditsTitle')}</span>
-                              <span>{t('resetCreditsAvailable', { count: usage.resetCredits.length })}</span>
-                            </span>
+                        <details className="subscriptions-reset-credits" style={styles.usageRow}>
+                          <style>{
+                            '.subscriptions-reset-credits > summary::-webkit-details-marker { display: none; }'
+                            + '.subscriptions-reset-credits[open] > summary > svg { transform: rotate(90deg); }'
+                          }</style>
+                          <summary style={{ ...styles.usageMeta, cursor: 'pointer', listStyle: 'none', justifyContent: 'flex-start', gap: 6 }}>
+                            <svg aria-hidden="true" width="12" height="12" viewBox="0 0 16 16" style={{ flexShrink: 0 }}>
+                              <path d="m6 3 5 5-5 5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                            <span>{t('resetCreditsTitle')}</span>
+                            <span style={{ marginLeft: 'auto' }}>{t('resetCreditsAvailable', { count: usage.resetCredits.length })}</span>
                           </summary>
                           {usage.resetCredits.map((credit, index) => (
                             <div key={index} style={styles.usageMeta}>
