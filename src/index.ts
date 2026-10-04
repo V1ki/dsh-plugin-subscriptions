@@ -789,7 +789,6 @@ export function apply(ctx: Context, config: Config): void {
           } catch (error) {
             // Reset credits are an optional private endpoint; preserve ordinary usage.
             const message = error instanceof Error ? error.message : String(error)
-            onWarn(`Codex reset-credit lookup failed: ${message}`)
             return { ...usage, resetCreditsError: message }
           }
         }
