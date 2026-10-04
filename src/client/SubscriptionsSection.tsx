@@ -80,6 +80,8 @@ export interface ProviderUsage {
   supported: boolean
   windows?: UsageWindow[]
   plan?: string
+  resetCredits?: { grantedAt?: number; expiresAt?: number }[]
+  resetCreditsError?: string
 }
 
 /** One model's default-effort picker state as answered by `modelDefaults`. */
@@ -912,6 +914,23 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                           </div>
                         )
                       })}
+                      {id === 'codex' && usage?.resetCreditsError !== undefined && (
+                        <p style={styles.errorLine}>{t('resetCreditsError', { message: usage.resetCreditsError })}</p>
+                      )}
+                      {id === 'codex' && usage?.resetCredits !== undefined && (
+                        <div style={styles.usageRow}>
+                          <div style={styles.usageMeta}>
+                            <span>{t('resetCreditsTitle')}</span>
+                            <span>{t('resetCreditsAvailable', { count: usage.resetCredits.length })}</span>
+                          </div>
+                          {usage.resetCredits.map((credit, index) => (
+                            <div key={index} style={styles.usageMeta}>
+                              <span>{t('resetCreditFull')}</span>
+                              <span>{credit.expiresAt === undefined ? t('resetCreditExpiryUnknown') : t('resetCreditExpires', { date: new Date(credit.expiresAt).toLocaleString() })}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

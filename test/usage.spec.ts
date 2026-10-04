@@ -17,7 +17,7 @@ import { createFakeConnection } from './fake-connection.js'
 process.env.DSH_HOME ??= mkdtempSync(join(tmpdir(), 'router-usage-test-'))
 
 // Imports after the env override so the store path resolves under the temp home.
-const { fetchCodexUsage } = await import('../src/providers/codex.js')
+const { fetchCodexUsage, fetchCodexResetCredits } = await import('../src/providers/codex.js')
 const { fetchClaudeUsage } = await import('../src/providers/claude.js')
 const { fetchGrokUsage, grokTierName } = await import('../src/providers/grok.js')
 const plugin = await import('../src/index.js')
@@ -85,6 +85,33 @@ test('fetchCodexUsage maps windows, plan, and reset timestamps', async () => {
   assert.match(requests[0].url, /backend-api\/wham\/usage/)
   assert.equal(requests[0].headers['chatgpt-account-id'], 'acct-1')
   assert.equal(requests[0].headers.authorization, 'Bearer at')
+})
+
+test('fetchCodexResetCredits maps only available Codex reset credits', async () => {
+  const { fetchFn, requests } = fakeFetch({ credits: [
+    { id: 'credit-1', reset_type: 'codex_rate_limits', status: 'available', granted_at: '2026-09-20T00:00:00Z', expires_at: '2026-10-20T00:00:00Z' },
+    { id: 'credit-2', reset_type: 'codex_rate_limits', status: 'redeemed' },
+    { id: 'credit-3', reset_type: 'other', status: 'available' },
+    { id: 'credit-4', reset_type: 'codex_rate_limits', status: 'available', expires_at: null },
+  ] })
+  const credits = await fetchCodexResetCredits(codexSession, fetchFn)
+  assert.deepEqual(credits, [
+    { grantedAt: Date.parse('2026-09-20T00:00:00Z'), expiresAt: Date.parse('2026-10-20T00:00:00Z') },
+    {},
+  ])
+  assert.equal(requests.length, 1)
+  assert.ok(requests[0].url.includes('/rate-limit-reset-credits'))
+  assert.equal(requests[0].headers.authorization, 'Bearer at')
+  assert.equal(requests[0].headers['chatgpt-account-id'], 'acct-1')
+})
+
+test('fetchCodexResetCredits reports malformed payloads and endpoint errors', async () => {
+  const { fetchFn } = fakeFetch({ available_count: 0 })
+  await assert.rejects(fetchCodexResetCredits(codexSession, fetchFn), /missing credits array/)
+  const { fetchFn: empty } = fakeFetch({ credits: [] })
+  assert.deepEqual(await fetchCodexResetCredits(codexSession, empty), [])
+  const { fetchFn: failing } = fakeFetch({ error: 'nope' }, 500)
+  await assert.rejects(fetchCodexResetCredits(codexSession, failing), /codex reset credits/)
 })
 
 test('fetchCodexUsage classifies a weekly primary window by duration', async () => {
@@ -378,6 +405,20 @@ test('usage(): a manual (forced) refresh bypasses a fresh cached snapshot, not a
   assert.equal(calls, 1, 'a plain call reuses the fresh cache')
   await controller.usage('codex', 'a1', new AbortController().signal, true)
   assert.equal(calls, 2, 'a forced call re-checks despite the fresh cache')
+})
+
+test('usage(): pool cache and RPC preserve reset credits and optional errors', async () => {
+  let snapshot: ProviderUsage = { supported: true, windows: [], resetCredits: [{ expiresAt: 1791152194306 }] }
+  const tracker = new PoolUsageTracker(() => async () => snapshot)
+  const controller = new SubscriptionsAuthController(
+    new OAuthFlowManager(), new DeviceFlowManager(), () => {}, () => undefined,
+    { codex: unreachableFetcher }, undefined, tracker,
+  )
+  const signal = new AbortController().signal
+  assert.deepEqual((await controller.usage('codex', 'a1', signal)).resetCredits, snapshot.resetCredits)
+  assert.deepEqual((await controller.usage('codex', 'a1', signal)).resetCredits, snapshot.resetCredits)
+  snapshot = { supported: true, windows: [], resetCreditsError: 'HTTP 403' }
+  assert.equal((await controller.usage('codex', 'a1', signal, true)).resetCreditsError, 'HTTP 403')
 })
 
 test('usage(): with no pool tracker (pool disabled), every call hits the raw fetcher directly', async () => {

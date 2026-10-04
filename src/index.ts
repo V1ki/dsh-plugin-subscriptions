@@ -88,6 +88,7 @@ import {
   codexProfileClaims,
   exchangeCodexCode,
   fetchCodexUsage,
+  fetchCodexResetCredits,
   isCodexPermanentRefreshError,
   refreshCodex,
 } from './providers/codex.js'
@@ -779,8 +780,19 @@ export function apply(ctx: Context, config: Config): void {
         })
         codexTokens = tokens
         accountTokens.set('codex', tokens as AccountTokenManager<StoredSession>)
-        usageFetchers.codex = async (account, signal) =>
-          fetchCodexUsage(await tokens.session(account), proxiedFetch, signal)
+        usageFetchers.codex = async (account, signal) => {
+          const session = await tokens.session(account)
+          const usage = await fetchCodexUsage(session, proxiedFetch, signal)
+          try {
+            const resetCredits = await fetchCodexResetCredits(session, proxiedFetch, signal)
+            return { ...usage, resetCredits }
+          } catch (error) {
+            // Reset credits are an optional private endpoint; preserve ordinary usage.
+            const message = error instanceof Error ? error.message : String(error)
+            onWarn(`Codex reset-credit lookup failed: ${message}`)
+            return { ...usage, resetCreditsError: message }
+          }
+        }
         let adapter!: CodexAdapter
         adapter = new CodexAdapter({
           ...config.codexClientVersion === undefined ? {} : { clientVersion: config.codexClientVersion },
@@ -958,9 +970,11 @@ export function apply(ctx: Context, config: Config): void {
     const fetcherFor = (provider: ProviderId, account: string): (() => Promise<ProviderUsage>) | undefined => {
       switch (provider) {
         case 'codex': {
-          const tokens = codexTokens
-          return tokens === undefined ? undefined : async () =>
-            fetchCodexUsage(await tokens.session(account), proxiedFetch, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS))
+          // Settings reads the pool cache too: use the complete usage fetcher
+          // so reset credits (and optional lookup errors) survive this path.
+          const fetcher = usageFetchers.codex
+          return fetcher === undefined ? undefined : () =>
+            fetcher(account, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS))
         }
         case 'claude': {
           const tokens = claudeTokens

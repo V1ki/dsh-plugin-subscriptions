@@ -289,6 +289,51 @@ export function isCodexPermanentRefreshError(error: unknown): boolean {
 }
 
 export const CODEX_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage'
+export const CODEX_RESET_CREDITS_URL = 'https://chatgpt.com/backend-api/wham/rate-limit-reset-credits'
+
+/** One banked reset credit returned by the private ChatGPT backend (subset). */
+interface CodexResetCredit {
+  reset_type?: unknown
+  status?: unknown
+  granted_at?: unknown
+  expires_at?: unknown
+}
+
+function parseResetDate(value: unknown): number | undefined {
+  if (typeof value !== 'string') return undefined
+  const timestamp = Date.parse(value)
+  return Number.isFinite(timestamp) ? timestamp : undefined
+}
+
+/** Read available banked resets. This endpoint is private and intentionally read-only. */
+export async function fetchCodexResetCredits(
+  session: CodexSession,
+  fetchFn: FetchFn = proxiedFetch,
+  signal?: AbortSignal,
+): Promise<NonNullable<ProviderUsage['resetCredits']>> {
+  const response = await fetchFn(CODEX_RESET_CREDITS_URL, {
+    headers: {
+      authorization: `Bearer ${session.accessToken}`,
+      'chatgpt-account-id': session.accountId,
+      originator: 'Codex Desktop',
+      'openai-beta': 'codex-1',
+      accept: 'application/json',
+      ...attributionHeaders(),
+    },
+    ...signal === undefined ? {} : { signal },
+  })
+  if (!response.ok) throw await oauthEndpointError(response, 'codex reset credits')
+  const payload = await response.json() as { credits?: unknown }
+  if (!Array.isArray(payload?.credits)) throw new Error('codex reset credits: unexpected response (missing credits array)')
+  return payload.credits.flatMap((value): NonNullable<ProviderUsage['resetCredits']> => {
+    if (typeof value !== 'object' || value === null) return []
+    const credit = value as CodexResetCredit
+    if (credit.status !== 'available' || credit.reset_type !== 'codex_rate_limits') return []
+    const grantedAt = parseResetDate(credit.granted_at)
+    const expiresAt = parseResetDate(credit.expires_at)
+    return [{ ...(grantedAt === undefined ? {} : { grantedAt }), ...(expiresAt === undefined ? {} : { expiresAt }) }]
+  })
+}
 
 /** One `rate_limit.*_window` object of the wham/usage payload (subset). */
 interface CodexUsageWindow {
