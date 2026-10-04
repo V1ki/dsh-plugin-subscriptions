@@ -918,18 +918,20 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                         <p style={styles.errorLine}>{t('resetCreditsError', { message: usage.resetCreditsError })}</p>
                       )}
                       {id === 'codex' && usage?.resetCredits !== undefined && (
-                        <div style={styles.usageRow}>
-                          <div style={styles.usageMeta}>
-                            <span>{t('resetCreditsTitle')}</span>
-                            <span>{t('resetCreditsAvailable', { count: usage.resetCredits.length })}</span>
-                          </div>
+                        <details style={styles.usageRow}>
+                          <summary style={{ cursor: 'pointer' }}>
+                            <span style={{ ...styles.usageMeta, display: 'inline-flex', width: 'calc(100% - 24px)' }}>
+                              <span>{t('resetCreditsTitle')}</span>
+                              <span>{t('resetCreditsAvailable', { count: usage.resetCredits.length })}</span>
+                            </span>
+                          </summary>
                           {usage.resetCredits.map((credit, index) => (
                             <div key={index} style={styles.usageMeta}>
                               <span>{t('resetCreditFull')}</span>
                               <span>{credit.expiresAt === undefined ? t('resetCreditExpiryUnknown') : t('resetCreditExpires', { date: new Date(credit.expiresAt).toLocaleString() })}</span>
                             </div>
                           ))}
-                        </div>
+                        </details>
                       )}
                     </div>
                   )}
