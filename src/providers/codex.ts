@@ -293,6 +293,7 @@ export const CODEX_RESET_CREDITS_URL = 'https://chatgpt.com/backend-api/wham/rat
 
 /** One banked reset credit returned by the private ChatGPT backend (subset). */
 interface CodexResetCredit {
+  id?: unknown
   reset_type?: unknown
   status?: unknown
   granted_at?: unknown
@@ -331,11 +332,32 @@ export async function fetchCodexResetCredits(
     if (credit.status !== 'available' || credit.reset_type !== 'codex_rate_limits') return []
     const grantedAt = parseResetDate(credit.granted_at)
     const expiresAt = parseResetDate(credit.expires_at)
-    return [{ ...(grantedAt === undefined ? {} : { grantedAt }), ...(expiresAt === undefined ? {} : { expiresAt }) }]
+    return [{ ...(typeof credit.id === 'string' ? { id: credit.id } : {}), ...(grantedAt === undefined ? {} : { grantedAt }), ...(expiresAt === undefined ? {} : { expiresAt }) }]
   })
 }
 
 /** One `rate_limit.*_window` object of the wham/usage payload (subset). */
+export async function consumeCodexResetCredit(
+  session: CodexSession, creditId: string, requestId: string,
+  fetchFn: FetchFn = proxiedFetch, signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetchFn(CODEX_RESET_CREDITS_URL + '/consume', {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer ' + session.accessToken,
+      'chatgpt-account-id': session.accountId,
+      originator: 'Codex Desktop', 'openai-beta': 'codex-1',
+      'content-type': 'application/json', accept: 'application/json',
+      ...attributionHeaders(),
+    },
+    body: JSON.stringify({ redeem_request_id: requestId, credit_id: creditId }),
+    ...signal === undefined ? {} : { signal },
+  })
+  if (!response.ok) throw await oauthEndpointError(response, 'codex consume reset')
+  const payload = await response.json() as { code?: unknown }
+  if (payload?.code !== 'reset') throw new Error('Reset was not confirmed. Verify the account in Codex before retrying.')
+}
+
 interface CodexUsageWindow {
   used_percent?: number
   /** Window duration in seconds (18000 = 5 hours, 604800 = 7 days). */

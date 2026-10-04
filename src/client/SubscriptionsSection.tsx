@@ -16,6 +16,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import { en } from './locales.js'
+import { resetActionBlock } from './reset-action.js'
 import { ProviderAccountManager } from './ProviderAccountManager.js'
 import { UsageBadgeDisplaySetting } from './UsageBadgeDisplaySetting.js'
 import type { SubscriptionsKey } from './locales.js'
@@ -80,7 +81,7 @@ export interface ProviderUsage {
   supported: boolean
   windows?: UsageWindow[]
   plan?: string
-  resetCredits?: { grantedAt?: number; expiresAt?: number }[]
+  resetCredits?: { id?: string; grantedAt?: number; expiresAt?: number }[]
   resetCreditsError?: string
 }
 
@@ -479,6 +480,17 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [usages, setUsages] = useState<Record<string, ProviderUsage>>({})
   const [usageErrors, setUsageErrors] = useState<Record<string, string>>({})
   const [usageLoading, setUsageLoading] = useState<Record<string, boolean>>({})
+  const [resetConfirmation, setResetConfirmation] = useState<{ account: string; ticket: string; expiresAt: number; creditExpiresAt?: number; weeklyUsedPercent: number }>()
+  const [resetBusy, setResetBusy] = useState(false)
+  const [resetAcknowledged, setResetAcknowledged] = useState(false)
+  const [resetMessage, setResetMessage] = useState('')
+  const [resetAccount, setResetAccount] = useState<string>()
+  const resetDialogRef = useRef<HTMLDialogElement>(null)
+  useEffect(() => {
+    if (resetConfirmation) resetDialogRef.current?.showModal()
+    else resetDialogRef.current?.close()
+  }, [resetConfirmation])
+  const resetInflight = useRef(false)
   const mountedRef = useRef(true)
   const pollersRef = useRef(new Map<SubscriptionProvider, ReturnType<typeof setInterval>>())
   /** Accounts with a `usage` call in flight; guards the auto-fetch effect against re-entry. */
@@ -596,6 +608,37 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       if (mountedRef.current) setUsageLoading(prev => ({ ...prev, [key]: false }))
     }
   }, [rpc])
+
+  async function prepareReset(account: string): Promise<void> {
+    if (!rpc || resetInflight.current) return
+    resetInflight.current = true
+    setResetBusy(true)
+    setResetAccount(account)
+    setResetConfirmation(undefined)
+    setResetMessage('')
+    try {
+      const result = await callSubscriptionsAuth<Omit<NonNullable<typeof resetConfirmation>, 'account'>>(rpc, 'prepareReset', { account })
+      setResetAcknowledged(false)
+      setResetConfirmation({ ...result, account })
+    } catch (error) { setResetMessage(messageOf(error)) }
+    finally { resetInflight.current = false; setResetBusy(false) }
+  }
+
+  async function consumeReset(): Promise<void> {
+    if (!rpc || !resetConfirmation || !resetAcknowledged || resetInflight.current) return
+    const { account, ticket } = resetConfirmation
+    resetInflight.current = true
+    setResetBusy(true)
+    setResetConfirmation(undefined)
+    try {
+      await callSubscriptionsAuth(rpc, 'consumeReset', { account, ticket })
+      setResetMessage(t('resetUseSuccess'))
+    } catch (error) { setResetMessage(messageOf(error)) }
+    finally {
+      await loadUsage('codex', account, true)
+      resetInflight.current = false; setResetBusy(false)
+    }
+  }
 
   // Fetch usage once an account is logged in; drop the snapshots of accounts
   // that vanished so a re-login refetches. A failed lookup does not auto-retry
@@ -838,6 +881,10 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
               const usage = usages[usageKey]
               const usageError = usageErrors[usageKey]
               const display = account.account ?? account.key
+              const sortedCredits = [...(usage?.resetCredits ?? [])].sort((a, b) => (a.expiresAt ?? Infinity) - (b.expiresAt ?? Infinity))
+              const nextReset = sortedCredits.find(c => c.expiresAt === undefined || c.expiresAt > Date.now())
+              const resetBlock = usage ? resetActionBlock(usage) : 'resetUseRefresh'
+              const resetDisabled = resetBusy || resetBlock !== undefined
               // Providers without a usage endpoint answer supported:false — no block.
               const showUsage = usage?.supported !== false
                 && (usage !== undefined || usageError !== undefined || usageLoading[usageKey] === true)
@@ -930,12 +977,26 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                             '.subscriptions-reset-credits > summary::-webkit-details-marker { display: none; }'
                             + '.subscriptions-reset-credits[open] > summary > svg { transform: rotate(90deg); }'
                           }</style>
-                          {usage.resetCredits.map((credit, index) => (
-                            <div key={index} style={styles.usageMeta}>
-                              <span>{t('resetCreditFull')}</span>
-                              <span>{credit.expiresAt === undefined ? t('resetCreditExpiryUnknown') : t('resetCreditExpires', { date: new Date(credit.expiresAt).toLocaleString() })}</span>
-                            </div>
-                          ))}
+                          <div style={{ paddingLeft: 18, marginTop: 6 }}>
+                            {sortedCredits.map((credit, index) => (
+                              <div key={credit.id ?? index} style={{ ...styles.usageMeta, minHeight: 28, gap: 12 }}>
+                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                                  {t('resetCreditFull')}
+                                  {credit === nextReset && (
+                                    <button type="button" aria-disabled={resetDisabled}
+                                      title={t(resetBusy ? 'resetUseChecking' : resetBlock ?? 'resetUseReady')}
+                                      style={{ ...styles.button, height: 22, padding: '0 7px', borderRadius: 6,
+                                        opacity: resetDisabled ? 0.35 : 1, cursor: resetDisabled ? 'not-allowed' : 'pointer' }}
+                                      onClick={() => { if (!resetDisabled) void prepareReset(account.key) }}>
+                                      {resetBusy && resetAccount === account.key ? t('resetUseChecking') : t('resetUseButton')}
+                                    </button>
+                                  )}
+                                </span>
+                                <span style={{ textAlign: 'right' }}>{credit.expiresAt === undefined ? t('resetCreditExpiryUnknown') : t('resetCreditExpires', { date: new Date(credit.expiresAt).toLocaleString() })}</span>
+                              </div>
+                            ))}
+                            {resetAccount === account.key && resetMessage && <p role="status" style={styles.statusLine}>{resetMessage}</p>}
+                          </div>
                         </details>
                       )}
                     </div>
@@ -1017,6 +1078,33 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       })}
       {managedProvider && <ProviderAccountManager provider={managedProvider.id} name={managedProvider.name}
         rpc={rpc} t={t} onClose={() => setManagedProvider(undefined)} />}
+      <style>{'.subscriptions-reset-dialog::backdrop { background: rgba(0,0,0,.5); }'}</style>
+      <dialog ref={resetDialogRef} className="subscriptions-reset-dialog"
+        aria-labelledby="subscriptions-reset-title" onCancel={() => setResetConfirmation(undefined)}
+        onClose={() => setResetConfirmation(undefined)}
+        style={{ ...styles.modal, display: resetConfirmation ? 'flex' : 'none', margin: 'auto', color: 'var(--dsw-alias-label-primary)' }}>
+        {resetConfirmation && <>
+          <h3 id="subscriptions-reset-title" style={{ ...styles.modalTitle, margin: 0 }}>{t('resetUseConfirmTitle')}</h3>
+          <p style={{ ...styles.statusLine, overflowWrap: 'anywhere' }}>{statuses.codex?.accounts.find(a => a.key === resetConfirmation.account)?.account ?? resetConfirmation.account}</p>
+          <div style={{ ...styles.usageMeta, gap: 12 }}>
+            <span>{t('usageWeekly')}</span><strong>{Math.round(resetConfirmation.weeklyUsedPercent)}%</strong>
+          </div>
+          <div style={styles.usageMeta}>
+            <span>{resetConfirmation.creditExpiresAt === undefined ? t('resetCreditExpiryUnknown') : t('resetCreditExpires', { date: new Date(resetConfirmation.creditExpiresAt).toLocaleString() })}</span>
+          </div>
+          <p style={{ ...styles.statusLine, margin: '4px 0' }}>{t('resetUseWarning')}</p>
+          <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 12 }}>
+            <input type="checkbox" checked={resetAcknowledged} onChange={e => setResetAcknowledged(e.target.checked)} />
+            {t('resetUseAcknowledge')}
+          </label>
+          <div style={{ ...styles.actions, justifyContent: 'flex-end', marginTop: 8 }}>
+            <button type="button" autoFocus style={styles.button} onClick={() => setResetConfirmation(undefined)}>{t('cancel')}</button>
+            <button type="button" style={{ ...styles.button, opacity: resetAcknowledged ? 1 : 0.35,
+              cursor: resetAcknowledged ? 'pointer' : 'not-allowed' }} disabled={!resetAcknowledged || resetBusy}
+              onClick={() => { void consumeReset() }}>{t('resetUseConfirm')}</button>
+          </div>
+        </>}
+      </dialog>
       {proxyOpen && (
         <div style={styles.modalOverlay} onClick={() => setProxyOpen(false)}>
           <div style={styles.modal} onClick={event => event.stopPropagation()}>

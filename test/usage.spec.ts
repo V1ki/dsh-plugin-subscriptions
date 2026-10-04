@@ -96,8 +96,8 @@ test('fetchCodexResetCredits maps only available Codex reset credits', async () 
   ] })
   const credits = await fetchCodexResetCredits(codexSession, fetchFn)
   assert.deepEqual(credits, [
-    { grantedAt: Date.parse('2026-09-20T00:00:00Z'), expiresAt: Date.parse('2026-10-20T00:00:00Z') },
-    {},
+    { id: 'credit-1', grantedAt: Date.parse('2026-09-20T00:00:00Z'), expiresAt: Date.parse('2026-10-20T00:00:00Z') },
+    { id: 'credit-4' },
   ])
   assert.equal(requests.length, 1)
   assert.ok(requests[0].url.includes('/rate-limit-reset-credits'))

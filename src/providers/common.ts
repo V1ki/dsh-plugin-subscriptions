@@ -505,6 +505,7 @@ export interface UsageWindow {
 
 /** One banked Codex reset credit, returned by the private ChatGPT backend API. */
 export interface ResetCredit {
+  id?: string
   grantedAt?: number
   expiresAt?: number
 }
