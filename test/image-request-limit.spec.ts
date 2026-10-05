@@ -4,8 +4,9 @@ import { MessageId } from '@deepseek-ai/dsh-llm'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import { ToolCallId } from '../src/compat.js'
 import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
-import { imageRequestTarget, resolveImages } from '../src/translate/resolved.js'
-import { ClaudeAdapter } from '../src/providers/claude.js'
+import { hostSupportsImageOffload, imageRequestTarget, requiredImageOffloadCount, resolveImages } from '../src/translate/resolved.js'
+import type { TranslatableMessage } from '../src/translate/resolved.js'
+import { CLAUDE_REQUEST_IMAGE_BUDGET, ClaudeAdapter } from '../src/providers/claude.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
 import type { ClaudeSession } from '../src/auth/store.js'
 import type { CompatibleMessage } from '../src/compat.js'
@@ -105,7 +106,8 @@ test('without a limit, or on a host that cannot project, images are sent as stor
   assert.deepEqual(message!.content[0], { type: 'image', mediaType: 'image/png', dataBase64: 'bw==' })
 })
 
-test('Claude turns send images within the 2000px many-image limit (#110)', async () => {
+/** A Claude adapter on one logged-in account whose requests `fetch` answers. */
+function claudeAdapter(attachments: unknown) {
   const session: ClaudeSession = { accessToken: 'at', refreshToken: 'rt', expiresAt: Date.now() + 3_600_000, scopes: 'scope' }
   const tokens = new AccountTokenManager<ClaudeSession>({
     provider: 'claude',
@@ -118,22 +120,95 @@ test('Claude turns send images within the 2000px many-image limit (#110)', async
       remove: () => Promise.resolve(),
     },
   })
-  const { attachments, calls } = store()
+  return new ClaudeAdapter({
+    models: [{ id: 'claude-opus-5-5', name: 'Claude Opus 5.5' }],
+    streamIdleTimeoutMs: 1000,
+    tokens,
+    discovery: false,
+    resolveAttachments: () => attachments as never,
+    resolveCliVersion: async () => '2.1.999',
+  })
+}
+
+/** Drain one Claude turn with `fetch` stubbed, returning the error and request count. */
+async function claudeTurn(messages: Message[], attachments: unknown): Promise<{ error: unknown; fetches: number }> {
+  let fetches = 0
   const original = globalThis.fetch
-  globalThis.fetch = (async () => new Response('{}', { status: 400 })) as typeof globalThis.fetch
+  globalThis.fetch = (async () => {
+    fetches += 1
+    return new Response('{}', { status: 400 })
+  }) as typeof globalThis.fetch
   try {
-    const adapter = new ClaudeAdapter({
-      models: [{ id: 'claude-opus-5-5', name: 'Claude Opus 5.5' }],
-      streamIdleTimeoutMs: 1000,
-      tokens,
-      discovery: false,
-      resolveAttachments: () => attachments,
-      resolveCliVersion: async () => '2.1.999',
-    })
-    const options: GenerateOptions = { provider: 'claude', model: 'claude-opus-5-5', messages: withImages(TALL), maxTokens: 1_000 }
-    await assert.rejects(async () => { for await (const _chunk of adapter.stream(options)) { /* drain */ } })
-    assert.deepEqual(calls, ['request:tall'])
+    const options: GenerateOptions = { provider: 'claude', model: 'claude-opus-5-5', messages, maxTokens: 1_000 }
+    for await (const _chunk of claudeAdapter(attachments).stream(options)) { /* drain */ }
+    return { error: undefined, fetches }
+  } catch (error: unknown) {
+    return { error, fetches }
   } finally {
     globalThis.fetch = original
   }
+}
+
+/** An attachment store whose every image reads back as `bytes` raw bytes. */
+function sizedStore(bytes: number) {
+  const data = new Uint8Array(bytes)
+  return {
+    readImage: async (ref: unknown) => ({ ref, data }),
+    readImageRequest: async (ref: unknown) => ({ attachment: ref, data, mediaType: 'image/png' }),
+  }
+}
+
+test('Claude turns send images within the 2000px many-image limit (#110)', async () => {
+  const { attachments, calls } = store()
+  const { error } = await claudeTurn(withImages(TALL), attachments)
+  assert.ok(error instanceof Error)
+  assert.deepEqual(calls, ['request:tall'])
+})
+
+/** Resolved user turn carrying one inline image per given base64 length. */
+function resolvedImages(...lengths: number[]): TranslatableMessage[] {
+  return [{ role: 'user', content: lengths.map(length => ({ type: 'image', mediaType: 'image/png', dataBase64: 'A'.repeat(length) })) }]
+}
+
+test('a request within the image budget needs no offload', () => {
+  assert.equal(requiredImageOffloadCount(resolvedImages(40, 60), 100), 0)
+})
+
+test('the oldest images are offloaded until the rest fit the budget', () => {
+  assert.equal(requiredImageOffloadCount(resolvedImages(50, 30, 40, 20), 100), 1)
+  assert.equal(requiredImageOffloadCount(resolvedImages(10, 10, 90, 20), 100), 3)
+})
+
+test('tool-result images count toward the budget and assistant images do not', () => {
+  const messages: TranslatableMessage[] = [
+    { role: 'assistant', content: resolvedImages(500)[0]!.content },
+    { role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId('call'), content: resolvedImages(80)[0]!.content }] },
+    ...resolvedImages(80),
+  ]
+  assert.equal(requiredImageOffloadCount(messages, 100), 1)
+})
+
+test('this host records image offloads', () => {
+  assert.equal(hostSupportsImageOffload(), true)
+})
+
+test('Claude asks the host to offload the oldest images instead of sending an oversized request', async () => {
+  // 7 images of 3.75MB raw (5MB base64) total 35MB, over the 20MiB budget;
+  // offloading the oldest 3 leaves 4 (20MB), which fits.
+  const raw = 3_750_000
+  const refs = Array.from({ length: 7 }, (_, index) => ({ ...SMALL, attachmentId: `shot${index}`, bytes: raw }))
+  const { error, fetches } = await claudeTurn(withImages(...refs), sizedStore(raw))
+  assert.equal(fetches, 0, 'nothing is sent before the host offloads')
+  assert.ok(error instanceof Error)
+  const failure = error as Error & { code?: string; failure?: { offloadImages?: number } }
+  assert.equal(failure.code, 'IMAGE_OFFLOAD_REQUIRED')
+  const base64 = Math.ceil(raw / 3) * 4
+  assert.equal(failure.failure?.offloadImages, 7 - Math.floor(CLAUDE_REQUEST_IMAGE_BUDGET / base64))
+})
+
+test('Claude sends a request whose images fit the budget', async () => {
+  const refs = Array.from({ length: 3 }, (_, index) => ({ ...SMALL, attachmentId: `shot${index}`, bytes: 1_000_000 }))
+  const { error, fetches } = await claudeTurn(withImages(...refs), sizedStore(1_000_000))
+  assert.equal(fetches, 1)
+  assert.notEqual((error as { code?: string }).code, 'IMAGE_OFFLOAD_REQUIRED')
 })
