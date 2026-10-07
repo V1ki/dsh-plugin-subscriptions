@@ -90,6 +90,32 @@ jobs:
       - name: Show package contents
         run: npm pack --dry-run
 
+      # Diagnostic only: print the OIDC claims npm will see and the registry's
+      # answer to the token exchange, so a trusted-publisher mismatch names the
+      # offending field instead of surfacing as a bare ENEEDAUTH/E404.
+      - name: Check OIDC trusted publisher
+        run: |
+          set -uo pipefail
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "::warning::ACTIONS_ID_TOKEN_REQUEST_URL is unset: the job lacks id-token: write"
+            exit 0
+          fi
+          jwt="$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=npm:registry.npmjs.org" | jq -r .value)"
+          echo "OIDC claims:"
+          printf '%s' "$jwt" | node -e '
+            const payload = require("fs").readFileSync(0, "utf8").split(".")[1]
+            const claims = JSON.parse(Buffer.from(payload, "base64url").toString())
+            const keys = ["repository", "repository_owner", "workflow_ref", "job_workflow_ref", "ref", "event_name", "runner_environment", "aud"]
+            console.log(JSON.stringify(Object.fromEntries(keys.map(k => [k, claims[k]])), null, 2))'
+          name="$(node -p "require('./package.json').name")"
+          code="$(curl -sS -o /tmp/exchange.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer ${jwt}" -H 'Content-Type: application/json' \
+            "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/${name}")"
+          echo "Token exchange: HTTP ${code}"
+          jq 'del(.token)' /tmp/exchange.json 2>/dev/null || cat /tmp/exchange.json
+          rm -f /tmp/exchange.json
+
       # No NODE_AUTH_TOKEN: npm authenticates with the job's OIDC token and
       # attaches a provenance attestation linking the tarball to this commit
       # and workflow run. `prepublishOnly`/`prepare` run as they do locally.
