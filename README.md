@@ -296,6 +296,16 @@ The pnpm package extension supplies the published UI primitives' browser depende
 
 After `pnpm build`, restart `dsh web` to pick up changes.
 
+### Release
+
+Releases are published by GitHub Actions ([`release.yml`](.github/workflows/release.yml)), not from a maintainer machine. Bump `version` in `package.json`, commit, then push a matching tag:
+
+```sh
+git tag v0.9.8 && git push origin main v0.9.8
+```
+
+The workflow checks that the tag matches `package.json`, installs with the frozen lockfile, runs `pnpm build` and `pnpm test`, publishes through [npm Trusted Publishing](https://docs.npmjs.com/trusted-publishers) with a [provenance attestation](https://docs.npmjs.com/generating-provenance-statements), and creates the GitHub release with generated notes. Prerelease versions (`0.10.0-rc.1`) go to the `next` dist-tag. No npm token is stored in the repository: npm authenticates the workflow via OIDC, and the provenance on the npm package page links each published tarball to the exact commit and workflow run that built it.
+
 ## Layout
 
 - `src/index.ts` — plugin entry: config schema, adapter registration, auth-change re-announce, RPC wiring

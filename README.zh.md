@@ -292,6 +292,16 @@ pnpm 的 package extension 为 Node 组件测试补齐已发布 UI primitives �
 
 改了代码后 `pnpm build` 并重启 `dsh web` 生效。
 
+### 发布
+
+发布由 GitHub Actions（[`release.yml`](.github/workflows/release.yml)）完成，不在维护者本机执行。修改 `package.json` 的 `version` 并提交后，推送同名 tag：
+
+```sh
+git tag v0.9.8 && git push origin main v0.9.8
+```
+
+工作流会校验 tag 与 `package.json` 版本一致，用锁定的 lockfile 安装依赖，执行 `pnpm build` 和 `pnpm test`，通过 [npm Trusted Publishing](https://docs.npmjs.com/trusted-publishers) 发布并附带 [provenance 证明](https://docs.npmjs.com/generating-provenance-statements)，最后创建带自动生成说明的 GitHub release。预发布版本（如 `0.10.0-rc.1`）发布到 `next` dist-tag。仓库中不保存任何 npm token：npm 通过 OIDC 对工作流鉴权，npm 包页面上的 provenance 可以将每个发布的 tarball 追溯到构建它的具体 commit 和工作流运行。
+
 ## 目录结构
 
 - `src/index.ts` —— 插件入口:配置 schema、adapter 注册、登录态变更通告、RPC 接线

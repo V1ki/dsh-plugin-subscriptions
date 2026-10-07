@@ -20,6 +20,7 @@
     "google-antigravity"
   ],
   "type": "module",
+  "packageManager": "pnpm@10.26.2",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "exports": {

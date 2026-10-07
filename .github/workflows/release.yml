@@ -1,0 +1,105 @@
+# Publish a tagged version to npm with provenance (see #132).
+#
+# Trigger: push a `vX.Y.Z` tag whose version matches package.json. The job
+# builds and tests from a clean checkout with the frozen lockfile, publishes
+# through npm Trusted Publishing (OIDC — no long-lived npm token in secrets),
+# and creates the matching GitHub release with generated notes.
+#
+# One-time npm setup (package settings → Publishing access → Trusted Publisher):
+#   Publisher:         GitHub Actions
+#   Organization/user: V1ki
+#   Repository:        dsh-plugin-subscriptions
+#   Workflow filename: release.yml
+#   Environment:       (leave empty)
+# Optionally set "Require two-factor authentication and disallow tokens" so
+# only this workflow can publish.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build, test, and publish to npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write   # create the GitHub release
+      id-token: write   # npm Trusted Publishing (OIDC) + provenance
+    steps:
+      - name: Check out ${{ github.ref_name }}
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up pnpm (version from package.json `packageManager`)
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      # Trusted Publishing needs npm >= 11.5.1; always use the latest.
+      - name: Update npm
+        run: npm install -g npm@latest && npm --version
+
+      - name: Verify the tag matches package.json
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          if [ "v${version}" != "${TAG}" ]; then
+            echo "::error::Tag ${TAG} does not match package.json version ${version}"
+            exit 1
+          fi
+          if npm view "dsh-plugin-subscriptions@${version}" version >/dev/null 2>&1; then
+            echo "::error::dsh-plugin-subscriptions@${version} is already published"
+            exit 1
+          fi
+          case "${version}" in
+            *-*) dist_tag=next;   prerelease=true ;;
+            *)   dist_tag=latest; prerelease=false ;;
+          esac
+          echo "DIST_TAG=${dist_tag}" >> "$GITHUB_ENV"
+          echo "PRERELEASE=${prerelease}" >> "$GITHUB_ENV"
+          echo "Releasing ${version} (dist-tag: ${dist_tag})"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Test
+        run: pnpm test
+
+      - name: Show package contents
+        run: npm pack --dry-run
+
+      # No NODE_AUTH_TOKEN: npm authenticates with the job's OIDC token and
+      # attaches a provenance attestation linking the tarball to this commit
+      # and workflow run. `prepublishOnly`/`prepare` run as they do locally.
+      - name: Publish to npm
+        run: npm publish --provenance --access public --tag "$DIST_TAG"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          args=(--verify-tag --generate-notes)
+          if [ "$PRERELEASE" = "true" ]; then args+=(--prerelease); fi
+          gh release create "$TAG" "${args[@]}"
