@@ -36,19 +36,21 @@ jobs:
       id-token: write   # npm Trusted Publishing (OIDC) + provenance
     steps:
       - name: Check out ${{ github.ref_name }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
       - name: Set up pnpm (version from package.json `packageManager`)
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
 
+      # No `registry-url` here on purpose: it writes an .npmrc with
+      # `_authToken=${NODE_AUTH_TOKEN}`, and any configured token (even an
+      # empty or placeholder one) makes npm skip the OIDC handshake and fail
+      # the PUT with a misleading E404. The registry is pinned on `npm publish`.
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 24
-          cache: pnpm
-          registry-url: https://registry.npmjs.org
 
       # Trusted Publishing needs npm >= 11.5.1; always use the latest.
       - name: Update npm
@@ -92,7 +94,7 @@ jobs:
       # attaches a provenance attestation linking the tarball to this commit
       # and workflow run. `prepublishOnly`/`prepare` run as they do locally.
       - name: Publish to npm
-        run: npm publish --provenance --access public --tag "$DIST_TAG"
+        run: npm publish --registry=https://registry.npmjs.org --provenance --access public --tag "$DIST_TAG"
 
       - name: Create GitHub release
         env:
