@@ -18,7 +18,7 @@ import type { ClaudeSession } from '../auth/store.js'
 import type { ProviderId } from '../auth/store.js'
 import type { PoolAdapter } from './pool.js'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
-import { resolveImages } from '../translate/resolved.js'
+import { hostSupportsImageOffload, IMAGE_OFFLOAD_REQUIRED, requiredImageOffloadCount, resolveImages } from '../translate/resolved.js'
 import type { TranslatableMessage } from '../translate/resolved.js'
 import {
   markMessageCache,
@@ -569,6 +569,15 @@ export interface ClaudeAdapterOptions {
  */
 const CLAUDE_IMAGE_LIMIT = { maxEdge: 2000, maxBytes: 3_750_000 }
 
+/**
+ * Inline image data a Claude request may carry, in base64 bytes. Every turn
+ * resends the history, so screenshots accumulate until the request passes the
+ * API's 32MB body limit and every later turn and compaction fails with HTTP
+ * 413 `request_too_large`. Past this budget the host offloads the oldest
+ * images to text and retries; the remaining 12MB holds prompts, tools, and text.
+ */
+export const CLAUDE_REQUEST_IMAGE_BUDGET = 20 * 1024 * 1024
+
 /** The Claude 4.5 family accepts image input. */
 const CLAUDE_MODALITIES: readonly ('text' | 'image')[] = ['text', 'image']
 
@@ -826,6 +835,18 @@ export class ClaudeAdapter extends LlmAdapter {
 
   private async request(options: GenerateOptions, session: ClaudeSession, signal: AbortSignal): Promise<Response> {
     const messages = await resolveImages(options.messages, this.options.resolveAttachments?.(), signal, CLAUDE_IMAGE_LIMIT)
+    if (hostSupportsImageOffload()) {
+      const offloadImages = requiredImageOffloadCount(messages, CLAUDE_REQUEST_IMAGE_BUDGET)
+      if (offloadImages > 0) {
+        // Older dsh-llm option types lack `offloadImages`; 0.2+ hosts read it.
+        throw new LlmError(
+          `claude request images exceed the ${CLAUDE_REQUEST_IMAGE_BUDGET}-byte base64 budget; `
+          + `${offloadImages} more oldest image(s) must be offloaded`,
+          IMAGE_OFFLOAD_REQUIRED,
+          { offloadImages } as ErrorOptions,
+        )
+      }
+    }
     const disc = await this.discovered(options.model)
     const maxTokens = options.maxTokens
       ?? claudeMaxTokens(this.options.models.find(entry => entry.id === options.model), disc)
