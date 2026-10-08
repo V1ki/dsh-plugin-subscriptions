@@ -26,6 +26,7 @@ import { DeviceFlowManager, type DeviceAttempt } from './auth/device-flow.js'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { readClaudeCodeCredentials, refreshClaudeSynced } from './auth/claude-code-creds.js'
+import { ResetRedemption } from './providers/reset-redemption.js'
 import { BadRequest, registerAuthRpc } from './auth/rpc.js'
 import type {
   AuthController,
@@ -91,6 +92,8 @@ import {
   codexProfileClaims,
   exchangeCodexCode,
   fetchCodexUsage,
+  fetchCodexResetCredits,
+  consumeCodexResetCredit,
   isCodexPermanentRefreshError,
   refreshCodex,
 } from './providers/codex.js'
@@ -414,7 +417,18 @@ export class SubscriptionsAuthController implements AuthController {
     private readonly antigravityConfig: Config['antigravity'] = {},
     /** The CLI version each route presents, shown beside the provider in Settings. */
     private readonly clientVersions: Partial<Record<ProviderId, () => Promise<CliVersion | undefined>>> = {},
+    private readonly resetRedemption?: ResetRedemption,
   ) {}
+
+  prepareReset(account: string, signal: AbortSignal) {
+    if (!this.resetRedemption) throw new BadRequest('Reset redemption unavailable')
+    return this.resetRedemption.prepare(account, AbortSignal.any([signal, AbortSignal.timeout(20_000)]))
+  }
+
+  async consumeReset(account: string, ticket: string, signal: AbortSignal): Promise<void> {
+    if (!this.resetRedemption) throw new BadRequest('Reset redemption unavailable')
+    await this.resetRedemption.redeem(account, ticket, AbortSignal.any([signal, AbortSignal.timeout(20_000)]))
+  }
 
   usage(provider: ProviderId, account: string, signal: AbortSignal, force = false): Promise<ProviderUsage> {
     const fetcher = this.usageFetchers[provider]
@@ -801,8 +815,18 @@ export function apply(ctx: Context, config: Config): void {
         })
         codexTokens = tokens
         accountTokens.set('codex', tokens as AccountTokenManager<StoredSession>)
-        usageFetchers.codex = async (account, signal) =>
-          fetchCodexUsage(await tokens.session(account), proxiedFetch, signal)
+        usageFetchers.codex = async (account, signal) => {
+          const session = await tokens.session(account)
+          const usage = await fetchCodexUsage(session, proxiedFetch, signal)
+          try {
+            const resetCredits = await fetchCodexResetCredits(session, proxiedFetch, signal)
+            return { ...usage, resetCredits }
+          } catch (error) {
+            // Reset credits are an optional private endpoint; preserve ordinary usage.
+            const message = error instanceof Error ? error.message : String(error)
+            return { ...usage, resetCreditsError: message }
+          }
+        }
         let adapter!: CodexAdapter
         adapter = new CodexAdapter({
           ...config.codexClientVersion === undefined ? {} : { clientVersion: config.codexClientVersion },
@@ -990,9 +1014,11 @@ export function apply(ctx: Context, config: Config): void {
     const fetcherFor = (provider: ProviderId, account: string): (() => Promise<ProviderUsage>) | undefined => {
       switch (provider) {
         case 'codex': {
-          const tokens = codexTokens
-          return tokens === undefined ? undefined : async () =>
-            fetchCodexUsage(await tokens.session(account), proxiedFetch, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS))
+          // Settings reads the pool cache too: use the complete usage fetcher
+          // so reset credits (and optional lookup errors) survive this path.
+          const fetcher = usageFetchers.codex
+          return fetcher === undefined ? undefined : () =>
+            fetcher(account, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS))
         }
         case 'claude': {
           const tokens = claudeTokens
@@ -1189,6 +1215,17 @@ export function apply(ctx: Context, config: Config): void {
       handles.get(provider)?.replace([provider])
     },
   }
+  const resetRedemption = new ResetRedemption(
+    async (account, signal) => {
+      if (!usageFetchers.codex) throw new BadRequest('Codex unavailable')
+      return usageFetchers.codex(account, signal)
+    },
+    async (account, creditId, requestId, signal) => {
+      if (!codexTokens) throw new BadRequest('Codex unavailable')
+      await consumeCodexResetCredit(await codexTokens.session(account), creditId, requestId, proxiedFetch, signal)
+    },
+    account => poolUsage?.invalidate('codex', account),
+  )
   registerAuthRpc(ctx, new SubscriptionsAuthController(
     flows, deviceFlows, authChanged, resolveAttachments, usageFetchers, undefined, poolUsage, config.antigravity,
     {
@@ -1199,6 +1236,7 @@ export function apply(ctx: Context, config: Config): void {
       } : {},
       ...providers.includes('claude') ? { claude: presentedVersion(claudeVersion) } : {},
     },
+    resetRedemption,
   ), speed, {
     get: () => proxyGetConfig(),
     set: input => proxySetConfig(input),
