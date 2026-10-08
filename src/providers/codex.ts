@@ -467,8 +467,10 @@ export async function fetchCodexModels(
     // codex-rs ModelVisibility: only "list" is picker-visible; hide/none are
     // dropped, and an absent or unknown value is included (in doubt, include).
     if (entry.visibility === 'hide' || entry.visibility === 'none') continue
+    // "ultra" is a Codex-client mode (max reasoning + automatic sub-agent
+    // delegation), not a wire value: the Responses API rejects it with HTTP 400.
     const efforts = (entry.supported_reasoning_levels ?? [])
-      .filter(level => typeof level.effort === 'string' && level.effort.length > 0)
+      .filter(level => typeof level.effort === 'string' && level.effort.length > 0 && level.effort !== 'ultra')
       .map(level => ({
         id: ReasoningEffortId(level.effort as string),
         name: effortDisplayName(level.effort as string),
