@@ -20,6 +20,7 @@ import {
 import { toResponsesInput } from '../src/translate/responses.js'
 import { GrokAdapter } from '../src/providers/grok.js'
 import { ClaudeAdapter, claudeRequestBody, fetchClaudeModels } from '../src/providers/claude.js'
+import { Config } from '../src/index.js'
 import { CopilotAdapter, fetchCopilotModels } from '../src/providers/copilot.js'
 import { ModelCatalogCache } from '../src/providers/common.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
@@ -708,6 +709,87 @@ test('claudeRequestBody ships the cache breakpoints and never exceeds four', () 
   assert.deepEqual(body.thinking, { type: 'adaptive', display: 'summarized' })
   assert.deepEqual(body.output_config, { effort: 'high' })
   assert.equal(body.stream, true)
+})
+
+/** A long enough history that the request places all four breakpoints. */
+function claudeHistory(turns: number): Message[] {
+  const history: Message[] = [claudeMessage('s0', 'system', 'opening')]
+  for (let turn = 0; turn < turns; turn++) {
+    history.push(claudeMessage(`u${turn}`, 'user', `q${turn}`))
+    history.push(claudeMessage(`a${turn}`, 'assistant', `r${turn}`))
+  }
+  return history
+}
+
+/** Every `cache_control` marker in a request body, in wire order (tools, system, messages). */
+function cacheMarkers(body: Record<string, unknown>): unknown[] {
+  const system = body.system as Record<string, unknown>[]
+  const messages = body.messages as { content: Record<string, unknown>[] }[]
+  return [...system, ...messages.flatMap(entry => entry.content)]
+    .filter(block => block.cache_control !== undefined)
+    .map(block => block.cache_control)
+}
+
+test('claudeRequestBody without a TTL is byte-identical to the five-minute request', () => {
+  const history = claudeHistory(16)
+  const options = { provider: 'claude', model: 'claude-opus-5', messages: history, system: 'explicit' }
+  const implicit = claudeRequestBody(options, history, 32_000)
+  const explicit = claudeRequestBody(options, history, 32_000, undefined, undefined, '5m')
+  assert.equal(JSON.stringify(explicit), JSON.stringify(implicit), 'opting in to 5m changes nothing on the wire')
+  assert.deepEqual(cacheMarkers(implicit), Array(4).fill({ type: 'ephemeral' }))
+  assert.equal(JSON.stringify(implicit).includes('"ttl"'), false, 'no ttl field is sent by default')
+})
+
+test('claudeRequestBody marks every breakpoint one-hour when asked, and only the marker changes', () => {
+  const history = claudeHistory(16)
+  const options = { provider: 'claude', model: 'claude-opus-5', messages: history, system: 'explicit' }
+  const short = claudeRequestBody(options, history, 32_000)
+  const long = claudeRequestBody(options, history, 32_000, undefined, undefined, '1h')
+  assert.deepEqual(cacheMarkers(long), Array(4).fill({ type: 'ephemeral', ttl: '1h' }))
+  // Dropping the ttl field must give back exactly the five-minute request, so
+  // nothing else about the body (tools, ordering, thinking, metadata) moved.
+  assert.equal(JSON.stringify(long).replaceAll(',"ttl":"1h"', ''), JSON.stringify(short))
+})
+
+test('claudeRequestBody never puts a one-hour mark after a five-minute one', () => {
+  // Anthropic answers 400 to that ordering, so one TTL per request is the invariant.
+  for (const ttl of ['5m', '1h'] as const) {
+    const history = claudeHistory(16)
+    const body = claudeRequestBody(
+      { provider: 'claude', model: 'claude-opus-5', messages: history, system: 'explicit' },
+      history, 32_000, undefined, undefined, ttl,
+    )
+    const ttls = new Set(cacheMarkers(body).map(marker => (marker as { ttl?: string }).ttl ?? '5m'))
+    assert.deepEqual([...ttls], [ttl])
+  }
+})
+
+test('claudeRequestBody keeps auxiliary calls (compaction, session titles) on five minutes even when 1h is set', () => {
+  // Preserve the existing auxiliary-request TTL rather than applying the 1h option.
+  for (const purpose of ['compaction', 'session-title'] as const) {
+    const history = claudeHistory(16)
+    const body = claudeRequestBody(
+      { provider: 'claude', model: 'claude-opus-5', messages: history, system: 'explicit', purpose },
+      history, 32_000, undefined, undefined, '1h',
+    )
+    assert.deepEqual(cacheMarkers(body), Array(4).fill({ type: 'ephemeral' }), purpose)
+  }
+  const history = claudeHistory(16)
+  const ordinary = claudeRequestBody(
+    { provider: 'claude', model: 'claude-opus-5', messages: history, system: 'explicit' },
+    history, 32_000, undefined, undefined, '1h',
+  )
+  assert.deepEqual(cacheMarkers(ordinary), Array(4).fill({ type: 'ephemeral', ttl: '1h' }), 'ordinary requests still get 1h')
+})
+
+test('the plugin Config accepts 5m and 1h for claudePromptCacheTtl, defaults to 5m, and rejects the rest', () => {
+  const parse = Config as unknown as (value: unknown) => { claudePromptCacheTtl?: string }
+  assert.equal(parse({}).claudePromptCacheTtl, '5m')
+  assert.equal(parse({ claudePromptCacheTtl: '5m' }).claudePromptCacheTtl, '5m')
+  assert.equal(parse({ claudePromptCacheTtl: '1h' }).claudePromptCacheTtl, '1h')
+  for (const invalid of ['2h', '1H', '60m', '', 3600, true]) {
+    assert.throws(() => parse({ claudePromptCacheTtl: invalid }), /claudePromptCacheTtl/, `rejects ${JSON.stringify(invalid)}`)
+  }
 })
 
 test('claudeRequestBody omits tools, thinking and effort when the request carries none', () => {
