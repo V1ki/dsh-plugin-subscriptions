@@ -27,6 +27,23 @@ test('display names persist per provider, trim whitespace and clear back to defa
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
 
+test('the Claude prompt-cache TTL is a Claude-only preference that persists and clears', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cache-ttl-'))
+  try {
+    const store = new ProviderSettingsStore(join(dir, 'settings.json'))
+    assert.equal(store.promptCacheTtl(), undefined, 'absent follows the plugin config')
+    await store.set('claude', { promptCacheTtl: '1h' })
+    assert.equal(store.promptCacheTtl(), '1h')
+    assert.equal(new ProviderSettingsStore(store.path).promptCacheTtl(), '1h', 'survives a reload')
+    await store.set('claude', { displayName: 'Work Claude' })
+    assert.equal(store.promptCacheTtl(), undefined, 'a save without the field clears it')
+    for (const invalid of ['2h', '5M', 5, '', null, true]) {
+      assert.throws(() => validatePreferences('claude', { promptCacheTtl: invalid }), /promptCacheTtl/, `rejects ${JSON.stringify(invalid)}`)
+    }
+    assert.throws(() => validatePreferences('codex', { promptCacheTtl: '1h' }), /only for Claude/)
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
 test('provider selections survive refresh-independent reloads and concurrent provider saves', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'provider-settings-'))
   try {

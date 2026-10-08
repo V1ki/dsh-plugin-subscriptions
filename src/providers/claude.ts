@@ -564,6 +564,11 @@ export interface ClaudeAdapterOptions {
   resolveCliVersion?: () => Promise<string>
   /** Lifetime of the request's cache breakpoints; absent means Anthropic's five-minute default. */
   promptCacheTtl?: PromptCacheTtl
+  /**
+   * The user's Settings-page choice, read per request so a save applies to
+   * the next turn without a restart; undefined falls back to `promptCacheTtl`.
+   */
+  promptCacheTtlOverride?: () => PromptCacheTtl | undefined
 }
 
 /**
@@ -876,7 +881,8 @@ export class ClaudeAdapter extends LlmAdapter {
     const effort = options.reasoningEffort !== undefined && disc?.reasoning !== undefined
       ? String(options.reasoningEffort)
       : undefined
-    const body = claudeRequestBody(options, messages, maxTokens, thinking, effort, this.options.promptCacheTtl)
+    const cacheTtl = this.options.promptCacheTtlOverride?.() ?? this.options.promptCacheTtl
+    const body = claudeRequestBody(options, messages, maxTokens, thinking, effort, cacheTtl)
     const cliVersion = await (this.options.resolveCliVersion ?? localClaudeCliVersion)()
     return proxiedFetch(CLAUDE_API_URL, {
       method: 'POST',

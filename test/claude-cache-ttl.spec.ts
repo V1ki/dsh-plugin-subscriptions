@@ -30,7 +30,10 @@ function tokens(): AccountTokenManager<ClaudeSession> {
 }
 
 /** Send one turn through a real adapter and return the JSON body it POSTed. */
-async function sentBody(promptCacheTtl: PromptCacheTtl | undefined): Promise<{ system: Record<string, unknown>[], messages: { content: Record<string, unknown>[] }[] }> {
+async function sentBody(
+  promptCacheTtl: PromptCacheTtl | undefined,
+  promptCacheTtlOverride?: () => PromptCacheTtl | undefined,
+): Promise<{ system: Record<string, unknown>[], messages: { content: Record<string, unknown>[] }[] }> {
   const original = globalThis.fetch
   let body = ''
   globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -45,6 +48,7 @@ async function sentBody(promptCacheTtl: PromptCacheTtl | undefined): Promise<{ s
       discovery: false,
       resolveCliVersion: async () => '2.1.999',
       ...promptCacheTtl === undefined ? {} : { promptCacheTtl },
+      ...promptCacheTtlOverride === undefined ? {} : { promptCacheTtlOverride },
     })
     const options: GenerateOptions = {
       provider: 'claude',
@@ -79,4 +83,18 @@ test('a Claude turn sends one-hour cache marks when the adapter is configured fo
     [{ type: 'ephemeral', ttl: '1h' }, { type: 'ephemeral', ttl: '1h' }],
     'both the tools+system mark and the conversation tail mark carry the one-hour TTL',
   )
+})
+
+test('the Settings-page override is read per turn and beats the config value; undefined falls back', async () => {
+  const oneHour = [{ type: 'ephemeral', ttl: '1h' }, { type: 'ephemeral', ttl: '1h' }]
+  const fiveMinutes = [{ type: 'ephemeral' }, { type: 'ephemeral' }]
+  assert.deepEqual(markers(await sentBody('5m', () => '1h')), oneHour, 'override 1h over config 5m')
+  assert.deepEqual(markers(await sentBody('1h', () => '5m')), fiveMinutes, 'override 5m over config 1h')
+  assert.deepEqual(markers(await sentBody('1h', () => undefined)), oneHour, 'no override follows config')
+  // The same adapter sees a later save without being rebuilt.
+  let current: PromptCacheTtl | undefined
+  const override = () => current
+  assert.deepEqual(markers(await sentBody('5m', override)), fiveMinutes)
+  current = '1h'
+  assert.deepEqual(markers(await sentBody('5m', override)), oneHour)
 })

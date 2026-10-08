@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
-import type { AccountPreferences, ProviderPreferences } from '../provider-settings.js'
+import type { AccountPreferences, PromptCacheTtlSetting, ProviderPreferences } from '../provider-settings.js'
 import type { SubscriptionProvider } from './SubscriptionsSection.js'
 import type { SubscriptionsKey } from './locales.js'
 import { callSubscriptionsAuth } from './subscriptions-rpc.js'
@@ -12,7 +12,13 @@ import type { ProviderModelEditorHandle } from './ProviderModelEditor.js'
 import { notifyDisplayNameChange } from './display-name-events.js'
 import { providerSettingsCss } from './provider-settings-styles.js'
 
-interface Catalog { settings: ProviderPreferences; accounts: AccountCatalogRow[] }
+interface Catalog {
+  settings: ProviderPreferences
+  accounts: AccountCatalogRow[]
+  /** Claude only: what "follow config" currently resolves to. */
+  promptCacheTtlDefault?: PromptCacheTtlSetting
+}
+const PROMPT_CACHE_TTLS: readonly PromptCacheTtlSetting[] = ['5m', '1h']
 interface Props {
   provider: SubscriptionProvider
   name: string
@@ -29,6 +35,7 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
   const dialog = useRef<HTMLDialogElement>(null)
   const title = useId()
   const description = useId()
+  const cacheTtlId = useId()
   const [catalog, setCatalog] = useState<Catalog>()
   const [changes, setChanges] = useState<Record<string, AccountPreferences>>({})
   const [loading, setLoading] = useState(true)
@@ -39,6 +46,9 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
   const [modelsDirty, setModelsDirty] = useState(false)
   const [displayName, setDisplayName] = useState('')
   const [nameDirty, setNameDirty] = useState(false)
+  /** '' follows the plugin config; otherwise an explicit TTL. */
+  const [cacheTtl, setCacheTtl] = useState<PromptCacheTtlSetting | ''>('')
+  const [cacheTtlDirty, setCacheTtlDirty] = useState(false)
   const alive = useRef(true)
   const saveLock = useRef(false)
   const editor = useRef<ProviderModelEditorHandle>(null)
@@ -58,7 +68,7 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
     setLoading(true)
     setError('')
     void callSubscriptionsAuth<Catalog>(rpc, 'providerSettings', { provider }).then(data => {
-      if (current) { setCatalog(data); setDisplayName(data.settings.displayName ?? '') }
+      if (current) { setCatalog(data); setDisplayName(data.settings.displayName ?? ''); setCacheTtl(data.settings.promptCacheTtl ?? '') }
     }).catch(error => {
       if (current) setError(t('accountsLoadFailed', { message: error instanceof Error ? error.message : String(error) }))
     }).finally(() => { if (current) setLoading(false) })
@@ -94,9 +104,14 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
       const latest = await callSubscriptionsAuth<Catalog>(rpc, 'providerSettings', { provider })
       if (!alive.current) return
       const base = models.settings === undefined ? latest.settings : mergeLatestAccounts(models.settings, latest.settings)
-      const { displayName: _staleName, ...rest } = mergeAccountChanges(base, changes)
+      const { displayName: _staleName, promptCacheTtl: _staleTtl, ...rest } = mergeAccountChanges(base, changes)
       const savedName = nameDirty ? displayName.trim() : latest.settings.displayName
-      const settings = { ...rest, ...(savedName ? { displayName: savedName } : {}) }
+      const savedTtl = cacheTtlDirty ? cacheTtl : latest.settings.promptCacheTtl
+      const settings = {
+        ...rest,
+        ...(savedName ? { displayName: savedName } : {}),
+        ...(savedTtl ? { promptCacheTtl: savedTtl } : {}),
+      }
       await callSubscriptionsAuth(rpc, 'setProviderSettings', { provider, settings })
       notifyDisplayNameChange(provider, settings.displayName)
       if (alive.current) onClose()
@@ -136,6 +151,16 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
               onClick={() => { setDisplayName(''); setNameDirty(true) }}>{t('displayNameReset')}</button>
           </div>
         </section>
+        {provider === 'claude' && <section style={{ ...stack, gap: 6, paddingBottom: 8 }}>
+          {/* Not a wrapping label: a select's accessible name would otherwise repeat its selected option. */}
+          <label htmlFor={cacheTtlId}><strong>{t('claudePromptCacheTtl')}</strong></label>
+          <select id={cacheTtlId} value={cacheTtl} style={{ justifySelf: 'start' }}
+            onChange={event => { setCacheTtl(event.target.value as PromptCacheTtlSetting | ''); setCacheTtlDirty(true) }}>
+            <option value="">{t('claudePromptCacheTtlDefault', { ttl: catalog.promptCacheTtlDefault ?? '5m' })}</option>
+            {PROMPT_CACHE_TTLS.map(ttl => <option key={ttl} value={ttl}>{t(`claudePromptCacheTtl${ttl}`)}</option>)}
+          </select>
+          <small className="dsh-subscription-hint">{t('claudePromptCacheTtlHint')}</small>
+        </section>}
         {catalog.accounts.length === 0 && <p className="dsh-subscription-hint">{t('accountsEmpty')}</p>}
         {catalog.accounts.map(account => {
           const preferences = changes[account.key] ?? catalog.settings.accounts?.[account.key] ?? {}
@@ -195,7 +220,7 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
         {saveError && <p role="alert">{saveError}</p>}
         <div style={{ ...actions, justifyContent: 'flex-end' }}>
           <button type="button" disabled={saving} onClick={onClose}>{t('cancel')}</button>
-          <button type="button" className="dsh-subscription-primary" disabled={loading || saving || (!Object.keys(changes).length && !modelsDirty && !nameDirty)}
+          <button type="button" className="dsh-subscription-primary" disabled={loading || saving || (!Object.keys(changes).length && !modelsDirty && !nameDirty && !cacheTtlDirty)}
             onClick={() => { void save() }}>{saving ? t('modelDefaultsSaving') : t('modelsSave')}</button>
         </div>
       </footer>

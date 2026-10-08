@@ -202,7 +202,9 @@ Existing defaults continue to load from and save to `~/.dsh/plugins/subscription
 ```
 
 `claudePromptCacheTtl` sets how long Anthropic keeps the Claude conversation cache after its last use.
-The default, `5m`, sends exactly the request earlier releases sent. `1h` marks every cache breakpoint
+It can also be changed without a restart from Settings → Subscriptions → Claude → Manage ("Prompt cache
+lifetime"); that choice is stored in `provider-settings.json`, overrides the config value, and applies
+from the next turn. The default, `5m`, sends exactly the request earlier releases sent. `1h` marks every cache breakpoint
 (the tools+system prefix and the three conversation marks) with `ttl: "1h"`. The same TTL is used for
 all of them on purpose: Anthropic rejects a one-hour breakpoint that follows a five-minute one.
 Cache reads have the same price for either TTL, but a one-hour *write* is priced at 2×

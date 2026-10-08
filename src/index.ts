@@ -889,6 +889,7 @@ export function apply(ctx: Context, config: Config): void {
           defaultEffortOf: (model: string) => defaultEffortOf('claude', model),
           resolveCliVersion: () => claudeVersion.resolve(),
           promptCacheTtl: claudePromptCacheTtl,
+          promptCacheTtlOverride: () => preferences.promptCacheTtl(),
           pool: () => poolAdapter,
         })
         adapters.set('claude', adapter)
@@ -1287,6 +1288,8 @@ export function apply(ctx: Context, config: Config): void {
       }))
       return {
         provider, settings: preferences.get(provider), models: rows, tools: PROVIDER_TOOLS[provider],
+        // The config value the "follow config" choice resolves to, for the Settings page to label it.
+        ...(provider === 'claude' ? { promptCacheTtlDefault: claudePromptCacheTtl } : {}),
         accounts: accounts.map(({ key, session }) => {
           const catalog = accountCatalogs.find(entry => entry.account === key)?.models
           return { key, label: accountOf(provider, session) ?? key, models: (catalog ?? []).map(({ id, name }) => ({ id, name })), ...(catalog === undefined ? { unavailable: true } : {}) }
