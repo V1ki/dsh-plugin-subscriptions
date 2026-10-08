@@ -9,14 +9,14 @@
  * design-platform.css values flip under `body[data-ds-dark-theme]`), and
  * every user-visible string goes through the locale-bound `t` of the
  * 'settings.subscriptions' namespace. Buttons and inputs take the
- * ModelsSection vocabulary minus hover rules, which inline styles cannot
- * express.
+ * native settings vocabulary with shared, scoped control states.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import { en } from './locales.js'
 import { ProviderAccountManager } from './ProviderAccountManager.js'
+import { providerSettingsCss } from './provider-settings-styles.js'
 import { UsageBadgeDisplaySetting } from './UsageBadgeDisplaySetting.js'
 import type { SubscriptionsKey } from './locales.js'
 
@@ -183,13 +183,14 @@ const styles: Record<string, CSSProperties> = {
   },
   intro: { margin: 0, color: 'var(--dsw-alias-label-tertiary)', fontSize: 14, lineHeight: '22px' },
   card: {
-    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 12,
+    border: '0.5px solid var(--dsw-alias-settings-card-stroke, var(--dsw-alias-border-l4))',
+    borderRadius: 'var(--dsw-radius-xl, 20px)', background: 'var(--dsw-alias-settings-card-fill, var(--dsw-alias-bg-layer-2))',
     padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 6,
   },
   proxyCard: {
     padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 6,
   },
-  separator: { borderTop: '1px solid var(--dsw-alias-border-l2)' },
+  separator: { borderTop: '0.5px solid var(--dsw-alias-border-l2)' },
   cardHeader: { display: 'flex', alignItems: 'center', gap: 8 },
   dot: { width: 8, height: 8, borderRadius: '50%', flexShrink: 0 },
   name: { fontWeight: 500, fontSize: 14, lineHeight: '22px', color: 'var(--dsw-alias-label-primary)' },
@@ -197,27 +198,14 @@ const styles: Record<string, CSSProperties> = {
   clientVersion: { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)', fontVariantNumeric: 'tabular-nums' },
   errorLine: { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-state-error-primary)' },
   actions: { display: 'flex', gap: 8, marginTop: 4, alignItems: 'center', flexWrap: 'wrap' },
-  button: {
-    boxSizing: 'border-box', display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-    height: 28, padding: '0 10px', borderRadius: 14,
-    border: '1px solid var(--dsw-alias-border-l2)', background: 'transparent',
-    color: 'var(--dsw-alias-label-primary)', font: 'inherit', fontSize: 12, lineHeight: '18px',
-    cursor: 'pointer',
-  },
   usage: {
     display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4,
-    borderTop: '1px solid var(--dsw-alias-border-l2)', paddingTop: 8,
+    borderTop: '0.5px solid var(--dsw-alias-border-l2)', paddingTop: 8,
   },
   usageHeader: { display: 'flex', alignItems: 'center', gap: 8 },
   usageTitle: { fontSize: 12, lineHeight: '18px', fontWeight: 500, color: 'var(--dsw-alias-label-secondary)' },
   usagePlan: { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
-  usageRefresh: {
-    boxSizing: 'border-box', display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-    height: 22, padding: '0 8px', borderRadius: 11, marginLeft: 'auto',
-    border: '1px solid var(--dsw-alias-border-l2)', background: 'transparent',
-    color: 'var(--dsw-alias-label-secondary)', font: 'inherit', fontSize: 12, lineHeight: '18px',
-    cursor: 'pointer',
-  },
+  usageRefresh: { minHeight: 22, height: 22, padding: '0 8px', marginLeft: 'auto' },
   usageRow: { display: 'flex', flexDirection: 'column', gap: 3 },
   usageMeta: {
     display: 'flex', justifyContent: 'space-between', gap: 8,
@@ -225,24 +213,24 @@ const styles: Record<string, CSSProperties> = {
   },
   accountRow: {
     display: 'flex', flexDirection: 'column', gap: 6,
-    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8,
+    border: '0.5px solid var(--dsw-alias-border-l2)', borderRadius: 'var(--dsw-radius-lg, 16px)',
     padding: '8px 10px', marginTop: 4,
   },
   accountHeader: { display: 'flex', alignItems: 'center', gap: 8 },
   accountName: { fontSize: 13, lineHeight: '20px', color: 'var(--dsw-alias-label-primary)', userSelect: 'all' },
   starButton: {
-    border: 'none', background: 'transparent', padding: 0,
+    border: 'none', padding: 0, width: 28,
     font: 'inherit', fontSize: 14, lineHeight: '20px', cursor: 'pointer',
     color: 'var(--dsw-alias-state-warn-label)',
   },
   usageTrack: {
     height: 6, borderRadius: 3, overflow: 'hidden',
-    background: 'var(--dsw-alias-bg-layer-1)', border: '1px solid var(--dsw-alias-border-l2)',
+    background: 'var(--dsw-alias-bg-layer-1)', border: '0.5px solid var(--dsw-alias-border-l2)',
   },
   usageFill: { height: '100%', borderRadius: 3 },
   deviceCode: {
     marginTop: 4, display: 'flex', flexDirection: 'column', gap: 6,
-    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8,
+    border: '0.5px solid var(--dsw-alias-border-l2)', borderRadius: 'var(--dsw-radius-lg, 16px)',
     padding: '10px 12px', background: 'var(--dsw-alias-bg-layer-1)',
   },
   deviceCodeText: {
@@ -250,13 +238,11 @@ const styles: Record<string, CSSProperties> = {
     color: 'var(--dsw-alias-label-primary)', userSelect: 'all',
   },
   proxyField: { display: 'flex', flexDirection: 'column', gap: 4 },
-  proxyLabel: { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-secondary)' },
-  proxyInput: {
-    height: 32, width: '100%', boxSizing: 'border-box',
-    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8,
-    padding: '0 10px', font: 'inherit', fontSize: 14, lineHeight: '22px',
-    background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)',
-  },
+  proxyLabel: { fontSize: 13, fontWeight: 500, lineHeight: '20px', color: 'var(--dsw-alias-label-primary)' },
+  proxyInput: { width: '100%' },
+  manual: { fontSize: 13, lineHeight: '20px' },
+  manualRow: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginTop: 8 },
+  manualInput: { flex: '1 1 200px', minWidth: 0 },
   proxyHint: {
     margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)',
   },
@@ -269,16 +255,16 @@ const styles: Record<string, CSSProperties> = {
   modalOverlay: {
     position: 'fixed', inset: 0, zIndex: 1000,
     display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16,
-    background: 'rgba(0, 0, 0, 0.45)',
+    background: 'var(--dsw-alias-bg-mask-1, #0006)', backdropFilter: 'var(--dsw-mask-blur, none)',
   },
   modal: {
     width: 460, maxWidth: '100%', maxHeight: '90vh', overflowY: 'auto',
     boxSizing: 'border-box', display: 'flex', flexDirection: 'column', gap: 12,
-    padding: '16px 18px', borderRadius: 12,
-    background: 'var(--dsw-alias-bg-layer-1)', border: '1px solid var(--dsw-alias-border-l2)',
+    padding: '16px 18px', borderRadius: 'var(--dsw-radius-panel, 28px)',
+    background: 'var(--dsw-alias-bg-layer-2)', border: 0, boxShadow: 'var(--dsw-elevation-prominent)',
   },
   modalHeader: { display: 'flex', alignItems: 'center', gap: 8 },
-  modalTitle: { fontWeight: 600, fontSize: 15, lineHeight: '22px', color: 'var(--dsw-alias-label-primary)' },
+  modalTitle: { fontWeight: 500, fontSize: 16, lineHeight: '24px', color: 'var(--dsw-alias-label-primary)' },
 }
 
 /** Status dot color for one provider state. */
@@ -791,7 +777,8 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   }
 
   return (
-    <div style={styles.section}>
+    <div className="dsh-subscriptions-settings" style={styles.section}>
+      <style>{providerSettingsCss}</style>
       <p style={styles.intro}>{t('intro')}</p>
       <UsageBadgeDisplaySetting t={t} />
       <div style={styles.proxyCard}>
@@ -805,7 +792,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
           <span style={styles.name}>{t('proxyTitle')}</span>
           <button
             type="button"
-            style={{ ...styles.button, marginLeft: 'auto', flexShrink: 0 }}
+            style={{ marginLeft: 'auto', flexShrink: 0 }}
             onClick={openProxyDialog}
           >
             {t('proxyConfigure')}
@@ -863,7 +850,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                     )}
                     <button
                       type="button"
-                      style={{ ...styles.button, marginLeft: 'auto', flexShrink: 0 }}
+                      style={{ marginLeft: 'auto', flexShrink: 0 }}
                       onClick={() => { void logout(id, account.key, display, name) }}
                     >
                       {t('logout')}
@@ -878,7 +865,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                         )}
                         <button
                           type="button"
-                          style={{ ...styles.usageRefresh, ...usageLoading[usageKey] === true ? { opacity: 0.5, cursor: 'default' } : {} }}
+                          style={styles.usageRefresh}
                           disabled={usageLoading[usageKey] === true}
                           onClick={() => { void loadUsage(id, account.key, true) }}
                         >
@@ -919,31 +906,31 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
             })}
             <div style={styles.actions}>
               {!busy && accounts.length === 0 && (
-                <button type="button" style={styles.button} onClick={() => { void login(id) }}>
+                <button type="button" onClick={() => { void login(id) }}>
                   {t('login')}
                 </button>
               )}
               {!busy && accounts.length > 0 && id === 'claude' && (
                 <>
-                  <button type="button" style={styles.button} onClick={() => { void login(id, 'oauth') }}>
+                  <button type="button" onClick={() => { void login(id, 'oauth') }}>
                     {t('addAccountOAuth')}
                   </button>
-                  <button type="button" style={styles.button} onClick={() => { void login(id, 'keychain') }}>
+                  <button type="button" onClick={() => { void login(id, 'keychain') }}>
                     {t('addAccountKeychain')}
                   </button>
                 </>
               )}
               {!busy && accounts.length > 0 && id !== 'claude' && (
-                <button type="button" style={styles.button} onClick={() => { void login(id) }}>
+                <button type="button" onClick={() => { void login(id) }}>
                   {t('addAccount')}
                 </button>
               )}
-              <button type="button" style={styles.button} aria-haspopup="dialog"
+              <button type="button" aria-haspopup="dialog"
                 onClick={() => setManagedProvider({ id, name })}>
                 {t('accountsManage')}
               </button>
               {busy && (
-                <button type="button" style={styles.button} onClick={() => { void cancel(id) }}>
+                <button type="button" onClick={() => { void cancel(id) }}>
                   {t('cancel')}
                 </button>
               )}
@@ -957,12 +944,11 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 <span style={styles.statusLine}>{t('deviceCodePrompt')}</span>
                 <span style={styles.deviceCodeText}>{deviceCode.userCode}</span>
                 <div style={styles.actions}>
-                  <button type="button" style={styles.button} onClick={() => { copyDeviceCode(id, deviceCode.userCode) }}>
+                  <button type="button" onClick={() => { copyDeviceCode(id, deviceCode.userCode) }}>
                     {copiedCode === id ? t('deviceCodeCopied') : t('deviceCodeCopy')}
                   </button>
                   <button
                     type="button"
-                    style={styles.button}
                     onClick={() => { window.open(deviceCode.verificationUrl, '_blank', 'noopener') }}
                   >
                     {t('deviceCodeOpenPage')}
@@ -980,7 +966,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                     placeholder={t('manualPlaceholder')}
                     onChange={event => setManualDrafts(prev => ({ ...prev, [id]: event.target.value }))}
                   />
-                  <button type="button" style={styles.button} onClick={() => { void submitManual(id) }}>
+                  <button type="button" onClick={() => { void submitManual(id) }}>
                     {t('submit')}
                   </button>
                 </div>
@@ -996,7 +982,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
           <div style={styles.modal} onClick={event => event.stopPropagation()}>
             <div style={styles.modalHeader}>
               <span style={styles.modalTitle}>{t('proxyDialogTitle')}</span>
-              <button type="button" style={{ ...styles.button, marginLeft: 'auto' }} onClick={() => setProxyOpen(false)}>
+              <button type="button" style={{ marginLeft: 'auto' }} onClick={() => setProxyOpen(false)}>
                 {t('proxyDialogClose')}
               </button>
             </div>
@@ -1069,10 +1055,9 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                   : t('proxyTestFail', { message: proxyTestResult.error ?? '' })}
               </p>
             )}
-            <div style={styles.proxyActions}>
+            <div className="dsh-subscription-dialog-actions" style={styles.proxyActions}>
               <button
                 type="button"
-                style={{ ...styles.button, ...proxyTesting ? { opacity: 0.5, cursor: 'default' } : {} }}
                 disabled={proxyTesting}
                 onClick={() => { void testProxy() }}
               >
@@ -1080,13 +1065,13 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
               </button>
               <button
                 type="button"
-                style={{ ...styles.button, ...proxySaving ? { opacity: 0.5, cursor: 'default' } : {} }}
+                className="dsh-subscription-primary"
                 disabled={proxySaving}
                 onClick={() => { void saveProxy() }}
               >
                 {proxySaving ? t('proxySaving') : t('proxySave')}
               </button>
-              <button type="button" style={styles.button} onClick={() => setProxyOpen(false)}>
+              <button type="button" onClick={() => setProxyOpen(false)}>
                 {t('proxyCancel')}
               </button>
             </div>

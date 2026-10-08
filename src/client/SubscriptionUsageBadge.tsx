@@ -23,6 +23,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ComponentType, CSSProperties } from 'react'
+import { subscriptionChromeCss } from './provider-settings-styles.js'
 import { createPortal } from 'react-dom'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
@@ -125,7 +126,7 @@ export function createCurrentModelReader(
 
 /**
  * Compact time-remaining label derived from the window's `resetsAt` timestamp:
- * "6d18h" (days+hours), "1h58m" (hours+minutes), or "42m" (minutes only).
+ * "6d 18h" (days+hours), "1h 58m" (hours+minutes), or "42m" (minutes only).
  * Falls back to the scope/kind abbreviation when no reset time is known.
  */
 export function windowLabel(w: UsageWindow): string {
@@ -141,8 +142,8 @@ export function windowLabel(w: UsageWindow): string {
   const minutes = Math.floor(ms / 60_000)
   const hours = Math.floor(minutes / 60)
   const days = Math.floor(hours / 24)
-  if (days > 0) return `${days}d${hours % 24}h`
-  if (hours > 0) return `${hours}h${minutes % 60}m`
+  if (days > 0) return `${days}d ${hours % 24}h`
+  if (hours > 0) return `${hours}h ${minutes % 60}m`
   return `${Math.max(1, minutes)}m`
 }
 
@@ -246,7 +247,7 @@ function usageWindowLabel(t: Translate, window: UsageWindow): string {
 
 /**
  * The composer subscription-usage badge: a pill reading e.g.
- * `Codex 6d1h 25%` for the current model's provider, opening a dialog with
+ * `Codex 6d 1h 25%` for the current model's provider, opening a dialog with
  * every provider's accounts and their windows. Returns null when no data is
  * available.
  */
@@ -446,8 +447,10 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
 
   const pill = (
     <span ref={rootRef} style={styles.anchor}>
+      <style>{subscriptionChromeCss}</style>
       <button
         type="button"
+        className="dsh-subscription-usage-pill"
         style={{ ...styles.pill, ...(hover || open ? styles.pillActive : {}) }}
         aria-haspopup="dialog"
         aria-expanded={open}
@@ -465,6 +468,7 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
           ref={panelRef}
           role="dialog"
           aria-label={title}
+          className="dsh-subscription-usage-panel"
           style={{ ...styles.panel, ...(pos ?? MEASURE_STYLE) }}
         >
           <div style={styles.title}>
@@ -566,7 +570,7 @@ export function AccountWindows({ windows, model, provider, translate }: {
   </>
 }
 
-/** One `dt`/`dd` pair: window name → `25% · 6d1h`, with the bar underneath. */
+/** One `dt`/`dd` pair: window name → `25% · 6d 1h`, with the bar underneath. */
 function WindowRow({ label, window: w }: { label: string; window: UsageWindow }) {
   const percent = usedPercent(w)
   return (
@@ -597,9 +601,9 @@ const styles: Record<string, CSSProperties> = {
   pill: {
     boxSizing: 'border-box', maxWidth: '100%',
     color: 'var(--dsw-alias-label-tertiary)',
-    font: 'inherit', fontSize: 'var(--dsh-content-font-size-secondary, 13px)',
-    fontVariantNumeric: 'tabular-nums', lineHeight: '20px', whiteSpace: 'nowrap',
-    background: 'transparent', border: 'none', borderRadius: 24,
+    font: 'inherit', fontSize: 'calc(var(--dsh-content-font-size-secondary, 13px) - 1px)',
+    fontVariantNumeric: 'tabular-nums', lineHeight: 'calc(20px + var(--dsh-content-font-delta-secondary, 0px))', whiteSpace: 'nowrap',
+    background: 'transparent', border: 'none', borderRadius: 999,
     alignItems: 'center', gap: 6, padding: '1px 8px', display: 'inline-flex', cursor: 'pointer',
   },
   pillActive: {
@@ -615,7 +619,7 @@ const styles: Record<string, CSSProperties> = {
     maxHeight: 'min(560px, 100dvh - 24px)', overflowY: 'auto', overscrollBehavior: 'contain',
     boxShadow: 'var(--dsw-elevation-prominent)',
     color: 'var(--dsw-alias-label-secondary)', cursor: 'default',
-    border: 0, borderRadius: 12, padding: 16, fontSize: 12, lineHeight: '18px',
+    border: 0, borderRadius: 'var(--dsw-radius-lg, 16px)', padding: 16, fontSize: 12, lineHeight: '18px',
   },
   title: {
     color: 'var(--dsw-alias-label-primary)', display: 'flex',
