@@ -1,5 +1,5 @@
 import { LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
-import type { GenerateOptions, LlmModelInfo, LlmResolvedModelInfo, PreparedAdapterCall, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, PreparedAdapterCall, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { ProviderId } from '../auth/store.js'
 import type { ProviderSettingsStore, AccountPreferences } from '../provider-settings.js'
 import type { AccountAwareAdapter } from './accounts.js'
@@ -39,7 +39,11 @@ interface Options {
 /** Keeps the registered route separate from raw adapters and pool member seams. */
 export class AccountPreferencesAdapter extends LlmAdapter {
   constructor(private readonly options: Options) { super() }
-  override providerInfo(provider: string) { return this.options.adapter.providerInfo(provider) }
+  override providerInfo(provider: string): LlmProviderInfo {
+    const info = this.options.adapter.providerInfo(provider)
+    // Native model groups read provider metadata, separately from model names.
+    return { ...info, name: this.options.settings.get(this.options.provider).displayName ?? info.name }
+  }
   override providerRetryPolicy(provider: string) { return this.options.adapter.providerRetryPolicy(provider) }
   private preference(account: string): AccountPreferences | undefined {
     const accounts = this.options.settings.get(this.options.provider).accounts
@@ -106,7 +110,7 @@ export class AccountPreferencesAdapter extends LlmAdapter {
         if (accountAllowsPool(preferences, model.id) && this.options.settings.visible(this.options.provider, model.id) && !result.has(model.id)) result.set(model.id, model)
         if (preferences?.independentEntry === true && this.options.settings.visible(this.options.provider, model.id)) {
           const id = accountModelId(key, model.id)
-          result.set(id, { ...model, id, name: `${preferences.alias || label} · ${model.name}` })
+          result.set(id, { ...model, id, name: `${preferences.alias || label} · ${this.options.settings.modelName(this.options.provider, model.id, model.name)}` })
         }
       }
     }
@@ -115,7 +119,9 @@ export class AccountPreferencesAdapter extends LlmAdapter {
       try { await this.options.pool()!.resolveModel(provider, model.id); result.set(model.id, model) } catch { /* excluded tier */ }
     }
     const priority = (model: LlmModelInfo): number => (model as LlmModelInfo & { priority?: number }).priority ?? Number.MAX_SAFE_INTEGER
-    return [...result.values()].sort((left, right) => priority(left) - priority(right))
+    return [...result.values()].map(model => ({ ...model,
+      name: this.options.settings.modelName(this.options.provider, model.id, model.name),
+    })).sort((left, right) => priority(left) - priority(right))
   }
   override async resolveModel(provider: string, id: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
     return (await this.prepareCall(provider, id, signal)).model
@@ -125,7 +131,8 @@ export class AccountPreferencesAdapter extends LlmAdapter {
     const independent = parseAccountModelId(id)
     const pool = this.options.pool()
     if (!independent && pool && await withAbortSignal(() => pool.owns(this.options.provider, id), signal)) {
-      return pool.prepareCall(provider, id, signal)
+      const prepared = await pool.prepareCall(provider, id, signal)
+      return { ...prepared, model: this.present(id, prepared.model) }
     }
     const account = independent?.account ?? await this.fallback(id, signal)
     const model = independent?.model ?? id
@@ -133,8 +140,9 @@ export class AccountPreferencesAdapter extends LlmAdapter {
     const info = await withAbortSignal(() => this.options.adapter.resolveOwnModel(provider, model, account), signal)
     const label = independent ? (await withAbortSignal(this.options.accounts, signal)).find(entry => entry.key === account)?.label ?? account : undefined
     const owner = this
+    const named = this.present(model, info)
     return {
-      model: independent ? { ...info, id, name: `${this.preference(account)?.alias || label} · ${info.name}` } : info,
+      model: independent ? { ...named, id, name: `${this.preference(account)?.alias || label} · ${named.name}` } : named,
       async *stream(options) {
         // Keep the capability-bearing account; revoked permission must fail instead of rerouting.
         await owner.requireAccount(account, model, independent !== undefined, options.signal)
@@ -142,6 +150,10 @@ export class AccountPreferencesAdapter extends LlmAdapter {
         yield* streamAccountWithReplay(owner.options.adapter, options, account, model)
       },
     }
+  }
+  /** Presentation only: routing still uses the original model id. */
+  private present(id: string, info: LlmResolvedModelInfo): LlmResolvedModelInfo {
+    return { ...info, name: this.options.settings.modelName(this.options.provider, id, info.name) }
   }
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     const independent = parseAccountModelId(options.model)

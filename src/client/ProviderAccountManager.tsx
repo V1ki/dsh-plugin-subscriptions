@@ -9,6 +9,7 @@ import { accountModelRows, accountPoolSelection, mergeAccountChanges, mergeLates
 import type { AccountCatalogRow } from './account-preferences.js'
 import { ProviderModelEditor } from './ProviderModelEditor.js'
 import type { ProviderModelEditorHandle } from './ProviderModelEditor.js'
+import { notifyDisplayNameChange } from './display-name-events.js'
 import { providerSettingsCss } from './provider-settings-styles.js'
 
 interface Catalog { settings: ProviderPreferences; accounts: AccountCatalogRow[] }
@@ -36,6 +37,8 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
   const [saveError, setSaveError] = useState('')
   const [attempt, setAttempt] = useState(0)
   const [modelsDirty, setModelsDirty] = useState(false)
+  const [displayName, setDisplayName] = useState('')
+  const [nameDirty, setNameDirty] = useState(false)
   const alive = useRef(true)
   const saveLock = useRef(false)
   const editor = useRef<ProviderModelEditorHandle>(null)
@@ -55,7 +58,7 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
     setLoading(true)
     setError('')
     void callSubscriptionsAuth<Catalog>(rpc, 'providerSettings', { provider }).then(data => {
-      if (current) setCatalog(data)
+      if (current) { setCatalog(data); setDisplayName(data.settings.displayName ?? '') }
     }).catch(error => {
       if (current) setError(t('accountsLoadFailed', { message: error instanceof Error ? error.message : String(error) }))
     }).finally(() => { if (current) setLoading(false) })
@@ -91,7 +94,11 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
       const latest = await callSubscriptionsAuth<Catalog>(rpc, 'providerSettings', { provider })
       if (!alive.current) return
       const base = models.settings === undefined ? latest.settings : mergeLatestAccounts(models.settings, latest.settings)
-      await callSubscriptionsAuth(rpc, 'setProviderSettings', { provider, settings: mergeAccountChanges(base, changes) })
+      const { displayName: _staleName, ...rest } = mergeAccountChanges(base, changes)
+      const savedName = nameDirty ? displayName.trim() : latest.settings.displayName
+      const settings = { ...rest, ...(savedName ? { displayName: savedName } : {}) }
+      await callSubscriptionsAuth(rpc, 'setProviderSettings', { provider, settings })
+      notifyDisplayNameChange(provider, settings.displayName)
       if (alive.current) onClose()
     } catch (error) {
       if (alive.current) {
@@ -117,6 +124,18 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
       {loading && <p role="status" className="dsh-subscription-hint">{t('accountsLoading')}</p>}
       {!loading && !catalog && <button type="button" onClick={() => setAttempt(value => value + 1)}>{t('modelDefaultsRetry')}</button>}
       {catalog && <fieldset disabled={saving || loading} style={{ ...stack, border: 0, margin: 0, padding: 0 }}>
+        <section style={{ ...stack, gap: 6, paddingBottom: 8 }}>
+          <label style={{ ...stack, gap: 6 }}>
+            <strong>{t('subscriptionDisplayName')}</strong>
+            <input maxLength={80} value={displayName} placeholder={name}
+              onChange={event => { setDisplayName(event.target.value); setNameDirty(true) }} />
+          </label>
+          <div style={{ ...actions, justifyContent: 'space-between' }}>
+            <small className="dsh-subscription-hint">{t('subscriptionDisplayNameHint')}</small>
+            <button type="button" disabled={!displayName}
+              onClick={() => { setDisplayName(''); setNameDirty(true) }}>{t('displayNameReset')}</button>
+          </div>
+        </section>
         {catalog.accounts.length === 0 && <p className="dsh-subscription-hint">{t('accountsEmpty')}</p>}
         {catalog.accounts.map(account => {
           const preferences = changes[account.key] ?? catalog.settings.accounts?.[account.key] ?? {}
@@ -176,7 +195,7 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
         {saveError && <p role="alert">{saveError}</p>}
         <div style={{ ...actions, justifyContent: 'flex-end' }}>
           <button type="button" disabled={saving} onClick={onClose}>{t('cancel')}</button>
-          <button type="button" className="dsh-subscription-primary" disabled={loading || saving || (!Object.keys(changes).length && !modelsDirty)}
+          <button type="button" className="dsh-subscription-primary" disabled={loading || saving || (!Object.keys(changes).length && !modelsDirty && !nameDirty)}
             onClick={() => { void save() }}>{saving ? t('modelDefaultsSaving') : t('modelsSave')}</button>
         </div>
       </footer>

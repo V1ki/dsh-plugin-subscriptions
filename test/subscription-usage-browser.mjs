@@ -16,7 +16,7 @@ const result = await build({
   output: { format: 'iife' }, write: false,
 })
 const code = result.output.find(file => file.type === 'chunk').code
-const browser = await chromium.launch({ headless: true })
+const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE } : {}) })
 try {
   const context = await browser.newContext({ viewport: { width: 900, height: 900 } })
   await context.route('**/*', route => route.fulfill({ status: 200, contentType: route.request().url().endsWith('/app.js') ? 'text/javascript; charset=utf-8' : 'text/html; charset=utf-8',
@@ -48,6 +48,17 @@ try {
     assert.match(await badge.innerText(), new RegExp(`^${expected} .*%`))
     assert.equal((await badge.innerText()).includes('|'), false)
   }
+  await choose('grok', 'grok')
+  await page.getByRole('button', { name: 'Rename Grok', exact: true }).click()
+  assert.match(await badge.innerText(), /^我的 Grok /)
+  await badge.click()
+  await panel.waitFor()
+  assert.match(await panel.locator('section').first().innerText(), /^我的 Grok/)
+  await page.keyboard.press('Escape')
+  await page.getByRole('button', { name: 'Reset Grok', exact: true }).click()
+  assert.match(await badge.innerText(), /^Grok /)
+  await choose('antigravity', 'antigravity')
+  await choose('api', 'deepseek')
   console.log('40%: current/recent single-provider selection verified')
   await badge.click()
   await panel.waitFor()

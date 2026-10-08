@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { LlmRuntime, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { Context } from '@deepseek-ai/cordis'
 import type { AccountAwareAdapter } from '../src/providers/accounts.js'
 import { CodexAdapter } from '../src/providers/codex.js'
@@ -18,12 +18,12 @@ test('provider settings RPC edits picker visibility without losing the editor ca
   const ctx = new Context()
   const adapters = new Map<string, AccountAwareAdapter>()
   const tools = new Set<string>()
-  ctx.provide('llm', {
-    registerAdapter: (routes: string[], adapter: AccountAwareAdapter) => {
-      adapters.set(routes[0], adapter)
-      return Object.assign(() => {}, { replace: () => {} })
-    },
-  })
+  const llm = new LlmRuntime(ctx)
+  const registerAdapter = llm.registerAdapter.bind(llm)
+  llm.registerAdapter = (routes: string[], adapter: AccountAwareAdapter) => {
+    adapters.set(routes[0], adapter)
+    return registerAdapter(routes, adapter)
+  }
   const connection = createFakeConnection()
   ctx.provide('connection', connection.connection)
   ctx.provide('tools', { register: (definition: { name: string }) => { tools.add(definition.name); return () => {} } })
@@ -38,6 +38,7 @@ test('provider settings RPC edits picker visibility without losing the editor ca
     await new Promise(resolve => setTimeout(resolve, 50))
     if (!connection.registered()) await runtime
     assert.ok(connection.registered())
+    assert.deepEqual(llm.listProviders(), [{ id: 'codex', name: 'ChatGPT (Codex)' }, { id: 'grok', name: 'Grok (Subscription)' }])
     await saveAccountSession('codex', 'account', { accessToken: 'token', refreshToken: 'refresh', expiresAt: Date.now() + 3600_000, accountId: 'account', idToken: '' })
     const call = (endpoint: string, payload: unknown) => connection.handler(endpoint, payload, new AbortController().signal)
     assert.equal((await call('setProviderSettings', { provider: 'codex', settings: { visibleModels: ['m1'], tools: { image_generate: false, web_search: false } } })).ok, true)
@@ -58,6 +59,24 @@ test('provider settings RPC edits picker visibility without losing the editor ca
     assert.equal((await call('setProviderSettings', { provider: 'codex', settings: { contextWindows: { m1: 0 } } })).ok, false)
     assert.equal((await call('setProviderSettings', { provider: 'claude', settings: {} })).ok, false)
 
+    const names = { displayName: '我的 Codex', modelDisplayNames: { m1: '主力模型' },
+      visibleModels: ['m1'], tools: { image_generate: false, web_search: false } }
+    assert.equal((await call('setProviderSettings', { provider: 'codex', settings: names })).ok, true)
+    const status = await call('status', {})
+    assert.ok(status.ok)
+    assert.equal((status.value as { providers: { codex: { displayName?: string } } }).providers.codex.displayName, '我的 Codex')
+    assert.equal(llm.listProviders().find(provider => provider.id === 'codex')?.name, '我的 Codex')
+    assert.equal((await adapters.get('codex')!.listModels('codex'))[0].name, '主力模型')
+    const fresh = await call('providerSettings', { provider: 'codex', force: true })
+    assert.ok(fresh.ok)
+    assert.equal((fresh.value as { settings: { displayName: string } }).settings.displayName, '我的 Codex')
+    assert.equal((fresh.value as { models: { name: string }[] }).models[0].name, 'Model 1')
+    assert.equal(llm.listProviders().find(provider => provider.id === 'codex')?.name, '我的 Codex')
+    const renamed = await adapters.get('codex')!.resolveModel('codex', 'm1')
+    assert.equal(renamed.id, 'm1')
+    assert.equal(renamed.name, '主力模型')
+    assert.deepEqual(renamed.reasoning?.efforts.map(e => e.id), ['high'])
+
     const create = (at: number) => {
       const denied: string[] = []
       const agent = { session: { header: { createdAt: at } }, ctx: { tools: { restrict: ({ deny }: { deny: string[] }) => { denied.push(...deny) } } } }
@@ -70,11 +89,13 @@ test('provider settings RPC edits picker visibility without losing the editor ca
     // disabled Codex web_search withdraws this plugin's search provider rather
     // than denying the host's own web_search tool to every other provider.
     assert.deepEqual(create(Date.now() + 1000), [])
-    assert.equal((await call('setProviderSettings', { provider: 'grok', settings: { tools: { image_generate: false, video_generate: false } } })).ok, true)
+    assert.equal((await call('setProviderSettings', { provider: 'grok', settings: { displayName: 'MiniMax', tools: { image_generate: false, video_generate: false } } })).ok, true)
+    assert.equal(llm.listProviders().find(provider => provider.id === 'grok')?.name, 'MiniMax')
     assert.deepEqual(old, [])
     assert.deepEqual(create(Date.now() + 1000).sort(), ['image_generate', 'video_generate'])
     assert.deepEqual([...tools].sort(), ['image_generate', 'video_generate', 'x_search'])
     assert.equal((await call('setProviderSettings', { provider: 'codex', settings: {} })).ok, true)
+    assert.equal(llm.listProviders().find(provider => provider.id === 'codex')?.name, 'ChatGPT (Codex)')
     assert.equal((await adapters.get('codex')!.listModels('codex')).length, 2)
   } finally {
     await runtime.dispose()
@@ -91,12 +112,12 @@ test('Antigravity registers the real multi-account adapter with provider setting
   process.env.DSH_HOME = home
   const ctx = new Context()
   const adapters = new Map<string, AccountAwareAdapter>()
-  ctx.provide('llm', {
-    registerAdapter: (routes: string[], adapter: AccountAwareAdapter) => {
-      adapters.set(routes[0], adapter)
-      return Object.assign(() => {}, { replace: () => {} })
-    },
-  })
+  const llm = new LlmRuntime(ctx)
+  const registerAdapter = llm.registerAdapter.bind(llm)
+  llm.registerAdapter = (routes: string[], adapter: AccountAwareAdapter) => {
+    adapters.set(routes[0], adapter)
+    return registerAdapter(routes, adapter)
+  }
   const connection = createFakeConnection()
   ctx.provide('connection', connection.connection)
   const runtime = ctx.plugin(plugin, {
@@ -112,6 +133,7 @@ test('Antigravity registers the real multi-account adapter with provider setting
     }
     await new Promise(resolve => setTimeout(resolve, 50))
     assert.ok(connection.registered(), 'the subscriptions-auth Fetch routes were registered')
+    assert.deepEqual(llm.listProviders(), [{ id: 'antigravity', name: 'Google Antigravity' }])
     assert.deepEqual((await listAccounts('antigravity')).map(entry => entry.key), ['alice', 'bob'])
     const adapter = adapters.get('antigravity')!
     assert.deepEqual((await adapter.listModels('antigravity')).map(model => model.id), ['m1', 'm2'])
@@ -121,7 +143,8 @@ test('Antigravity registers the real multi-account adapter with provider setting
     assert.deepEqual((catalog.value as { models: { id: string }[] }).models.map(model => model.id), ['m1', 'm2'])
     assert.deepEqual((catalog.value as { tools: string[] }).tools, [])
     assert.deepEqual((catalog.value as { accounts: unknown[] }).accounts, ['alice', 'bob'].map(key => ({ key, label: key, models: [{ id: 'm1', name: 'm1' }, { id: 'm2', name: 'm2' }] })))
-    assert.equal((await call('setProviderSettings', { provider: 'antigravity', settings: { visibleModels: ['m2'] } })).ok, true)
+    assert.equal((await call('setProviderSettings', { provider: 'antigravity', settings: { displayName: 'Qwen', visibleModels: ['m2'] } })).ok, true)
+    assert.deepEqual(llm.listProviders(), [{ id: 'antigravity', name: 'Qwen' }])
     assert.deepEqual((await adapter.listModels('antigravity')).map(model => model.id), ['m2'])
     assert.equal((await call('setProviderSettings', { provider: 'antigravity', settings: { tools: { image_generate: true } } })).ok, false)
   } finally {

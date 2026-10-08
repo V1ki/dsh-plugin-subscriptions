@@ -97,6 +97,7 @@ export interface AccountStatus {
 
 /** Login state of one provider, as rendered by the Settings page. */
 export interface ProviderStatus {
+  displayName?: string
   /** Whether a login attempt is currently waiting for its code. */
   busy: boolean
   /** Logged-in accounts, default first. */
@@ -151,6 +152,8 @@ export interface ProviderAccountCatalog {
 
 /** Provider and account preference operations behind providerSettings/setProviderSettings. */
 export interface ProviderSettingsController {
+  /** Local preferences only: status must not fetch a model catalog. */
+  displayName?(provider: ProviderId): string | undefined
   get(provider: ProviderId, force: boolean): Promise<unknown>
   set(provider: ProviderId, settings: unknown): Promise<void>
 }
@@ -541,7 +544,10 @@ async function dispatch(
           detail: error instanceof Error ? error.message : String(error),
         }) satisfies ProviderStatus)] as const,
       ))
-      return ok({ providers: Object.fromEntries(entries) })
+      return ok({ providers: Object.fromEntries(entries.map(([provider, status]) => {
+        const displayName = providerSettings?.displayName?.(provider)
+        return [provider, { ...status, ...(displayName ? { displayName } : {}) }]
+      })) })
     }
     case 'login': {
       const provider = readProvider(payload)

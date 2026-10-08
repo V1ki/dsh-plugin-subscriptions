@@ -1172,6 +1172,7 @@ export function apply(ctx: Context, config: Config): void {
     set: input => proxySetConfig(input),
     test: payload => proxyTestConnection(payload.url, payload.proxy),
   }, modelDefaults, {
+    displayName: provider => preferences.get(provider).displayName,
     async get(provider, force) {
       await loadModelDefaults()
       const adapter = adapters.get(provider)
