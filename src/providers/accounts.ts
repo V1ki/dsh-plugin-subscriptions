@@ -39,8 +39,9 @@ export interface AccountAwareAdapter extends LlmAdapter {
    * The provider's own catalog: one account when `account` is set, otherwise
    * the union of every logged-in account (default first; later duplicates
    * dropped). The picker uses the union; pool assembly lists each account.
+   * `preferCached` serves saved metadata without starting an interactive refresh.
    */
-  listOwnModels(provider: string, account?: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]>
+  listOwnModels(provider: string, account?: string, signal?: AbortSignal, preferCached?: boolean): Promise<readonly LlmModelInfo[]>
   /**
    * The last catalog one account successfully listed, with no network.
    * Routing falls back to it when a live `listOwnModels` times out.

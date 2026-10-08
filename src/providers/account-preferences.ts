@@ -51,7 +51,7 @@ export class AccountPreferencesAdapter extends LlmAdapter {
   }
   private async models(account: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]> {
     const models = await withAbortSignal(() => withTimeout(
-      signal => this.options.adapter.listOwnModels(this.options.provider, account, signal),
+      signal => this.options.adapter.listOwnModels(this.options.provider, account, signal, true),
       this.options.discoveryTimeoutMs ?? DISCOVERY_TIMEOUT_MS,
     ), signal)
     if (models !== undefined) return models
