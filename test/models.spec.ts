@@ -557,6 +557,27 @@ test('codexRequestBody sends service_tier priority only on the fast tier', () =>
   assert.deepEqual(fast.reasoning, { effort: 'high', summary: 'auto' })
 })
 
+test('codexRequestBody lowers the client-only "ultra" effort to "max" on the wire', () => {
+  // A preference saved before discovery stopped listing "ultra" must not
+  // reach the Responses API verbatim (HTTP 400); Codex itself sends "max".
+  const ultra = codexRequestBody(
+    { provider: 'codex', model: 'gpt-6-sol', messages: [], reasoningEffort: ReasoningEffortId('ultra') },
+    { input: [] },
+    false,
+  )
+  assert.deepEqual(ultra.reasoning, { effort: 'max', summary: 'auto' })
+
+  // Every other effort is forwarded unchanged.
+  for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
+    const body = codexRequestBody(
+      { provider: 'codex', model: 'gpt-6-sol', messages: [], reasoningEffort: ReasoningEffortId(effort) },
+      { input: [] },
+      false,
+    )
+    assert.deepEqual(body.reasoning, { effort, summary: 'auto' })
+  }
+})
+
 test('codexRequestBody reconciles orphaned tool calls before dispatch', () => {
   const missing = codexRequestBody(
     { provider: 'codex', model: 'gpt-5.6-sol', messages: [] },

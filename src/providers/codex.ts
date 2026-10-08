@@ -641,6 +641,17 @@ export function reconcileResponsesToolCalls(input: ResponsesRequestInput['input'
 }
 
 /**
+ * The `reasoning.effort` wire value for a selected effort. Codex's "ultra" is
+ * a client-side selection (max reasoning plus proactive sub-agent delegation)
+ * that the Codex CLI itself lowers to `max` at the Responses API boundary;
+ * the backend answers HTTP 400 to a literal `ultra`. Discovery no longer
+ * lists it, but an effort saved before that change may still arrive here.
+ */
+export function codexWireEffort(effort: string): string {
+  return effort === 'ultra' ? 'max' : effort
+}
+
+/**
  * The Responses request body for one generation. A fast-tier request (the
  * composer Speed toggle, the codex CLI's fast mode) carries
  * `service_tier: priority`; the tier field is omitted entirely otherwise,
@@ -662,7 +673,7 @@ export function codexRequestBody(
       ? { tools: toResponsesTools(options.tools, { strict: false }), tool_choice: 'auto', parallel_tool_calls: true }
       : {},
     ...options.reasoningEffort !== undefined
-      ? { reasoning: { effort: String(options.reasoningEffort), summary: 'auto' } }
+      ? { reasoning: { effort: codexWireEffort(String(options.reasoningEffort)), summary: 'auto' } }
       : {},
     store: false,
     stream: true,
