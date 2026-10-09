@@ -142,6 +142,15 @@ test('registered plugin refreshes at startup and hourly, while menus and disposa
     assert.equal(requests, 1, 'six-minute-old cached menu reads do not fetch')
     t.mock.timers.tick(54 * 60_000)
     for (let i = 0; i < 500 && requests < 2; i++) await settle()
+    // The hour is counted from when the job's first run COMPLETES, and that
+    // run does real file I/O (auth and catalog stores) the fixed settle
+    // budget above cannot bound on a loaded CI runner; if it finished during
+    // the six-minute menu-read window the timer lands a few minutes past the
+    // hour. Allow that bounded slack instead of a second full hour.
+    for (let extra = 0; extra < 10 && requests < 2; extra++) {
+      t.mock.timers.tick(60_000)
+      for (let i = 0; i < 50 && requests < 2; i++) await settle()
+    }
     assert.equal(requests, 2, 'the hourly job must actually be registered by the plugin')
     await runtime.dispose()
     t.mock.timers.tick(CATALOG_REFRESH_INTERVAL_MS)
