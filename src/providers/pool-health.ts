@@ -107,6 +107,14 @@ interface HealthRecord {
   reason: string
 }
 
+/** One cooling record, named by its registry key (feeds the exhausted-pool diagnosis). */
+export interface CoolingRecord {
+  key: string
+  unavailableUntil: number
+  /** The failure code that parked the member (`RATE_LIMIT`, `AUTH`, `SERVER`, …). */
+  reason: string
+}
+
 /**
  * Cooldown registry keyed by {@link memberKey}. A member whose cooldown has
  * expired is simply available again — recovery is proven by the next real
@@ -149,15 +157,25 @@ export class PoolHealthRegistry {
    * `providerRetryAfterMs`.
    */
   earliestRecovery(keys: ReadonlySet<string>, now = Date.now()): number | undefined {
-    let earliest: number | undefined
+    return this.earliestRecoveryRecord(keys, now)?.unavailableUntil
+  }
+
+  /**
+   * The earliest-recovering cooling record among `keys` (with the failure
+   * code that parked it), or `undefined` when none of them is cooling. Lets
+   * an exhausted pool say WHY its members are parked, instead of assuming a
+   * rate limit.
+   */
+  earliestRecoveryRecord(keys: ReadonlySet<string>, now = Date.now()): CoolingRecord | undefined {
+    let earliest: CoolingRecord | undefined
     for (const [key, record] of this.records) {
       if (record.unavailableUntil <= now) {
         this.records.delete(key)
         continue
       }
       if (!keys.has(key)) continue
-      if (earliest === undefined || record.unavailableUntil < earliest) {
-        earliest = record.unavailableUntil
+      if (earliest === undefined || record.unavailableUntil < earliest.unavailableUntil) {
+        earliest = { key, unavailableUntil: record.unavailableUntil, reason: record.reason }
       }
     }
     return earliest

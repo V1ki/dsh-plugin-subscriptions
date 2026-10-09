@@ -261,11 +261,13 @@ export class PoolAdapter extends LlmAdapter {
   private async *streamMembers(options: GenerateOptions, members: ConcretePoolMember[]): AsyncIterable<StreamChunk> {
     const candidates = await withAbortSignal(() => this.select(options.model, members, options.sessionId), options.signal)
     if (candidates.length === 0) throw this.exhausted(options.model, members)
-    let lastError: unknown
+    let lastFailure: MemberFailure | undefined
+    let tried = 0
     for (const member of candidates) {
       options.signal?.throwIfAborted()
       const adapter = this.options.adapters[member.provider]
       if (adapter === undefined) continue
+      tried += 1
       const iterator = streamAccountWithReplay(
         adapter, { ...options, provider: member.provider }, member.account, member.model,
       )[Symbol.asyncIterator]()
@@ -308,9 +310,9 @@ export class PoolAdapter extends LlmAdapter {
         }
         this.options.onWarn(
           `pool "${options.model}": ${memberLabel(member)} failed before any output`
-          + ` (${error instanceof Error ? error.message : String(error)}); trying the next member`,
+          + ` (${describeFailure(error)}); trying the next member`,
         )
-        lastError = error
+        lastFailure = { member, error }
         continue
       }
       this.remember(options.model, options.sessionId, member)
@@ -335,7 +337,7 @@ export class PoolAdapter extends LlmAdapter {
       }
       return
     }
-    throw this.exhausted(options.model, members, lastError)
+    throw this.exhausted(options.model, members, lastFailure, tried)
   }
 
   /**
@@ -396,27 +398,72 @@ export class PoolAdapter extends LlmAdapter {
   }
 
   /**
-   * The error for an exhausted pool, carrying the earliest recovery hint of
-   * THIS pool's members (the health registry is shared across pools, so the
-   * hint is scoped to the keys this pool can actually recover through).
+   * The error for an exhausted pool. It says WHY (issue #139): the last
+   * member failure of this request when members were tried, or the cooling
+   * record that kept every member out of the candidate set — and its `code`
+   * is that failure's own code, never a synthetic `RATE_LIMIT` (a transport
+   * blip on a single-member pool used to be reported as a rate limit). The
+   * earliest recovery hint is scoped to THIS pool's members (the health
+   * registry is shared across pools).
    */
-  private exhausted(model: string, pool: ConcretePoolMember[], cause?: unknown): LlmError {
+  private exhausted(model: string, pool: ConcretePoolMember[], last?: MemberFailure, tried = 0): LlmError {
     const keys = new Set<string>()
     for (const member of pool) {
       keys.add(memberKey(member.provider, member.account, member.model))
       keys.add(accountKey(member.provider, member.account))
     }
-    const recovery = this.options.health.earliestRecovery(keys)
-    const retryAfterMs = recovery === undefined ? undefined : Math.max(recovery - Date.now(), 1)
-    return new LlmError(
-      `pool "${model}" exhausted: every member is unavailable or failed`,
-      'RATE_LIMIT',
-      {
-        ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs },
-        ...cause === undefined ? {} : { cause },
-      },
-    )
+    const now = Date.now()
+    const cooling = this.options.health.earliestRecoveryRecord(keys, now)
+    const retryAfterMs = cooling === undefined ? undefined : Math.max(cooling.unavailableUntil - now, 1)
+    const recovers = retryAfterMs === undefined ? '' : ` recovers in ${formatDuration(retryAfterMs)}`
+    let message: string
+    let code: string
+    if (last !== undefined) {
+      const { member, error } = last
+      code = error instanceof LlmError ? error.code : 'TRANSPORT'
+      message = `pool "${model}" exhausted: ${tried} of ${pool.length} member(s) failed;`
+        + ` last ${memberLabel(member)} (${describeFailure(error)})`
+        + (cooling === undefined ? '' : `; earliest member${recovers}`)
+    } else if (cooling !== undefined) {
+      code = cooling.reason
+      message = `pool "${model}" exhausted: every member is cooling down;`
+        + ` ${cooling.key} (${cooling.reason})${recovers}`
+    } else {
+      code = 'NO_ADAPTER'
+      message = `pool "${model}" exhausted: no usable member`
+    }
+    const failure = last?.error instanceof LlmError ? last.error.failure : undefined
+    this.options.onWarn(message)
+    return new LlmError(message, code, {
+      ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs },
+      ...failure?.status === undefined ? {} : { status: failure.status },
+      ...failure?.requestId === undefined ? {} : { requestId: failure.requestId },
+      ...last === undefined ? {} : { cause: last.error },
+    })
   }
+}
+
+/** The member that failed last in one request, with its failure. */
+interface MemberFailure {
+  member: ConcretePoolMember
+  error: unknown
+}
+
+/** `CODE: message` for an LlmError, the message alone otherwise. */
+function describeFailure(error: unknown): string {
+  if (error instanceof LlmError) return `${error.code}: ${error.message}`
+  return error instanceof Error ? error.message : String(error)
+}
+
+/** Compact human duration (`42s`, `4m12s`, `35h00m`). */
+function formatDuration(ms: number): string {
+  const total = Math.max(1, Math.round(ms / 1000))
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const seconds = total % 60
+  if (hours > 0) return `${hours}h${String(minutes).padStart(2, '0')}m`
+  if (minutes > 0) return `${minutes}m${String(seconds).padStart(2, '0')}s`
+  return `${seconds}s`
 }
 
 function stickyKey(poolId: string, sessionId: NonNullable<GenerateOptions['sessionId']>): string {

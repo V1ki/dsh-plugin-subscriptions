@@ -407,6 +407,20 @@ test('usage(): a manual (forced) refresh bypasses a fresh cached snapshot, not a
   assert.equal(calls, 2, 'a forced call re-checks despite the fresh cache')
 })
 
+test('usage(): a manual (forced) refresh is the "retry now" that clears the account\'s pool cooldowns (issue #139)', async () => {
+  const recovered: string[] = []
+  const poolUsage = new PoolUsageTracker(() => () => Promise.resolve({ supported: true, windows: [] }))
+  const controller = new SubscriptionsAuthController(
+    new OAuthFlowManager(), new DeviceFlowManager(), () => {}, () => undefined,
+    { codex: unreachableFetcher }, undefined, poolUsage, {}, {}, undefined,
+    (provider, account) => { recovered.push(`${provider}/${account}`) },
+  )
+  await controller.usage('codex', 'a1', new AbortController().signal)
+  assert.deepEqual(recovered, [], 'a background poll must not disturb live cooldowns')
+  await controller.usage('codex', 'a1', new AbortController().signal, true)
+  assert.deepEqual(recovered, ['codex/a1'])
+})
+
 test('usage(): pool cache and RPC preserve reset credits and optional errors', async () => {
   let snapshot: ProviderUsage = { supported: true, windows: [], resetCredits: [{ expiresAt: 1791152194306 }] }
   const tracker = new PoolUsageTracker(() => async () => snapshot)

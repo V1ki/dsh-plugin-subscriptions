@@ -14,7 +14,7 @@ import { PoolAdapter } from '../src/providers/pool.js'
 import { unionAccountCatalogs } from '../src/providers/accounts.js'
 import { buildAccountPools, poolKey } from '../src/providers/pool-family.js'
 import type { PoolDefinition, PoolMemberRef, ProviderPoolSource } from '../src/providers/pool-family.js'
-import { memberKey, PoolHealthRegistry } from '../src/providers/pool-health.js'
+import { accountKey, memberKey, PoolHealthRegistry } from '../src/providers/pool-health.js'
 import { PoolUsageTracker } from '../src/providers/pool-usage.js'
 import { OAuthEndpointError } from '../src/providers/common.js'
 import type { ProviderUsage } from '../src/providers/common.js'
@@ -678,6 +678,71 @@ test('stream: an exhausted pool throws RATE_LIMIT with the earliest recovery hin
       assert.equal(error.code, 'RATE_LIMIT')
       const retryAfter = error.failure.providerRetryAfterMs
       assert.ok(retryAfter !== undefined && retryAfter > 0 && retryAfter <= 42_000)
+      assert.match(error.message, /2 of 2 member\(s\) failed; last codex\/a2\/m \(RATE_LIMIT: a2\)/)
+      assert.match(error.message, /earliest member recovers in \d+s/)
+      return true
+    },
+  )
+})
+
+test('stream: a transport failure on a single-member pool is reported as TRANSPORT, not RATE_LIMIT (issue #139)', async () => {
+  const transport = new LlmError('codex API request failed: ECONNRESET', 'TRANSPORT')
+  const codex = new FakeAdapter(() => serveFail(transport))
+  const single = new Map<string, PoolDefinition>([
+    [poolKey('codex', 'm'), { members: [{ provider: 'codex', account: 'only', model: 'm' }] }],
+  ])
+  const { pool, health, warnings } = makePool({ codex }, { families: single })
+  await assert.rejects(
+    collect(pool.stream(OPTIONS)),
+    (error: unknown) => {
+      assert.ok(error instanceof LlmError)
+      assert.equal(error.code, 'TRANSPORT', 'no member is cooling, so the code must be the member\'s own')
+      assert.equal(error.failure.providerRetryAfterMs, undefined)
+      assert.equal(error.cause, transport, 'the cause chain is kept')
+      assert.equal(
+        error.message,
+        'pool "m" exhausted: 1 of 1 member(s) failed; last codex/only/m (TRANSPORT: codex API request failed: ECONNRESET)',
+      )
+      return true
+    },
+  )
+  assert.equal(health.isMemberAvailable('codex', 'only', 'm'), true, 'a transport blip records no cooldown')
+  assert.ok(warnings.some(message => message.startsWith('pool "m" exhausted: 1 of 1 member(s) failed')), 'the exhaustion is logged')
+})
+
+test('stream: a pool whose every member is already cooling reports the cooling reason (issue #139)', async () => {
+  const codex = new FakeAdapter(() => serveOk())
+  const { pool, health } = makePool({ codex })
+  const now = Date.now()
+  health.markUnavailable(memberKey('codex', 'a1', 'm'), 90_000, 'SERVER', now)
+  health.markUnavailable(accountKey('codex', 'a2'), 24 * 3_600_000, 'AUTH', now)
+  await assert.rejects(
+    collect(pool.stream(OPTIONS)),
+    (error: unknown) => {
+      assert.ok(error instanceof LlmError)
+      assert.equal(error.code, 'SERVER', 'the earliest-recovering record names the code')
+      const retryAfter = error.failure.providerRetryAfterMs
+      assert.ok(retryAfter !== undefined && retryAfter > 0 && retryAfter <= 90_000)
+      assert.match(error.message, /^pool "m" exhausted: every member is cooling down; codex\/a1\/m \(SERVER\) recovers in 1m\d\ds$/)
+      return true
+    },
+  )
+  assert.equal(codex.calls, 0)
+})
+
+test('stream: a mixed failover keeps the last member\'s code with the cooling member\'s recovery hint', async () => {
+  const codex = new FakeAdapter((_options, account) =>
+    serveFail(account === 'a1'
+      ? new LlmError('quota', 'QUOTA', { providerRetryAfterMs: 300_000 })
+      : new LlmError('socket hang up', 'TRANSPORT')))
+  const { pool } = makePool({ codex })
+  await assert.rejects(
+    collect(pool.stream(OPTIONS)),
+    (error: unknown) => {
+      assert.ok(error instanceof LlmError)
+      assert.equal(error.code, 'TRANSPORT')
+      assert.ok((error.failure.providerRetryAfterMs ?? 0) > 0, 'a1\'s quota cooldown still yields the hint')
+      assert.match(error.message, /last codex\/a2\/m \(TRANSPORT: socket hang up\); earliest member recovers in (5m00s|4m5\ds)/)
       return true
     },
   )

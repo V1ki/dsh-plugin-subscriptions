@@ -158,6 +158,20 @@ test('PoolHealthRegistry: earliestRecovery ignores records outside the given key
   assert.equal(registry.earliestRecovery(keys, 0), 9000)
 })
 
+test('PoolHealthRegistry: earliestRecoveryRecord names the key and the reason that parked it', () => {
+  const registry = new PoolHealthRegistry()
+  const keys = new Set([memberKey('codex', 'a1', 'a'), accountKey('codex', 'a2')])
+  assert.equal(registry.earliestRecoveryRecord(keys, 0), undefined)
+  registry.markUnavailable(memberKey('codex', 'a1', 'a'), 9000, 'SERVER', 0)
+  registry.markUnavailable(accountKey('codex', 'a2'), 3000, 'AUTH', 0)
+  assert.deepEqual(registry.earliestRecoveryRecord(keys, 0), {
+    key: accountKey('codex', 'a2'), unavailableUntil: 3000, reason: 'AUTH',
+  })
+  assert.deepEqual(registry.earliestRecoveryRecord(keys, 5000), {
+    key: memberKey('codex', 'a1', 'a'), unavailableUntil: 9000, reason: 'SERVER',
+  })
+})
+
 test('PoolHealthRegistry: clear drops one account, or the whole provider when no account is given', () => {
   const registry = new PoolHealthRegistry()
   registry.markUnavailable(memberKey('codex', 'a1', 'a'), 60_000, 'AUTH', 0)

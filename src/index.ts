@@ -418,6 +418,13 @@ export class SubscriptionsAuthController implements AuthController {
     /** The CLI version each route presents, shown beside the provider in Settings. */
     private readonly clientVersions: Partial<Record<ProviderId, () => Promise<CliVersion | undefined>>> = {},
     private readonly resetRedemption?: ResetRedemption,
+    /**
+     * Runs on a manual (forced) usage refresh of one account. The plugin
+     * clears that account's pool cooldowns here: the Settings "Refresh"
+     * button is the user's "retry now" — a stale cooldown left by a transient
+     * failure must not outlive an explicit re-check (issue #139).
+     */
+    private readonly onUsageForced?: (provider: ProviderId, account: string) => void,
   ) {}
 
   prepareReset(account: string, signal: AbortSignal) {
@@ -431,6 +438,7 @@ export class SubscriptionsAuthController implements AuthController {
   }
 
   usage(provider: ProviderId, account: string, signal: AbortSignal, force = false): Promise<ProviderUsage> {
+    if (force) this.onUsageForced?.(provider, account)
     const fetcher = this.usageFetchers[provider]
     if (fetcher === undefined) return Promise.resolve({ supported: false })
     if (this.poolUsage === undefined) return fetcher(account, signal)
@@ -1238,6 +1246,7 @@ export function apply(ctx: Context, config: Config): void {
       ...providers.includes('claude') ? { claude: presentedVersion(claudeVersion) } : {},
     },
     resetRedemption,
+    (provider, account) => poolHealth?.clear(provider, account),
   ), speed, {
     get: () => proxyGetConfig(),
     set: input => proxySetConfig(input),
