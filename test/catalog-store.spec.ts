@@ -180,6 +180,25 @@ test('account catalog store keeps per-account snapshots apart from the provider 
   assert.deepEqual((await other.load())?.models.map(model => model.id), ['gpt-5.5'], 'clearing the provider entry keeps account snapshots')
 })
 
+test('concurrent provider and account saves on one file never lose a sibling snapshot (issue #129)', async () => {
+  // A cold boot discovers every account's catalog in parallel; with whole-file
+  // read-modify-write the saves used to race (last writer wins, dropping the
+  // `accounts` section). Writes are serialized per path, so every entry lands.
+  const snapshot = { at: 1, models: [{ id: 'gpt-x', name: 'GPT X' }] }
+  const accounts = ['acc1', 'acc2', 'acc3', 'acc4', 'acc5']
+  for (let round = 0; round < 10; round++) {
+    const path = await tempStorePath()
+    await writeFile(path, JSON.stringify({ codex: snapshot, accounts: { codex: { seed: snapshot } } }))
+    await Promise.all([
+      catalogStore('codex', path).save(snapshot),
+      ...accounts.map(account => accountCatalogStore('codex', account, path).save(snapshot)),
+    ])
+    const file = JSON.parse(await readFile(path, 'utf8')) as { codex: unknown; accounts: { codex: Record<string, unknown> } }
+    assert.notEqual(file.codex, undefined)
+    assert.deepEqual(Object.keys(file.accounts.codex).sort(), ['seed', ...accounts].sort(), `round ${round}`)
+  }
+})
+
 test('account catalog store treats a malformed accounts section as absent', async () => {
   const path = await tempStorePath()
   await writeFile(path, JSON.stringify({ codex: { at: 1, models: [{ id: 'a', name: 'A' }] }, accounts: [] }))

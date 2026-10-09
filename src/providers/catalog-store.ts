@@ -159,13 +159,37 @@ async function readCatalogFile(path: string): Promise<CatalogFile> {
   }
 }
 
+/**
+ * Windows refuses to replace a file another handle holds open without
+ * `FILE_SHARE_DELETE` (an indexer, antivirus scan, or a second dsh profile
+ * reading the cache), surfacing as a transient `EPERM`/`EBUSY`/`EACCES` on
+ * `rename` (issue #129). Retry briefly before giving the write up.
+ */
+const RENAME_RETRY_CODES: ReadonlySet<string> = new Set(['EPERM', 'EBUSY', 'EACCES'])
+const RENAME_RETRIES = 5
+const RENAME_RETRY_DELAY_MS = 20
+
+/** `rename` with a short bounded retry on share-mode conflicts. */
+async function renameWithRetry(from: string, to: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await rename(from, to)
+      return
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (attempt >= RENAME_RETRIES || code === undefined || !RENAME_RETRY_CODES.has(code)) throw error
+      await new Promise(resolve => setTimeout(resolve, RENAME_RETRY_DELAY_MS * (attempt + 1)))
+    }
+  }
+}
+
 /** Persist the whole file atomically (tmp file + rename). */
 async function writeCatalogFile(store: CatalogFile, path: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
   const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`
   try {
     await writeFile(tmp, JSON.stringify(store, null, 2))
-    await rename(tmp, path)
+    await renameWithRetry(tmp, path)
   } catch (error) {
     await rm(tmp, { force: true })
     throw error
