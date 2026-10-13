@@ -308,6 +308,7 @@ Changes apply immediately to subsequent requests — no restart needed. The OAut
 This plugin only supplies model routes. Approval policy lives elsewhere:
 
 - [`dsh-plugin-auto-review`](https://github.com/delef/dsh-plugin-auto-review) — provider-native automatic review for DSH tool approvals. It reproduces Codex Guardian and Grok escalation logic on top of the `codex` / `grok` routes registered here (or compatible routes from other DSH LLM adapters) via `ctx.llm.stream()`, and does not touch accounts or credentials. Install with `dsh plugin --profile web add dsh-plugin-auto-review`.
+- [`dsh-sidebar-session-provider-icon`](https://github.com/prgrmrwy/dsh-sidebar-session-provider-icon) — tells the routes registered here apart in the session list: it draws the brand logo of the model selected in the composer in front of each sidebar session title, so a `codex`, `claude`, `grok` or `copilot` session (or an aggregator route) is recognisable without opening it. Reads DSH's own model-selection state, with a last-request fallback for history sessions; makes no network requests. Install with `dsh plugin --profile web add dsh-sidebar-session-provider-icon`.
 
 ## Develop
 
