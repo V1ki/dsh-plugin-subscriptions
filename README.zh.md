@@ -304,6 +304,7 @@ DSH `v0.1.3-alpha.1` 新增宿主统一代理支持。建议在启动环境或 `
 本插件只提供模型路由,审批策略由其他插件负责:
 
 - [`dsh-plugin-auto-review`](https://github.com/delef/dsh-plugin-auto-review) —— 面向 DSH 工具审批的 provider 原生自动审查。它在本插件注册的 `codex` / `grok` 路由(或其他 DSH LLM adapter 的兼容路由)之上,通过 `ctx.llm.stream()` 复现 Codex Guardian 与 Grok 提权审查逻辑,不接触账号与凭据。安装:`dsh plugin --profile web add dsh-plugin-auto-review`。
+- [`dsh-sidebar-session-provider-icon`](https://github.com/prgrmrwy/dsh-sidebar-session-provider-icon) —— 让本插件注册的路由在会话列表里一眼可分：在侧边栏每个会话标题前显示输入框当前选中模型的品牌 logo，不用打开会话就能认出它是 `codex`、`claude`、`grok`、`copilot` 还是聚合路由。数据取自 DSH 自己的模型选择状态，历史会话回退到最近一次请求；自身不发起网络请求。安装：`dsh plugin --profile web add dsh-sidebar-session-provider-icon`。
 
 ## 开发
 
