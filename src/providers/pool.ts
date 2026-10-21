@@ -263,6 +263,7 @@ export class PoolAdapter extends LlmAdapter {
     if (candidates.length === 0) throw this.exhausted(options.model, members)
     let lastFailure: MemberFailure | undefined
     let tried = 0
+    const emptied: ConcretePoolMember[] = []
     for (const member of candidates) {
       options.signal?.throwIfAborted()
       const adapter = this.options.adapters[member.provider]
@@ -313,6 +314,7 @@ export class PoolAdapter extends LlmAdapter {
           + ` (${describeFailure(error)}); trying the next member`,
         )
         lastFailure = { member, error }
+        if (error instanceof LlmError && error.code === EMPTY_RESPONSE_CODE) emptied.push(member)
         continue
       }
       this.remember(options.model, options.sessionId, member)
@@ -337,7 +339,9 @@ export class PoolAdapter extends LlmAdapter {
       }
       return
     }
-    throw this.exhausted(options.model, members, lastFailure, tried)
+    const retryNow = emptied.some(member =>
+      this.options.health.isMemberAvailable(member.provider, member.account, member.model))
+    throw this.exhausted(options.model, members, lastFailure, tried, retryNow)
   }
 
   /**
@@ -404,16 +408,18 @@ export class PoolAdapter extends LlmAdapter {
    * is that failure's own code, never a synthetic `RATE_LIMIT` (a transport
    * blip on a single-member pool used to be reported as a rate limit). The
    * earliest recovery hint is scoped to THIS pool's members (the health
-   * registry is shared across pools).
+   * registry is shared across pools). `retryNow` drops the hint: a member
+   * that returned an empty completion keeps no cooldown and can be retried
+   * at once, so another member's cooldown must not set the wait.
    */
-  private exhausted(model: string, pool: ConcretePoolMember[], last?: MemberFailure, tried = 0): LlmError {
+  private exhausted(model: string, pool: ConcretePoolMember[], last?: MemberFailure, tried = 0, retryNow = false): LlmError {
     const keys = new Set<string>()
     for (const member of pool) {
       keys.add(memberKey(member.provider, member.account, member.model))
       keys.add(accountKey(member.provider, member.account))
     }
     const now = Date.now()
-    const cooling = this.options.health.earliestRecoveryRecord(keys, now)
+    const cooling = retryNow ? undefined : this.options.health.earliestRecoveryRecord(keys, now)
     const retryAfterMs = cooling === undefined ? undefined : Math.max(cooling.unavailableUntil - now, 1)
     const recovers = retryAfterMs === undefined ? '' : ` recovers in ${formatDuration(retryAfterMs)}`
     let message: string

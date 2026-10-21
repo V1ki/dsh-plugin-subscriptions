@@ -6,7 +6,8 @@
  * The failure classifier maps the adapters' stable `LlmError` codes (see
  * `httpLlmError`/`mapFetchFailure` in `common.ts`) to one of three actions:
  * switch to another member with a cooldown, switch without recording a
- * cooldown (transport blips say nothing about the account), or rethrow
+ * cooldown (transport blips and empty completions say nothing about the
+ * account), or rethrow
  * (the request itself is at fault and another account would fail alike).
  */
 
@@ -61,7 +62,9 @@ function retryAfterMs(error: LlmError): number | undefined {
  * any fixed guess) — account-wide for account-metered providers, per-member
  * for model-scoped ones; auth failures park the account until re-login
  * (credentials are account-level); server/timeout failures get a short
- * per-member cooldown; transport failures switch without a record;
+ * per-member cooldown; transport failures and empty completions switch
+ * without a record (an empty completion can follow from the request, and a
+ * shared cooldown would stall other sessions that never sent it);
  * everything else — most importantly CONTEXT_WINDOW_EXCEEDED and ABORTED —
  * is the request's own fault and is rethrown untouched.
  * @param error - the failure thrown by a member adapter's stream.
@@ -85,8 +88,8 @@ export function classifyPoolFailure(error: unknown, provider: ProviderId): PoolF
       return { action: 'switch', cooldownMs: AUTH_COOLDOWN_MS, reason: error.code, scope: 'account' }
     case 'SERVER':
     case 'TIMEOUT':
-    case 'EMPTY_RESPONSE':
       return { action: 'switch', cooldownMs: TRANSIENT_COOLDOWN_MS, reason: error.code, scope: 'member' }
+    case 'EMPTY_RESPONSE':
     case 'TRANSPORT':
       return { action: 'switch' }
     case 'HTTP_402':

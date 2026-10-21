@@ -657,6 +657,57 @@ test('stream: request-fault failures rethrow without trying other accounts', asy
   assert.equal(health.isAvailable(memberKey('codex', 'a1', 'm')), true)
 })
 
+test('stream: an empty completion fails over without parking the member', async () => {
+  const codex = new FakeAdapter((_options, account) =>
+    account === 'a1'
+      ? serveFail(new LlmError('model returned a completed response with no content', 'EMPTY_RESPONSE'))
+      : serveOk('a2'))
+  const { pool, health } = makePool({ codex })
+  const chunks = await collect(pool.stream(OPTIONS))
+  assert.equal((chunks[0] as { text: string }).text, 'a2')
+  assert.equal(health.isMemberAvailable('codex', 'a1', 'm'), true)
+})
+
+test('stream: empty completions in one session do not stall another session', async () => {
+  const codex = new FakeAdapter((options, account) =>
+    options.sessionId === SessionId('poison')
+      ? serveFail(new LlmError('model returned a completed response with no content', 'EMPTY_RESPONSE'))
+      : serveOk(account))
+  const { pool } = makePool({ codex })
+  await assert.rejects(collect(pool.stream({ ...OPTIONS, sessionId: SessionId('poison') })), (error: unknown) => {
+    assert.ok(error instanceof LlmError)
+    assert.equal(error.code, 'EMPTY_RESPONSE')
+    assert.equal(error.failure.providerRetryAfterMs, undefined)
+    return true
+  })
+  const chunks = await collect(pool.stream({ ...OPTIONS, sessionId: SessionId('healthy') }))
+  assert.equal((chunks[0] as { text: string }).text, 'a1')
+  assert.deepEqual(codex.accounts, ['a1', 'a2', 'a1'])
+})
+
+for (const strategy of ['priority', 'quota_aware'] as const) test(`stream: ${strategy} gives no wait when the member with an empty completion can retry at once`, async () => {
+  for (const limitMs of [60 * 60_000, 3 * 24 * 60 * 60_000]) {
+    let empties = 0
+    const codex = new FakeAdapter((_options, account) => {
+      if (account === 'a1') return serveFail(new LlmError('usage limit', 'RATE_LIMIT', { providerRetryAfterMs: limitMs }))
+      return empties++ === 0
+        ? serveFail(new LlmError('model returned a completed response with no content', 'EMPTY_RESPONSE'))
+        : serveOk(account)
+    })
+    const { pool, health } = makePool({ codex }, { strategy })
+    await assert.rejects(collect(pool.stream(OPTIONS)), (error: unknown) => {
+      assert.ok(error instanceof LlmError)
+      assert.equal(error.code, 'EMPTY_RESPONSE')
+      assert.equal(error.failure.providerRetryAfterMs, undefined, `a1's ${limitMs} ms limit must not set the wait`)
+      return true
+    })
+    assert.equal(health.isMemberAvailable('codex', 'a2', 'm'), true)
+    const chunks = await collect(pool.stream(OPTIONS))
+    assert.equal((chunks[0] as { text: string }).text, 'a2')
+    assert.deepEqual(codex.accounts, ['a1', 'a2', 'a2'])
+  }
+})
+
 test('stream: an empty first stream counts as a transient failure', async () => {
   const codex = new FakeAdapter((_options, account) =>
     account === 'a1' ? serveEmpty() : serveOk('a2'))
