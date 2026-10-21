@@ -141,6 +141,7 @@ import { createImageGenerateTool } from './tools/image-generate.js'
 import { createVideoGenerateTool, videosDirectory } from './tools/video-generate.js'
 import { ensureConnectAttemptTimeout, proxiedFetch, proxyGetConfig, proxySetConfig, proxyTestConnection, restoreConnectAttemptTimeout } from './http.js'
 import { ProviderSettingsStore, PROVIDER_TOOLS, validatePreferences } from './provider-settings.js'
+import { ModelSpeeds } from './model-speeds.js'
 
 export type { ModelEntry, ProviderUsage, UsageWindow } from './providers/common.js'
 export type { RateLimitConfig, RateLimitWait } from './providers/rate-limit.js'
@@ -793,12 +794,15 @@ export function apply(ctx: Context, config: Config): void {
   // Usage lookups resolve the session through the refresh-aware path, so an
   // expired access token renews instead of failing the lookup.
   const usageFetchers: UsageFetchers = {}
-  // Explicit Speed choices are per-session and reset on restart. Subagents
-  // without an explicit choice use their persisted model default. Every
-  // request still gates Fast on the model's discovered capability.
+  // Model-bound composer choices persist independently of subagent defaults.
+  // Legacy callers without a model retain the session-only override.
+  const modelSpeeds = new ModelSpeeds()
   const speedBySession = new Map<string, SpeedTier>()
+  const speedBySessionModel = new Map<string, Map<string, SpeedTier>>()
   const selectedSpeed = (sessionId: string, model?: string): SpeedTier => {
-    const explicit = speedBySession.get(sessionId)
+    if (model !== undefined) model = parseAccountModelId(model)?.model ?? model
+    const explicit = (model === undefined ? undefined : speedBySessionModel.get(sessionId)?.get(model))
+      ?? speedBySession.get(sessionId)
     if (explicit !== undefined) return explicit
     // The request itself carries no subagent flag. The live registry exposes
     // durable origin metadata for spawn, fork, and resumed subagents alike.
@@ -806,7 +810,7 @@ export function apply(ctx: Context, config: Config): void {
     if (model !== undefined && agent?.session.header.origin === 'subagent') {
       return preferences.subagentSpeed(parseAccountModelId(model)?.model ?? model)
     }
-    return 'standard'
+    return model === undefined ? 'standard' : modelSpeeds.get(model) ?? 'standard'
   }
   let codexAdapter: CodexAdapter | undefined
   // Dropped on every copilot auth transition so replay state (captured
@@ -1142,13 +1146,20 @@ export function apply(ctx: Context, config: Config): void {
         }
       }
       return {
-        tier: selectedSpeed(sessionId, model),
+        tier: model !== undefined && !fastModels.includes(model) ? 'standard' : selectedSpeed(sessionId, model),
         fastModels,
       }
     },
-    async setSpeed(sessionId, tier) {
-      // Keep explicit Standard too: a child can override a saved Fast default.
-      speedBySession.set(sessionId, tier)
+    async setSpeed(sessionId, tier, model) {
+      if (model === undefined) {
+        speedBySession.set(sessionId, tier)
+        return
+      }
+      model = parseAccountModelId(model)?.model ?? model
+      await modelSpeeds.set(model, tier)
+      const choices = speedBySessionModel.get(sessionId) ?? new Map<string, SpeedTier>()
+      choices.set(model, tier)
+      speedBySessionModel.set(sessionId, choices)
     },
   }
   // Per-model default effort overrides (the Settings page's model pickers).
