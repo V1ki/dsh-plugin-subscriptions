@@ -9,6 +9,10 @@
  * window about to reset with plenty left is the most urgent to spend — the
  * `quota_aware` strategy therefore prefers the highest-urgency member, which
  * over time converges on every window hitting zero right at its reset.
+ *
+ * The `reset_aware` strategy reads the same snapshot differently: a window
+ * counts as full only at 100%, members rank by the earliest reset still
+ * ahead, and a full window says when the member reopens.
  */
 
 import { isMissingOrInvalidCredential, OAuthEndpointError } from './common.js'
@@ -18,6 +22,8 @@ import type { ConcretePoolMember } from './pool-family.js'
 
 /** A member is taken out of rotation once any window crosses this fill level. */
 export const QUOTA_FULL_PERCENT = 95
+/** A window at this fill level is used up: the provider refuses requests until it resets. */
+export const QUOTA_EXHAUSTED_PERCENT = 100
 /** How long a usage snapshot is trusted before a background refresh. */
 export const USAGE_TTL_MS = 5 * 60_000
 
@@ -36,6 +42,14 @@ export interface MemberQuota {
   urgency: number
   /** Epoch ms of the snapshot this was computed from; 0 when none. */
   fetchedAt: number
+  /** Epoch ms of the earliest window reset still ahead; absent when no window discloses one. */
+  resetsAt?: number
+  /**
+   * Epoch ms at which the full windows reopen: the latest of their disclosed
+   * resets, where a full window with no disclosed reset reopens when the
+   * snapshot is due a refresh. Absent while no window is full.
+   */
+  reopensAt?: number
 }
 
 /** A successful snapshot, cached until `ttlMs` (or the entry's own `cooldownMs`) elapses. */
@@ -102,9 +116,10 @@ export class PoolUsageTracker {
    * badge) has no such downside — showing an old percentage beats showing
    * nothing.
    * @param member - the pool member to score (account resolved).
-   * @returns availability plus the urgency score.
+   * @param fullPercent - the fill level at which a window counts as full.
+   * @returns availability, the urgency score, and the window reset instants.
    */
-  async quotaFor(member: ConcretePoolMember): Promise<MemberQuota> {
+  async quotaFor(member: ConcretePoolMember, fullPercent = QUOTA_FULL_PERCENT): Promise<MemberQuota> {
     const key = `${member.provider}/${member.account}`
     const fetcher = this.fetcherFor(member.provider, member.account)
     if (fetcher === undefined) return { available: true, urgency: 0, fetchedAt: 0 }
@@ -113,14 +128,14 @@ export class PoolUsageTracker {
       const fresh = Date.now() - entry.at < (entry.cooldownMs ?? this.ttlMs)
       if (entry.snapshot !== undefined) {
         if (!fresh) void this.refresh(key, fetcher).catch(() => undefined)
-        return this.score(member, entry)
+        return this.score(member, entry, fullPercent)
       }
       if (fresh) return degradedQuota(entry.error)
       // The cooldown expired: fall through to a fresh, blocking attempt.
     }
     try {
       const snapshot = await this.refresh(key, fetcher)
-      return this.score(member, { snapshot, at: Date.now() })
+      return this.score(member, { snapshot, at: Date.now() }, fullPercent)
     } catch (error: unknown) {
       return degradedQuota(error)
     }
@@ -222,15 +237,28 @@ export class PoolUsageTracker {
   }
 
   /** Score one member against a snapshot's windows. */
-  private score(member: ConcretePoolMember, entry: SnapshotEntry): MemberQuota {
+  private score(member: ConcretePoolMember, entry: SnapshotEntry, fullPercent: number): MemberQuota {
     const windows = (entry.snapshot.windows ?? []).filter(window => windowApplies(window, member.model))
+    const now = Date.now()
     let available = true
     let urgency = 0
+    let resetsAt: number | undefined
+    let reopensAt: number | undefined
     for (const window of windows) {
-      if (window.usedPercent >= QUOTA_FULL_PERCENT) available = false
-      urgency = Math.max(urgency, windowUrgency(window))
+      urgency = Math.max(urgency, windowUrgency(window, now))
+      if (window.resetsAt !== undefined && window.resetsAt > now) resetsAt = Math.min(resetsAt ?? window.resetsAt, window.resetsAt)
+      if (window.usedPercent < fullPercent) continue
+      available = false
+      const reopens = window.resetsAt ?? entry.at + this.ttlMs
+      reopensAt = Math.max(reopensAt ?? reopens, reopens)
     }
-    return { available, urgency, fetchedAt: entry.at }
+    return {
+      available,
+      urgency,
+      fetchedAt: entry.at,
+      ...resetsAt === undefined ? {} : { resetsAt },
+      ...reopensAt === undefined ? {} : { reopensAt },
+    }
   }
 }
 

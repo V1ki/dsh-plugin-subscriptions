@@ -11,8 +11,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { LlmError } from '@deepseek-ai/dsh-llm'
 import { OAuthEndpointError } from '../src/providers/common.js'
-import type { ProviderUsage } from '../src/providers/common.js'
-import { PoolUsageTracker } from '../src/providers/pool-usage.js'
+import type { ProviderUsage, UsageWindow } from '../src/providers/common.js'
+import { PoolUsageTracker, QUOTA_EXHAUSTED_PERCENT } from '../src/providers/pool-usage.js'
 import type { ProviderId } from '../src/auth/store.js'
 
 const MEMBER = { provider: 'claude' as const, account: 'a1', model: 'claude-opus-5' }
@@ -168,4 +168,42 @@ test('snapshotFor: a rate limit with no prior success still throws (nothing to f
   const error = new OAuthEndpointError('claude usage token endpoint error (HTTP 429)', 429, undefined, 60_000)
   const { tracker } = trackerOf(() => Promise.reject(error))
   await assert.rejects(tracker.snapshotFor('claude', 'a1'), error)
+})
+
+test('quotaFor: a caller-set full mark gates at that level and reports the earliest reset ahead', async () => {
+  const now = Date.now()
+  const snapshot: ProviderUsage = {
+    supported: true,
+    windows: [
+      { kind: 'session', usedPercent: 98, resetsAt: now + 3 * 3_600_000 },
+      { kind: 'weekly', usedPercent: 40, resetsAt: now + 3_600_000 },
+      { kind: 'other', usedPercent: 10, resetsAt: now - 60_000 },
+    ],
+  }
+  const { tracker } = trackerOf(() => Promise.resolve(snapshot))
+  const quota = await tracker.quotaFor(MEMBER, QUOTA_EXHAUSTED_PERCENT)
+  assert.equal(quota.available, true)
+  assert.equal(quota.resetsAt, now + 3_600_000, 'the earliest reset still ahead, whatever the window kind')
+  assert.equal(quota.reopensAt, undefined)
+  assert.equal((await tracker.quotaFor(MEMBER)).available, false, 'the default 95% mark still gates')
+})
+
+test('quotaFor: full windows reopen at the latest disclosed reset, or at the next refresh when none is disclosed', async () => {
+  const now = Date.now()
+  let windows: UsageWindow[] = [
+    { kind: 'session', usedPercent: 100, resetsAt: now + 3_600_000 },
+    { kind: 'weekly', usedPercent: 100, resetsAt: now + 3 * 24 * 3_600_000 },
+  ]
+  const { tracker } = trackerOf(() => Promise.resolve({ supported: true, windows }), 1_000)
+  const full = await tracker.quotaFor(MEMBER, QUOTA_EXHAUSTED_PERCENT)
+  assert.equal(full.available, false)
+  assert.equal(full.reopensAt, now + 3 * 24 * 3_600_000)
+  const passed = Date.now() - 1
+  windows = [{ kind: 'session', usedPercent: 100, resetsAt: passed }]
+  tracker.invalidate('claude')
+  assert.equal((await tracker.quotaFor(MEMBER, QUOTA_EXHAUSTED_PERCENT)).reopensAt, passed)
+  windows = [{ kind: 'session', usedPercent: 100 }]
+  tracker.invalidate('claude')
+  const undisclosed = await tracker.quotaFor(MEMBER, QUOTA_EXHAUSTED_PERCENT)
+  assert.equal(undisclosed.reopensAt, undisclosed.fetchedAt + 1_000)
 })
