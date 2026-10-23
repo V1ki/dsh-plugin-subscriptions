@@ -86,6 +86,12 @@ export interface AntigravityRuntimeConfig {
   userAgent?: string
   /** Activate an eligible account when loadCodeAssist has no project yet. */
   onboard?: boolean
+  /** Display-name overrides by model id; wins over built-in names and Google's label. */
+  modelNames?: Record<string, string>
+  /** Extra model ids to hide, in addition to the built-in legacy and non-chat filter. */
+  hideModels?: string[]
+  /** Model ids to keep visible even when the built-in filter would hide them. */
+  showModels?: string[]
 }
 
 /** Resolve a client pair: plugin config, environment, then the public desktop default. */
@@ -366,10 +372,87 @@ interface AntigravityWireModel {
   quotaInfo?: { remainingFraction?: number; resetTime?: string }
   weeklyQuotaInfo?: { remainingFraction?: number; resetTime?: string }
   weeklyQuota?: { remainingFraction?: number; resetTime?: string }
+  /** Upstream enum; for Google-hosted models it names the true model even when displayName is stale. */
+  model?: string
+  isInternal?: boolean
 }
 
 interface AntigravityModelsResponse {
   models?: Record<string, AntigravityWireModel>
+  tabModelIds?: string[]
+  imageGenerationModelIds?: string[]
+}
+
+/** Built-in names for ids whose upstream label is missing or ambiguous. Config `modelNames` wins. */
+const ANTIGRAVITY_BUILTIN_NAMES: Readonly<Record<string, string>> = {
+  'gemini-3.8-flash-tiered': 'Gemini 3.8 Flash (Tiered)',
+}
+
+/** Ids Google still lists but no longer serves: the API answers HTTP 200 with a "no longer available" text. */
+const ANTIGRAVITY_LEGACY_ID_PATTERNS: readonly RegExp[] = [
+  /^gemini-2\.5-/,
+  /^gemini-3\.5-flash-(?:extra-low|low|medium|high|preview)$/,
+  /^gemini-3-flash-agent$/,
+  /-disabled$/,
+]
+
+/** Ids that are not chat-callable: tab completion, internal chat shards, image and speech generation. */
+const ANTIGRAVITY_NON_CHAT_ID_PATTERNS: readonly RegExp[] = [/^tab_/, /^chat_\d+$/, /-image(?:-|$)/, /-tts(?:-|$)/]
+
+const ANTIGRAVITY_TIER_LABELS = [['high', 'High'], ['medium', 'Medium'], ['low', 'Low']] as const
+
+/** Name a concrete upstream enum, e.g. MODEL_GOOGLE_GEMINI_2_5_FLASH_LITE -> "Gemini 2.5 Flash Lite". */
+export function antigravityNameFromEnum(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const match = /^MODEL_GOOGLE_(.+)$/.exec(value)
+  if (match === null) return undefined
+  const words: string[] = []
+  for (const token of match[1].split('_')) {
+    const numeric = /^\d+$/.test(token)
+    const previous = words[words.length - 1]
+    if (numeric && previous !== undefined && /^\d+(?:\.\d+)*$/.test(previous)) words[words.length - 1] = `${previous}.${token}`
+    else words.push(numeric ? token : token[0] + token.slice(1).toLowerCase())
+  }
+  return words.join(' ')
+}
+
+function versionOf(text: string): string | undefined {
+  return /\d+(?:\.\d+)?/.exec(text)?.[0]
+}
+
+/**
+ * Apply name overrides, hide legacy and non-chat ids, and expand `gemini-X-flash-tiered` into
+ * its callable high/medium/low ids. Pure and idempotent, so it is safe on fresh discovery
+ * results and on cached snapshots alike.
+ */
+export function applyAntigravityOverrides<T extends { id: string; name: string }>(
+  models: readonly T[],
+  runtime: Pick<AntigravityRuntimeConfig, 'modelNames' | 'hideModels' | 'showModels'> = {},
+): T[] {
+  const names = runtime.modelNames ?? {}
+  const hide = new Set(runtime.hideModels ?? [])
+  const show = new Set(runtime.showModels ?? [])
+  const hidden = (id: string): boolean => !show.has(id) && (
+    hide.has(id)
+    || ANTIGRAVITY_LEGACY_ID_PATTERNS.some(pattern => pattern.test(id))
+    || ANTIGRAVITY_NON_CHAT_ID_PATTERNS.some(pattern => pattern.test(id))
+  )
+  const out: T[] = []
+  const seen = new Set<string>()
+  const push = (model: T): void => {
+    if (seen.has(model.id) || hidden(model.id)) return
+    seen.add(model.id)
+    out.push({ ...model, name: names[model.id] ?? ANTIGRAVITY_BUILTIN_NAMES[model.id] ?? model.name })
+  }
+  for (const model of models) push(model)
+  for (const model of models) {
+    const tiered = /^(gemini-(\d+(?:\.\d+)?)-flash)-tiered$/.exec(model.id)
+    if (tiered === null) continue
+    for (const [tier, label] of ANTIGRAVITY_TIER_LABELS) {
+      push({ ...model, id: `${tiered[1]}-${tier}`, name: `Gemini ${tiered[2]} Flash (${label})` })
+    }
+  }
+  return out
 }
 
 /** Fetch the authenticated account's live Antigravity model catalog. */
@@ -390,17 +473,28 @@ export async function fetchAntigravityModels(
   if (typeof payload.models !== 'object' || payload.models === null) {
     throw new Error('Antigravity models endpoint returned no models object')
   }
-  const models = Object.entries(payload.models).map(([id, model]): DiscoveredModel => ({
-    id,
-    name: model.displayName ?? id.split('-').map(word => word.length === 0 ? word : word[0].toUpperCase() + word.slice(1)).join(' '),
-    ...model.description === undefined ? {} : { description: model.description },
-    contextWindow: model.inputTokenLimit ?? model.maxInputTokens ?? ANTIGRAVITY_CONTEXT_WINDOW,
-    ...typeof model.maxOutputTokens === 'number' && Number.isSafeInteger(model.maxOutputTokens) && model.maxOutputTokens > 0
-      ? { maxOutputTokens: model.maxOutputTokens } : {},
-    inputModalities: ['text', 'image'],
-  }))
-  if (models.length === 0) throw new Error('Antigravity models endpoint returned an empty catalog')
-  return models
+  const nonChat = new Set([...payload.tabModelIds ?? [], ...payload.imageGenerationModelIds ?? []])
+  const models: DiscoveredModel[] = []
+  for (const [id, model] of Object.entries(payload.models)) {
+    if (model.isInternal === true || nonChat.has(id)) continue
+    const fromEnum = antigravityNameFromEnum(model.model)
+    // A label whose version disagrees with the concrete upstream enum is ambiguous: the enum is the stable identity.
+    const label = typeof model.displayName === 'string' && fromEnum !== undefined && versionOf(model.displayName) !== versionOf(fromEnum)
+      ? fromEnum
+      : model.displayName
+    models.push({
+      id,
+      name: label ?? fromEnum ?? id.split('-').map(word => word.length === 0 ? word : word[0].toUpperCase() + word.slice(1)).join(' '),
+      ...model.description === undefined ? {} : { description: model.description },
+      contextWindow: model.inputTokenLimit ?? model.maxInputTokens ?? ANTIGRAVITY_CONTEXT_WINDOW,
+      ...typeof model.maxOutputTokens === 'number' && Number.isSafeInteger(model.maxOutputTokens) && model.maxOutputTokens > 0
+        ? { maxOutputTokens: model.maxOutputTokens } : {},
+      inputModalities: ['text', 'image'],
+    })
+  }
+  const refined = applyAntigravityOverrides(models, runtime)
+  if (refined.length === 0) throw new Error('Antigravity models endpoint returned an empty catalog')
+  return refined
 }
 
 function resetTime(value: unknown): number | undefined {
@@ -604,7 +698,7 @@ export class AntigravityAdapter extends LlmAdapter {
         catalog,
         () => this.fetchCatalog(account, signal),
       ), preferCached)
-      return models.map(model => ({
+      return applyAntigravityOverrides(models, this.options.runtime).map(model => ({
         provider,
         id: model.id,
         name: model.name,
@@ -625,7 +719,7 @@ export class AntigravityAdapter extends LlmAdapter {
     return discoverAcrossAccounts(accounts, async key => {
       const catalog = await this.catalogFor(key)
       const models = await catalog.resolve(() => this.fetchCatalog(key))
-      return models?.find(entry => entry.id === model)
+      return models === undefined ? undefined : applyAntigravityOverrides(models, this.options.runtime).find(entry => entry.id === model)
     })
   }
 

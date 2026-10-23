@@ -247,6 +247,9 @@ export const Config: z<Config> = z.object({
     baseURL: z.string(),
     userAgent: z.string(),
     onboard: z.boolean().default(true),
+    modelNames: z.dict(z.string()),
+    hideModels: z.array(z.string()),
+    showModels: z.array(z.string()),
   }),
   pool: z.object({
     enabled: z.boolean().default(true),
