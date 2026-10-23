@@ -10,6 +10,8 @@ import type { GenerateOptions, Message, StreamChunk } from '@deepseek-ai/dsh-llm
 import type { AntigravitySession } from '../src/auth/store.js'
 import {
   AntigravityAdapter,
+  antigravityNameFromEnum,
+  applyAntigravityOverrides,
   ANTIGRAVITY_AUTHORIZE_URL,
   ANTIGRAVITY_TOKEN_URL,
   ANTIGRAVITY_USERINFO_URL,
@@ -169,6 +171,80 @@ test('model discovery and quota display map fetchAvailableModels data', async ()
     ['other', 'gemini-3-flash', 30],
     ['weekly', 'gemini-3-flash', 60],
   ])
+})
+
+test('model discovery names by upstream enum when the label is ambiguous and hides legacy, internal and non-chat ids', async () => {
+  const modelsURL = `${runtime.baseURL}/v1internal:fetchAvailableModels`
+  const payload = {
+    tabModelIds: ['chat_20706'],
+    imageGenerationModelIds: ['gemini-3.1-flash-image'],
+    models: {
+      'gemini-3-flash': { displayName: 'Gemini 3 Flash', model: 'MODEL_PLACEHOLDER_M18' },
+      // Stale label: the enum says 2.5, the label says 3.5. These ids are legacy and hidden.
+      'gemini-2.5-flash-lite': { displayName: 'Gemini 3.5 Flash Lite', model: 'MODEL_GOOGLE_GEMINI_2_5_FLASH_LITE' },
+      'gemini-3-flash-agent': { displayName: 'Gemini 3.5 Flash (High)', model: 'MODEL_PLACEHOLDER_M84' },
+      'gemini-3.5-flash-low': { displayName: 'Gemini 3.5 Flash (Medium)', model: 'MODEL_PLACEHOLDER_M20' },
+      'gemini-3.5-flash-lite': { displayName: 'Gemini 3.5 Flash Lite', model: 'MODEL_PLACEHOLDER_M198' },
+      'gemini-3.8-flash-tiered': { model: 'MODEL_PLACEHOLDER_M322' },
+      'gemini-3.1-flash-image': { displayName: 'Gemini 3.1 Flash Image' },
+      'tab_flash_lite_preview': {},
+      'chat_20706': { isInternal: true, model: 'MODEL_CHAT_20706' },
+      'claude-sonnet-4-6': { displayName: 'Claude Sonnet 4.6 (Thinking)' },
+    },
+  }
+  const models = await fetchAntigravityModels(session, runtime, routed({ [modelsURL]: payload }))
+  assert.deepEqual(models.map(model => [model.id, model.name]), [
+    ['gemini-3-flash', 'Gemini 3 Flash'],
+    ['gemini-3.5-flash-lite', 'Gemini 3.5 Flash Lite'],
+    ['gemini-3.8-flash-tiered', 'Gemini 3.8 Flash (Tiered)'],
+    ['claude-sonnet-4-6', 'Claude Sonnet 4.6 (Thinking)'],
+    ['gemini-3.8-flash-high', 'Gemini 3.8 Flash (High)'],
+    ['gemini-3.8-flash-medium', 'Gemini 3.8 Flash (Medium)'],
+    ['gemini-3.8-flash-low', 'Gemini 3.8 Flash (Low)'],
+  ])
+})
+
+test('model discovery lets config rename, hide and re-show ids', async () => {
+  const modelsURL = `${runtime.baseURL}/v1internal:fetchAvailableModels`
+  const payload = { models: {
+    'gemini-3-flash': { displayName: 'Gemini 3 Flash' },
+    'gemini-3.1-flash-lite': { displayName: 'Gemini 3.1 Flash Lite' },
+    'gemini-2.5-flash': { displayName: 'Gemini 3.5 Flash Lite', model: 'MODEL_GOOGLE_GEMINI_2_5_FLASH' },
+  } }
+  const models = await fetchAntigravityModels(
+    session,
+    { ...runtime, modelNames: { 'gemini-3-flash': 'Flash (mine)' }, hideModels: ['gemini-3.1-flash-lite'], showModels: ['gemini-2.5-flash'] },
+    routed({ [modelsURL]: payload }),
+  )
+  // The enum disagrees with the stale label, so the enum names the shown legacy id.
+  assert.deepEqual(models.map(model => [model.id, model.name]), [
+    ['gemini-3-flash', 'Flash (mine)'],
+    ['gemini-2.5-flash', 'Gemini 2.5 Flash'],
+  ])
+})
+
+test('override pass is idempotent so cached snapshots written by older versions are cleaned on read', () => {
+  const cached = [
+    { id: 'gemini-2.5-flash', name: 'Gemini 3.5 Flash Lite' },
+    { id: 'chat_23310', name: 'Chat 23310' },
+    { id: 'gemini-3.8-flash-tiered', name: 'Gemini 3.8 Flash Tiered' },
+    { id: 'gemini-3.8-flash-high', name: 'Gemini 3.8 Flash (High)' },
+  ]
+  const once = applyAntigravityOverrides(cached)
+  assert.deepEqual(once.map(model => [model.id, model.name]), [
+    ['gemini-3.8-flash-tiered', 'Gemini 3.8 Flash (Tiered)'],
+    ['gemini-3.8-flash-high', 'Gemini 3.8 Flash (High)'],
+    ['gemini-3.8-flash-medium', 'Gemini 3.8 Flash (Medium)'],
+    ['gemini-3.8-flash-low', 'Gemini 3.8 Flash (Low)'],
+  ])
+  assert.deepEqual(applyAntigravityOverrides(once), once)
+})
+
+test('antigravityNameFromEnum only names concrete Google enums', () => {
+  assert.equal(antigravityNameFromEnum('MODEL_GOOGLE_GEMINI_2_5_FLASH_LITE'), 'Gemini 2.5 Flash Lite')
+  assert.equal(antigravityNameFromEnum('MODEL_GOOGLE_GEMINI_2_5_PRO'), 'Gemini 2.5 Pro')
+  assert.equal(antigravityNameFromEnum('MODEL_PLACEHOLDER_M18'), undefined)
+  assert.equal(antigravityNameFromEnum(undefined), undefined)
 })
 
 test('request conversion carries system, images, tools, tool results, and signed tool replay', () => {
@@ -352,7 +428,7 @@ test('Antigravity resolves per-model output defaults and bounds configured defau
     'gpt-oss-120b-medium': 32768,
     'claude-sonnet-4-6': 64000,
     'gemini-3-flash': 65536,
-    'tab_flash_lite_preview': 4096,
+    'gemini-3.1-flash-lite': 4096,
   }
   let fetches = 0
   const fetchFn: FetchFn = async () => {
