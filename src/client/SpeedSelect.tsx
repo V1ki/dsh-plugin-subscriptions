@@ -101,9 +101,21 @@ export function createSpeedLoader(
 export function createSpeedSetter(
   connection: ConnectionHandle,
   sessionId: string,
+  models?: () => ModelDirectoriesLike | undefined,
 ): SpeedSelectInjected['setSpeed'] {
-  return tier => callSubscriptionsAuth(connection.rpc, 'setSpeed', { sessionId, tier })
-    .then(() => true, () => false)
+  return async tier => {
+    try {
+      const directories = models?.()
+      const current = directories === undefined ? null : (await directories.directoryFor(sessionId).load()).current
+      if (models !== undefined && current?.provider !== 'codex') return false
+      await callSubscriptionsAuth(connection.rpc, 'setSpeed', {
+        sessionId, tier, ...(current?.provider === 'codex' ? { model: current.model } : {}),
+      })
+      return true
+    } catch {
+      return false // The control keeps its last confirmed value on load or save failure.
+    }
+  }
 }
 
 /** English-dictionary fallback for a missing inject `t` (standalone renders). */

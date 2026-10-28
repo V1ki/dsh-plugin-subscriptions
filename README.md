@@ -180,6 +180,10 @@ The same editor controls Codex Web Search and image generation, plus Grok image 
 
 Preferences and tool-policy history live in `~/.dsh/plugins/subscriptions/provider-settings.json` (mode 0600), independently of model-catalog refresh. Existing non-empty `models.<provider>` configuration still defines the base catalog; visibility selections filter that catalog.
 
+### Remembered composer speed
+
+The Codex **Speed** control and `/fast` remember the last successful choice per underlying model (shared with its independent-account entries), across model switches and host restarts. These preferences live in `~/.dsh/plugins/subscriptions/model-speeds.json` (mode 0600), independently of the model editor's subagent speed defaults. Subagents still use their configured defaults unless explicitly overridden in that session. Fast routing always requires the current catalog to advertise it; a save failure leaves the previous confirmed choice unchanged. Legacy RPC callers without a model keep session-only behavior.
+
 ### Reasoning defaults in the model editor
 
 Default reasoning effort now lives in **Edit model list**, beside each model's visibility and context settings. Apply edits with the dialog's **Save changes**, or discard unsaved edits with Cancel. Hidden models remain editable. Models without reasoning levels have no selector; **Follow provider** clears an override. Choices come from live capabilities, intersected across account-pool members. Custom pool aliases do not offer ineffective effort overrides.

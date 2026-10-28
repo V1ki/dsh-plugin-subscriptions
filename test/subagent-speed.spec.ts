@@ -108,10 +108,16 @@ test('main speed and per-model subagent defaults stay independent through RPC, r
     await host.stream('child', undefined)
     await host.stream('nested', 'priority')
     assert.equal((await host.call('speed', { sessionId: 'child', model: 'fast-model' }) as { value: { tier: string } }).value.tier, 'standard')
+    // Model-bound choices survive switching and restart, without changing child defaults.
+    assert.equal((await host.call('setSpeed', { sessionId: 'parent', model: 'fast-model', tier: 'fast' })).ok, true)
+    assert.equal((await host.call('setSpeed', { sessionId: 'parent', model: 'plain-model', tier: 'standard' })).ok, true)
+    assert.equal((await host.call('speed', { sessionId: 'fresh', model: 'fast-model' }) as { value: { tier: string } }).value.tier, 'fast')
     await host.runtime.dispose()
     host = await mount(true, true)
-    await host.stream('parent', undefined)
-    await host.stream('child', 'priority') // saved default survives, explicit choices do not
+    assert.equal((await host.call('speed', { sessionId: 'fresh', model: 'fast-model' }) as { value: { tier: string } }).value.tier, 'fast')
+    assert.equal((await host.call('speed', { sessionId: 'fresh', model: 'plain-model' }) as { value: { tier: string } }).value.tier, 'standard')
+    await host.stream('parent', 'priority') // remembered composer model choice survives
+    await host.stream('child', 'priority') // saved child default stays independent
     await host.stream('child', 'priority', accountModelId('a', 'fast-model'))
     supportsFast = false
     await host.call('providerSettings', { provider: 'codex', force: true })
@@ -120,7 +126,7 @@ test('main speed and per-model subagent defaults stay independent through RPC, r
     supportsFast = true
     host = await mount(false)
     await host.call('providerSettings', { provider: 'codex', force: true })
-    await host.stream('child', undefined) // minimal host cannot classify a child
+    await host.stream('child', 'priority') // minimal host uses the saved composer preference
     await host.setSpeed('child', 'fast')
     await host.stream('child', 'priority') // existing explicit speed still works
   } finally {

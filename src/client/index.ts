@@ -128,7 +128,7 @@ export function apply(ctx: ClientContext): void {
     locale: NS,
     inject: (sessionId: string): SpeedSelectInjected => ({
       loadSpeed: createSpeedLoader(connection, models, sessionId),
-      setSpeed: createSpeedSetter(connection, sessionId),
+      setSpeed: createSpeedSetter(connection, sessionId, models),
     }),
   }, SpeedSelect))
 
@@ -177,7 +177,7 @@ export function apply(ctx: ClientContext): void {
           ] as const).map(option => ({ ...option, active: option.id === state.tier }))
         },
         onSelect: async (option, session) => {
-          await createSpeedSetter(connection, session.sessionId)(option.id as 'standard' | 'fast')
+          await createSpeedSetter(connection, session.sessionId, models)(option.id as 'standard' | 'fast')
         },
       },
     }), 'dsh-plugin-subscriptions: /fast contribution')
