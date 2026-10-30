@@ -241,7 +241,11 @@ Antigravity 为 Gemini 使用 `parametersJsonSchema`，为 Claude/GPT-OSS 使用
   `account` 填 `status` 接口返回的稳定账号 key——Claude 是邮箱,Grok / Copilot / Antigravity 是登录名。Codex 的 key 同时包含 workspace 和用户(`["<workspace-id>","user","<user-id>"]`),因此 Codex 也可以直接填登录邮箱,或在该 workspace 只登录了一个用户时填 workspace ID;有歧义的引用不会解析到任何账号,以免打到别人的账号。
 - **档位额外项(`tiers`,可选)**：额外的选择器条目,failover 可以跨模型;出现在首个成员所在的 provider 分组。不会自动创建。
 
-成员选择按会话粘性(prompt 缓存不失效),两种策略:`priority`(按顺序取第一个健康成员)和 `quota_aware`(默认——按"必需消耗速率 = 剩余配额 / 距重置时间"给成员打分,快重置且剩余多的窗口优先被用掉而不是浪费;粘性成员除非被挑战者以 `switchMargin` 倍分差击败否则不换)。任一用量窗口超过 95% 的成员会被硬门槛挡下;首个流式 chunk 之前的失败会记冷却并切换下一家(provider 给了 `retry-after` 就用它)——配额与认证类失败按整个账号冷却(配额是账号级的;Claude 的分模型窗口则只冷却出错成员),瞬时服务端失败只冷却出错成员。Copilot 没有用量接口,恒为 0 分,自然充当最后的保底。
+成员选择按会话粘性(prompt 缓存不失效),三种策略:`priority`(按顺序取第一个健康成员)、`reset_aware`(仅 Codex 账号池,见下)和 `quota_aware`(默认——按"必需消耗速率 = 剩余配额 / 距重置时间"给成员打分,快重置且剩余多的窗口优先被用掉而不是浪费;粘性成员除非被挑战者以 `switchMargin` 倍分差击败否则不换)。在 `quota_aware` 下,任一用量窗口超过 95% 的成员会被硬门槛挡下;首个流式 chunk 之前的失败会记冷却并切换下一家(provider 给了 `retry-after` 就用它)——配额与认证类失败按整个账号冷却(配额是账号级的;Claude 的分模型窗口则只冷却出错成员),瞬时服务端失败只冷却出错成员。Copilot 没有用量接口,恒为 0 分,自然充当最后的保底。
+
+`reset_aware` 先用用量窗口最早重置的 Codex 账号,用到上限为止,并一直留在这个账号上。它没有 95% 门槛,也不看 `switchMargin`。每个账号按其所有窗口中最早的未来重置时刻排序:通常是 5 小时窗口,周窗口更早重置时取周窗口。快照里没有未来重置时刻的账号(没有用量数据,或重置时刻已过)按池内顺序排在后面。会话当前的账号会一直服务,直到另一个账号的窗口严格更早重置。任一窗口达到 100% 的账号在该窗口重置前不会被调用,所以所有账号都用尽时,池会把最早重新可用的账号的时刻作为等待时长上报(两个窗口都满的账号以较晚的重置时刻为准)(见下文「等待限流窗口」)。这种排除只依据用量快照,所以更新的快照可以让账号更早回来。重置时刻一过,旧快照就不再挡住该账号;如果 Codex 仍然拒绝,它的 429 会把该账号冷却到 429 给出的重置时刻。正在服务的账号出现传输错误时,错误不带等待时长,所以会立刻重试,而不是等到被冷却账号的重置时刻。周窗口只在 100% 时挡下账号,所以周窗口快满的账号仍按 5 小时窗口的重置时刻排序,并一直服务到周上限。
+
+该策略只用于成员全部是 Codex 账号的池。Codex 按整个账号计量,`wham/usage` 给出每个窗口的重置时刻,到达上限时 Codex 一直是在任何输出之前返回带重置时刻的 429。这样把账号用到 100% 只多一次快速的 failover。如果 Codex 在已经开始输出后才因上限中断回复,这个错误会直接交给调用方,其他策略下也一样。其他池(包括混合的 tier)仍使用 `quota_aware`。
 
 ```yaml
 - id: llm-subscriptions
@@ -249,7 +253,7 @@ Antigravity 为 Gemini 使用 `parametersJsonSchema`，为 Claude/GPT-OSS 使用
   config:
     pool:
       enabled: true                   # 默认开;需同一 provider ≥2 个账号
-      strategy: quota_aware           # 或 priority
+      strategy: quota_aware           # 或 priority,或 reset_aware(Codex 账号池)
       switchMargin: 2                 # quota_aware 的滞后切换倍率
       autoAccounts: true              # 把该 provider 各账号自动池到每个目录模型
       families:                       # 某个目录模型的显式账号列表(同一 provider)

@@ -4,8 +4,8 @@
  * catalog. A model listed by several accounts failovers; a model listed by
  * one account is pinned to it. Tiers are extra picker rows. Member
  * selection is sticky per session (so prompt caches survive) and optionally
- * quota-aware; failures fail over to the next member as long as no stream
- * content chunk has been emitted (leading usage remains buffered).
+ * quota- or reset-aware; failures fail over to the next member as long as no
+ * stream content chunk has been emitted (leading usage remains buffered).
  */
 
 import {
@@ -26,12 +26,15 @@ import type { AccountAwareAdapter } from './accounts.js'
 import type { ConcretePoolMember, PoolDefinition, PoolMemberRef } from './pool-family.js'
 import { poolKey } from './pool-family.js'
 import { accountKey, classifyPoolFailure, memberKey, PoolHealthRegistry } from './pool-health.js'
+import type { CoolingRecord } from './pool-health.js'
+import { QUOTA_EXHAUSTED_PERCENT } from './pool-usage.js'
 import type { MemberQuota, PoolUsageTracker } from './pool-usage.js'
 import { withAbortSignal } from './common.js'
+import { waitFromReset } from './rate-limit.js'
 import { streamAccountWithReplay } from './replay.js'
 
-/** Member-selection strategy: plain priority failover or quota-aware scheduling. */
-export type PoolStrategy = 'priority' | 'quota_aware'
+/** Member-selection strategy: plain priority failover, quota-aware scheduling, or reset-first scheduling. */
+export type PoolStrategy = 'priority' | 'quota_aware' | 'reset_aware'
 
 export interface PoolAdapterOptions {
   /** The live subscription adapters, by provider route. */
@@ -39,7 +42,7 @@ export interface PoolAdapterOptions {
   health: PoolHealthRegistry
   usage: PoolUsageTracker
   strategy: PoolStrategy
-  /** A challenger must out-urgency the sticky member by this factor to take over. */
+  /** A challenger must out-urgency the sticky member by this factor to take over (`quota_aware`). */
   switchMargin: number
   /** The default account of one provider (for config members omitting `account`). */
   defaultAccount: (provider: ProviderId) => Promise<string | undefined>
@@ -54,6 +57,14 @@ export interface PoolAdapterOptions {
 
 /** Bound on sticky-session memory; oldest entries evict past it. */
 const STICKY_SESSION_LIMIT = 1000
+
+/**
+ * Providers whose pools `reset_aware` schedules. Codex meters each account as
+ * a whole, its usage snapshot discloses every window's reset, and at the limit
+ * it refuses a request before any output with the reset attached, so running
+ * an account to 100% costs one clean failover. Other pools keep `quota_aware`.
+ */
+const RESET_AWARE_PROVIDERS: ReadonlySet<ProviderId> = new Set(['codex'])
 
 /** Display form of one member (account shown when pinned). */
 function memberLabel(member: PoolMemberRef): string {
@@ -259,8 +270,9 @@ export class PoolAdapter extends LlmAdapter {
   }
 
   private async *streamMembers(options: GenerateOptions, members: ConcretePoolMember[]): AsyncIterable<StreamChunk> {
-    const candidates = await withAbortSignal(() => this.select(options.model, members, options.sessionId), options.signal)
-    if (candidates.length === 0) throw this.exhausted(options.model, members)
+    const { candidates, reopening } = await withAbortSignal(
+      () => this.select(options.model, members, options.sessionId), options.signal)
+    if (candidates.length === 0) throw this.exhausted(options.model, members, undefined, 0, reopening)
     let lastFailure: MemberFailure | undefined
     let tried = 0
     for (const member of candidates) {
@@ -337,35 +349,40 @@ export class PoolAdapter extends LlmAdapter {
       }
       return
     }
-    throw this.exhausted(options.model, members, lastFailure, tried)
+    const retryNow = this.resetAware(members) && candidates.some(member =>
+      this.options.health.isMemberAvailable(member.provider, member.account, member.model))
+    throw this.exhausted(options.model, members, lastFailure, tried, reopening, retryNow)
   }
 
   /**
-   * Order the candidates for one request. Health filters both strategies;
+   * Order the candidates for one request. Health filters every strategy;
    * `quota_aware` then ranks by urgency (members without telemetry, e.g.
    * copilot, score zero and sink to the bottom of their class), while
    * quota-exhausted members stay as a last-resort tail in pool order. The
    * sticky member keeps its lead unless a challenger out-scores it by
-   * `switchMargin`.
+   * `switchMargin`. `reset_aware` pools order by {@link selectByReset}.
    */
   private async select(
     poolId: string,
     members: ConcretePoolMember[],
     sessionId: GenerateOptions['sessionId'],
-  ): Promise<ConcretePoolMember[]> {
+  ): Promise<Selection> {
     const usable = members.filter(member =>
       this.options.adapters[member.provider] !== undefined
       && this.options.health.isMemberAvailable(member.provider, member.account, member.model))
-    if (usable.length === 0) return []
+    if (usable.length === 0) return { candidates: [] }
     const stickyMember = sessionId === undefined
       ? undefined
       : usable.find(member =>
         memberKey(member.provider, member.account, member.model) === this.sticky.get(stickyKey(poolId, sessionId)))
     if (this.options.strategy === 'priority') {
-      return stickyMember === undefined
-        ? usable
-        : [stickyMember, ...usable.filter(member => member !== stickyMember)]
+      return {
+        candidates: stickyMember === undefined
+          ? usable
+          : [stickyMember, ...usable.filter(member => member !== stickyMember)],
+      }
     }
+    if (this.resetAware(members)) return this.selectByReset(usable, stickyMember)
     const quotas = new Map<ConcretePoolMember, MemberQuota>(
       await Promise.all(usable.map(async member => [member, await this.options.usage.quotaFor(member)] as const)),
     )
@@ -382,7 +399,60 @@ export class PoolAdapter extends LlmAdapter {
         scored.unshift(stickyMember)
       }
     }
-    return [...scored, ...quotaFull]
+    return { candidates: [...scored, ...quotaFull] }
+  }
+
+  /**
+   * `reset_aware` order: spend the member whose window resets first, up to
+   * the limit. Members rank by the earliest reset still ahead; those without
+   * one follow in pool order. The sticky member keeps its lead unless another
+   * resets strictly earlier. A member with a used-up window is left out until
+   * the window reopens, and the earliest reopening is returned for the retry
+   * hint. It is not written to the shared health registry: the next snapshot
+   * decides again, and other pools are unaffected. A member that is
+   * unavailable for another reason (a lost login) stays as a last-resort
+   * tail, as under `quota_aware`.
+   */
+  private async selectByReset(
+    usable: ConcretePoolMember[],
+    stickyMember: ConcretePoolMember | undefined,
+  ): Promise<Selection> {
+    const quotas = new Map<ConcretePoolMember, MemberQuota>(
+      await Promise.all(usable.map(async member =>
+        [member, await this.options.usage.quotaFor(member, QUOTA_EXHAUSTED_PERCENT)] as const)),
+    )
+    const now = Date.now()
+    const ranked: ConcretePoolMember[] = []
+    const unavailable: ConcretePoolMember[] = []
+    let reopening: CoolingRecord | undefined
+    for (const member of usable) {
+      const quota = quotas.get(member)
+      if (quota?.reopensAt !== undefined && quota.reopensAt > now) {
+        const until = now + waitFromReset(quota.reopensAt, now)
+        if (reopening === undefined || until < reopening.unavailableUntil) {
+          reopening = { key: accountKey(member.provider, member.account), unavailableUntil: until, reason: 'RATE_LIMIT' }
+        }
+      } else if (quota?.available === false && quota.reopensAt === undefined) {
+        unavailable.push(member)
+      } else {
+        ranked.push(member)
+      }
+    }
+    const resetOf = (member: ConcretePoolMember): number | undefined => quotas.get(member)?.resetsAt
+    ranked.sort((a, b) => compareResets(resetOf(a), resetOf(b)))
+    if (stickyMember !== undefined && ranked.includes(stickyMember)
+      && compareResets(resetOf(ranked[0]), resetOf(stickyMember)) >= 0) {
+      ranked.splice(ranked.indexOf(stickyMember), 1)
+      ranked.unshift(stickyMember)
+    }
+    return { candidates: [...ranked, ...unavailable], ...reopening === undefined ? {} : { reopening } }
+  }
+
+  /** Whether `reset_aware` schedules this pool: every member's provider must support it. */
+  private resetAware(members: readonly ConcretePoolMember[]): boolean {
+    return this.options.strategy === 'reset_aware'
+      && members.length > 0
+      && members.every(member => RESET_AWARE_PROVIDERS.has(member.provider))
   }
 
   /** Pin the serving member to the session (with bounded memory). */
@@ -404,16 +474,28 @@ export class PoolAdapter extends LlmAdapter {
    * is that failure's own code, never a synthetic `RATE_LIMIT` (a transport
    * blip on a single-member pool used to be reported as a rate limit). The
    * earliest recovery hint is scoped to THIS pool's members (the health
-   * registry is shared across pools).
+   * registry is shared across pools). `reopening` is the earliest reopening
+   * of a used-up member that `reset_aware` left out; it counts like a
+   * cooling record. `retryNow` drops the hint: under `reset_aware` one
+   * account is usually out for hours while another serves, so a member that
+   * just failed without a cooldown (a transport error) is retried at once
+   * instead of waiting for the other account.
    */
-  private exhausted(model: string, pool: ConcretePoolMember[], last?: MemberFailure, tried = 0): LlmError {
+  private exhausted(
+    model: string,
+    pool: ConcretePoolMember[],
+    last?: MemberFailure,
+    tried = 0,
+    reopening?: CoolingRecord,
+    retryNow = false,
+  ): LlmError {
     const keys = new Set<string>()
     for (const member of pool) {
       keys.add(memberKey(member.provider, member.account, member.model))
       keys.add(accountKey(member.provider, member.account))
     }
     const now = Date.now()
-    const cooling = this.options.health.earliestRecoveryRecord(keys, now)
+    const cooling = retryNow ? undefined : earlierRecord(this.options.health.earliestRecoveryRecord(keys, now), reopening)
     const retryAfterMs = cooling === undefined ? undefined : Math.max(cooling.unavailableUntil - now, 1)
     const recovers = retryAfterMs === undefined ? '' : ` recovers in ${formatDuration(retryAfterMs)}`
     let message: string
@@ -443,6 +525,12 @@ export class PoolAdapter extends LlmAdapter {
   }
 }
 
+/** The members to try for one request, in order, plus the earliest reopening `reset_aware` left out. */
+interface Selection {
+  candidates: ConcretePoolMember[]
+  reopening?: CoolingRecord
+}
+
 /** The member that failed last in one request, with its failure. */
 interface MemberFailure {
   member: ConcretePoolMember
@@ -464,6 +552,18 @@ function formatDuration(ms: number): string {
   if (hours > 0) return `${hours}h${String(minutes).padStart(2, '0')}m`
   if (minutes > 0) return `${minutes}m${String(seconds).padStart(2, '0')}s`
   return `${seconds}s`
+}
+
+/** The record that recovers first, when either exists. */
+function earlierRecord(a: CoolingRecord | undefined, b: CoolingRecord | undefined): CoolingRecord | undefined {
+  if (a === undefined || b === undefined) return a ?? b
+  return b.unavailableUntil < a.unavailableUntil ? b : a
+}
+
+/** Earlier reset first; an unknown reset sorts after every known one. */
+function compareResets(a: number | undefined, b: number | undefined): number {
+  if (a === undefined) return b === undefined ? 0 : 1
+  return b === undefined ? -1 : a - b
 }
 
 function stickyKey(poolId: string, sessionId: NonNullable<GenerateOptions['sessionId']>): string {

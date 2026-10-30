@@ -14,7 +14,7 @@ import { PoolAdapter } from '../src/providers/pool.js'
 import { unionAccountCatalogs } from '../src/providers/accounts.js'
 import { buildAccountPools, poolKey } from '../src/providers/pool-family.js'
 import type { PoolDefinition, PoolMemberRef, ProviderPoolSource } from '../src/providers/pool-family.js'
-import { accountKey, memberKey, PoolHealthRegistry } from '../src/providers/pool-health.js'
+import { accountKey, memberKey, PoolHealthRegistry, TRANSIENT_COOLDOWN_MS } from '../src/providers/pool-health.js'
 import { PoolUsageTracker } from '../src/providers/pool-usage.js'
 import { OAuthEndpointError } from '../src/providers/common.js'
 import type { ProviderUsage } from '../src/providers/common.js'
@@ -180,7 +180,7 @@ interface PoolHarness {
 function makePool(
   adapters: Partial<Record<ProviderId, FakeAdapter>>,
   options: {
-    strategy?: 'priority' | 'quota_aware'
+    strategy?: 'priority' | 'quota_aware' | 'reset_aware'
     switchMargin?: number
     usage?: (provider: ProviderId, account: string) => (() => Promise<ProviderUsage>) | undefined
     families?: Map<string, PoolDefinition>
@@ -524,6 +524,386 @@ test('quota_aware: hysteresis holds the sticky account until the margin is beate
   assert.equal((switched[0] as { text: string }).text, 'a1')
 })
 
+test('reset_aware: the account whose window resets first serves, even when 98% used', async () => {
+  const codex = new FakeAdapter((_options, account) => serveOk(account))
+  const { pool } = makePool({ codex }, {
+    strategy: 'reset_aware',
+    usage: usageFetchers({
+      'codex/a1': windowUsage(10, 3 * 60 * 60_000),
+      'codex/a2': windowUsage(98, 10 * 60_000),
+    }),
+  })
+  await collect(pool.stream(OPTIONS))
+  assert.deepEqual(codex.accounts, ['a2'])
+})
+
+test('reset_aware: a used-up session or weekly window keeps the account out without a shared cooldown', async () => {
+  const resetsAt = Date.now() + 60 * 60_000
+  const data: Record<string, ProviderUsage> = {
+    'codex/a1': { supported: true, windows: [{ kind: 'session', usedPercent: 100, resetsAt }] },
+    'codex/a2': windowUsage(50, 2 * 60 * 60_000),
+  }
+  const codex = new FakeAdapter((_options, account) => serveOk(account))
+  const { pool, health, usage } = makePool({ codex }, { strategy: 'reset_aware', usage: usageFetchers(data) })
+  await collect(pool.stream(OPTIONS))
+  assert.deepEqual(codex.accounts, ['a2'])
+  assert.equal(health.isMemberAvailable('codex', 'a1', 'm'), true, 'other pools still see a1')
+  data['codex/a1'] = {
+    supported: true,
+    windows: [
+      { kind: 'session', usedPercent: 50, resetsAt: Date.now() + 10 * 60_000 },
+      { kind: 'weekly', usedPercent: 100, resetsAt: Date.now() + 2 * 24 * 60 * 60_000 },
+    ],
+  }
+  usage.invalidate('codex')
+  await collect(pool.stream(OPTIONS))
+  assert.deepEqual(codex.accounts, ['a2', 'a2'])
+})
+
+test('reset_aware: a newer snapshot lets a used-up account back in before its old reset', async () => {
+  const data: Record<string, ProviderUsage> = {
+    'codex/a1': windowUsage(100, 3 * 60 * 60_000),
+    'codex/a2': windowUsage(50, 2 * 60 * 60_000),
+  }
+  const codex = new FakeAdapter((_options, account) => serveOk(account))
+  const { pool, usage } = makePool({ codex }, { strategy: 'reset_aware', usage: usageFetchers(data) })
+  await collect(pool.stream(OPTIONS))
+  data['codex/a1'] = windowUsage(0, 60 * 60_000)
+  usage.invalidate('codex', 'a1')
+  await collect(pool.stream(OPTIONS))
+  assert.deepEqual(codex.accounts, ['a2', 'a1'])
+})
+
+test('reset_aware: a used-up window whose disclosed reset has passed does not keep the account out', async () => {
+  const codex = new FakeAdapter((_options, account) => serveOk(account))
+  const { pool, health } = makePool({ codex }, {
+    strategy: 'reset_aware',
+    usage: usageFetchers({ 'codex/a2': windowUsage(100, -1_000) }),
+  })
+  health.markUnavailable(accountKey('codex', 'a1'), 3 * 3_600_000, 'RATE_LIMIT')
+  await collect(pool.stream(OPTIONS))
+  assert.deepEqual(codex.accounts, ['a2'])
+})
+
+test('reset_aware: a fresh session window on a nearly full weekly window ranks by its session reset and serves until the weekly limit', async () => {
+  const now = Date.now()
+  const day = 24 * 60 * 60_000
+  const a2Reset = now + 2 * 60 * 60_000
+  const data: Record<string, ProviderUsage> = {
+    'codex/a1': {
+      supported: true,
+      windows: [
+        { kind: 'session', usedPercent: 0, resetsAt: now + 5 * 60 * 60_000 },
+        { kind: 'weekly', usedPercent: 98, resetsAt: now + 2 * day },
+      ],
+    },
+    'codex/a2': {
+      supported: true,
+      windows: [
+        { kind: 'session', usedPercent: 60, resetsAt: a2Reset },
+        { kind: 'weekly', usedPercent: 30, resetsAt: now + 5 * day },
+      ],
+    },
+  }
+  const codex = new FakeAdapter((_options, account) => serveOk(account))
+  const { pool, usage } = makePool({ codex }, { strategy: 'reset_aware', usage: usageFetchers(data) })
+  await collect(pool.stream(OPTIONS))
+  assert.deepEqual(codex.accounts, ['a2'])
+
+  data['codex/a2'] = {
+    supported: true,
+    windows: [
+      { kind: 'session', usedPercent: 100, resetsAt: a2Reset },
+      { kind: 'weekly', usedPercent: 40, resetsAt: now + 5 * day },
+    ],
+  }
+  usage.invalidate('codex')
+  await collect(pool.stream(OPTIONS))
+  assert.deepEqual(codex.accounts, ['a2', 'a1'])
+
+  data['codex/a1'] = {
+    supported: true,
+    windows: [
+      { kind: 'session', usedPercent: 5, resetsAt: now + 5 * 60 * 60_000 },
+      { kind: 'weekly', usedPercent: 100, resetsAt: now + 2 * day },
+    ],
+  }
+  usage.invalidate('codex')
+  await assert.rejects(collect(pool.stream(OPTIONS)), (error: unknown) => {
+    assert.ok(error instanceof LlmError)
+    assert.equal(error.code, 'RATE_LIMIT')
+    const retryAfter = error.failure.providerRetryAfterMs ?? 0
+    assert.ok(retryAfter > a2Reset - Date.now() && retryAfter <= a2Reset - now + 2_000, `waits ${retryAfter} ms`)
+    return true
+  })
+  assert.deepEqual(codex.accounts, ['a2', 'a1'])
+})
+
+test('reset_aware: a weekly window that resets before the session window sets the rank', async () => {
+  const now = Date.now()
+  const codex = new FakeAdapter((_options, account) => serveOk(account))
+  const { pool } = makePool({ codex }, {
+    strategy: 'reset_aware',
+    usage: usageFetchers({
+      'codex/a1': windowUsage(30, 2 * 60 * 60_000),
+      'codex/a2': {
+        supported: true,
+        windows: [
+          { kind: 'session', usedPercent: 30, resetsAt: now + 4 * 60 * 60_000 },
+          { kind: 'weekly', usedPercent: 50, resetsAt: now + 60 * 60_000 },
+        ],
+      },
+    }),
+  })
+  await collect(pool.stream(OPTIONS))
+  assert.deepEqual(codex.accounts, ['a2'])
+})
+
+test('reset_aware: an all-limited pool waits for the earliest disclosed reset, then serves the renewed account', async t => {
+  const start = Date.parse('2026-10-15T23:43:09-07:00')
+  t.mock.timers.enable({ apis: ['Date'], now: start })
+  const a1Reset = Date.parse('2026-10-16T03:20:14-07:00')
+  const a2Reset = Date.parse('2026-10-16T01:14:00-07:00')
+  const data: Record<string, ProviderUsage> = {
+    'codex/a1': { supported: true, windows: [{ kind: 'session', usedPercent: 99, resetsAt: a1Reset }] },
+    'codex/a2': { supported: true, windows: [{ kind: 'session', usedPercent: 100, resetsAt: a2Reset }] },
+  }
+  const limited = (resetsAt: number) =>
+    serveFail(new LlmError('usage limit', 'RATE_LIMIT', { providerRetryAfterMs: resetsAt - Date.now() }))
+  const codex = new FakeAdapter((_options, account) =>
+    account === 'a1' ? limited(a1Reset) : Date.now() < a2Reset ? limited(a2Reset) : serveOk('a2'))
+  const { pool } = makePool({ codex }, { strategy: 'reset_aware', usage: usageFetchers(data) })
+  let retryAfter = 0
+  await assert.rejects(collect(pool.stream(OPTIONS)), (error: unknown) => {
+    assert.ok(error instanceof LlmError)
+    assert.equal(error.code, 'RATE_LIMIT')
+    retryAfter = error.failure.providerRetryAfterMs ?? 0
+    return true
+  })
+  assert.ok(retryAfter >= a2Reset - start && retryAfter < a1Reset - start, `waits ${retryAfter} ms`)
+  assert.deepEqual(codex.accounts, ['a1'])
+  t.mock.timers.tick(retryAfter)
+  data['codex/a2'] = { supported: true, windows: [{ kind: 'session', usedPercent: 0, resetsAt: a2Reset + 5 * 3_600_000 }] }
+  const chunks = await collect(pool.stream(OPTIONS))
+  assert.equal((chunks[0] as { text: string }).text, 'a2')
+  assert.deepEqual(codex.accounts, ['a1', 'a2'])
+})
+
+test('reset_aware: a used-up snapshot taken before its reset stops keeping the account out once the reset passes', async t => {
+  const start = Date.parse('2026-10-16T01:10:00-07:00')
+  t.mock.timers.enable({ apis: ['Date'], now: start })
+  const a2Reset = Date.parse('2026-10-16T01:14:00-07:00')
+  let fetches = 0
+  const codex = new FakeAdapter((_options, account) => serveOk(account))
+  const { pool, health, usage } = makePool({ codex }, {
+    strategy: 'reset_aware',
+    usage: (provider, account) => provider !== 'codex' || account !== 'a2' ? undefined : () => {
+      fetches += 1
+      return Promise.resolve({ supported: true, windows: [{ kind: 'session', usedPercent: 100, resetsAt: a2Reset }] })
+    },
+  })
+  health.markUnavailable(accountKey('codex', 'a1'), 3 * 3_600_000, 'RATE_LIMIT')
+  await usage.snapshotFor('codex', 'a2')
+  t.mock.timers.tick(a2Reset + 30_000 - start)
+  const chunks = await collect(pool.stream(OPTIONS))
+  assert.equal((chunks[0] as { text: string }).text, 'a2')
+  assert.equal(fetches, 1, 'selection does not wait on a usage fetch')
+})
+
+test('reset_aware: an account that is out adds no wait while the account that just failed can retry at once', async () => {
+  const cases: Array<{ used: ProviderUsage; refused: boolean }> = [
+    { used: windowUsage(100, 60 * 60_000), refused: false },
+    {
+      used: { supported: true, windows: [{ kind: 'weekly', usedPercent: 100, resetsAt: Date.now() + 3 * 24 * 60 * 60_000 }] },
+      refused: false,
+    },
+    { used: windowUsage(50, 60 * 60_000), refused: true },
+  ]
+  for (const { used, refused } of cases) {
+    let failures = 0
+    const codex = new FakeAdapter((_options, account) =>
+      account === 'a2' && failures++ === 0 ? serveFail(new LlmError('socket hang up', 'TRANSPORT')) : serveOk(account))
+    const { pool, health } = makePool({ codex }, {
+      strategy: 'reset_aware',
+      usage: usageFetchers({ 'codex/a1': used, 'codex/a2': windowUsage(10, 3 * 60 * 60_000) }),
+    })
+    if (refused) health.markUnavailable(accountKey('codex', 'a1'), 3 * 3_600_000, 'RATE_LIMIT')
+    await assert.rejects(collect(pool.stream(OPTIONS)), (error: unknown) => {
+      assert.ok(error instanceof LlmError)
+      assert.equal(error.code, 'TRANSPORT')
+      assert.equal(error.failure.providerRetryAfterMs, undefined)
+      return true
+    })
+    const chunks = await collect(pool.stream(OPTIONS))
+    assert.equal((chunks[0] as { text: string }).text, 'a2')
+    assert.deepEqual(codex.accounts, ['a2', 'a2'])
+  }
+})
+
+test('reset_aware: after a failover the wait is the failed account\'s own cooldown, not a used-up account\'s reset', async () => {
+  const codex = new FakeAdapter((_options, account) =>
+    account === 'a2' ? serveFail(new LlmError('overloaded', 'SERVER')) : serveOk(account))
+  const { pool } = makePool({ codex }, {
+    strategy: 'reset_aware',
+    usage: usageFetchers({ 'codex/a1': windowUsage(100, 60 * 60_000), 'codex/a2': windowUsage(10, 3 * 60 * 60_000) }),
+  })
+  await assert.rejects(collect(pool.stream(OPTIONS)), (error: unknown) => {
+    assert.ok(error instanceof LlmError)
+    assert.equal(error.code, 'SERVER')
+    const retryAfter = error.failure.providerRetryAfterMs
+    assert.ok(retryAfter !== undefined && retryAfter <= TRANSIENT_COOLDOWN_MS, `waits ${retryAfter} ms`)
+    return true
+  })
+  assert.deepEqual(codex.accounts, ['a2'])
+})
+
+test('reset_aware: an all-used-up pool calls no member and waits for the earliest reopening', async () => {
+  const codex = new FakeAdapter((_options, account) => serveOk(account))
+  const { pool } = makePool({ codex }, {
+    strategy: 'reset_aware',
+    usage: usageFetchers({ 'codex/a1': windowUsage(100, 60 * 60_000), 'codex/a2': windowUsage(100, 10 * 60_000) }),
+  })
+  await assert.rejects(collect(pool.stream(OPTIONS)), (error: unknown) => {
+    assert.ok(error instanceof LlmError)
+    assert.equal(error.code, 'RATE_LIMIT')
+    const retryAfter = error.failure.providerRetryAfterMs
+    assert.ok(retryAfter !== undefined && retryAfter > 10 * 60_000 && retryAfter <= 10 * 60_000 + 2_000)
+    assert.match(error.message, /every member is cooling down; codex\/a2\/\* \(RATE_LIMIT\) recovers in 10m0[12]s$/)
+    return true
+  })
+  assert.equal(codex.calls, 0)
+})
+
+test('reset_aware: a cooling account is skipped', async () => {
+  const codex = new FakeAdapter((_options, account) => serveOk(account))
+  const { pool, health } = makePool({ codex }, {
+    strategy: 'reset_aware',
+    usage: usageFetchers({ 'codex/a1': windowUsage(0, 10 * 60_000), 'codex/a2': windowUsage(0, 60 * 60_000) }),
+  })
+  health.markUnavailable(memberKey('codex', 'a1', 'm'), 60_000, 'SERVER')
+  await collect(pool.stream(OPTIONS))
+  assert.deepEqual(codex.accounts, ['a2'])
+})
+
+test('reset_aware: the sticky account holds on a tie and yields to a strictly earlier reset with no margin', async () => {
+  const atReset = (usedPercent: number, resetsAt: number): ProviderUsage => ({
+    supported: true,
+    windows: [{ kind: 'session', usedPercent, resetsAt }],
+  })
+  const reset = Date.now() + 5 * 60_000
+  const data: Record<string, ProviderUsage> = {
+    'codex/a1': atReset(30, reset + 5 * 60_000),
+    'codex/a2': atReset(30, reset),
+  }
+  const codex = new FakeAdapter((_options, account) => serveOk(account))
+  const { pool, usage } = makePool({ codex }, { strategy: 'reset_aware', usage: usageFetchers(data) })
+  const options = { ...OPTIONS, sessionId: SessionId('s1') }
+  await collect(pool.stream(options))
+  data['codex/a1'] = atReset(30, reset)
+  usage.invalidate('codex')
+  await collect(pool.stream(options))
+  data['codex/a1'] = atReset(98, reset - 4 * 60_000)
+  usage.invalidate('codex')
+  await collect(pool.stream(options))
+  assert.deepEqual(codex.accounts, ['a2', 'a2', 'a1'])
+})
+
+test('reset_aware: members without a disclosed reset ahead follow those with one', async () => {
+  const codex = new FakeAdapter((_options, account) => serveOk(account))
+  const data: Record<string, ProviderUsage> = { 'codex/a2': windowUsage(50, 30 * 60_000) }
+  const { pool, usage } = makePool({ codex }, { strategy: 'reset_aware', usage: usageFetchers(data) })
+  await collect(pool.stream(OPTIONS))
+  data['codex/a1'] = { supported: true, windows: [{ kind: 'session', usedPercent: 50, resetsAt: Date.now() - 60_000 }] }
+  usage.invalidate('codex')
+  await collect(pool.stream(OPTIONS))
+  assert.deepEqual(codex.accounts, ['a2', 'a2'])
+})
+
+test('reset_aware: an account whose login is gone stays a last-resort tail', async () => {
+  const codex = new FakeAdapter((_options, account) =>
+    account === 'a2' ? serveFail(new LlmError('boom', 'SERVER')) : serveOk(account))
+  const { pool } = makePool({ codex }, {
+    strategy: 'reset_aware',
+    usage: (provider, account) => provider !== 'codex' ? undefined : account === 'a1'
+      ? () => Promise.reject(new LlmError('logged out', 'MISSING_CREDENTIAL'))
+      : () => Promise.resolve(windowUsage(50, 60 * 60_000)),
+  })
+  await collect(pool.stream(OPTIONS))
+  assert.deepEqual(codex.accounts, ['a2', 'a1'])
+})
+
+test('reset_aware: a pool with a non-Codex member keeps quota_aware', async () => {
+  const codex = new FakeAdapter((_options, account) => serveOk(`codex-${account}`))
+  const claude = new FakeAdapter((_options, account) => serveOk(`claude-${account}`))
+  const family = new Map<string, PoolDefinition>([
+    [poolKey('codex', 'm'), {
+      members: [
+        { provider: 'codex', account: 'a1', model: 'm' },
+        { provider: 'claude', account: 'a1', model: 'm' },
+      ],
+    }],
+  ])
+  const { pool } = makePool({ codex, claude }, {
+    strategy: 'reset_aware',
+    families: family,
+    usage: usageFetchers({
+      'codex/a1': windowUsage(90, 10 * 60_000),
+      'claude/a1': windowUsage(10, 30 * 60_000),
+    }),
+  })
+  const chunks = await collect(pool.stream(OPTIONS))
+  assert.equal((chunks[0] as { text: string }).text, 'claude-a1')
+  assert.equal(codex.calls, 0)
+})
+
+test('reset_aware: a Claude account pool keeps quota_aware', async () => {
+  const claude = new FakeAdapter((_options, account) => serveOk(account))
+  const family = new Map<string, PoolDefinition>([
+    [poolKey('claude', 'm'), {
+      members: [
+        { provider: 'claude', account: 'a1', model: 'm' },
+        { provider: 'claude', account: 'a2', model: 'm' },
+      ],
+    }],
+  ])
+  const { pool } = makePool({ claude }, {
+    strategy: 'reset_aware',
+    families: family,
+    usage: usageFetchers({
+      'claude/a1': windowUsage(98, 10 * 60_000),
+      'claude/a2': windowUsage(10, 3 * 60 * 60_000),
+    }),
+  })
+  await collect(pool.stream({ ...OPTIONS, provider: 'claude' }))
+  assert.deepEqual(claude.accounts, ['a2'])
+})
+
+test('reset_aware: a pre-chunk rate limit still parks the account, fails over and drops its snapshot', async () => {
+  const usageCalls: string[] = []
+  const codex = new FakeAdapter((_options, account) =>
+    account === 'a1'
+      ? serveFail(new LlmError('limited', 'RATE_LIMIT', { providerRetryAfterMs: 42_000 }))
+      : serveOk('a2'))
+  const { pool, health, usage } = makePool({ codex }, {
+    strategy: 'reset_aware',
+    usage: (provider, account) => {
+      if (provider !== 'codex' || account !== 'a1') return undefined
+      return () => {
+        usageCalls.push(account)
+        return Promise.resolve(windowUsage(50, 10 * 60_000))
+      }
+    },
+  })
+  const member = { provider: 'codex' as const, account: 'a1', model: 'm' }
+  await usage.quotaFor(member)
+  const chunks = await collect(pool.stream(OPTIONS))
+  assert.equal((chunks[0] as { text: string }).text, 'a2')
+  assert.deepEqual(codex.accounts, ['a1', 'a2'])
+  assert.equal(health.isMemberAvailable('codex', 'a1', 'm'), false)
+  await usage.quotaFor(member)
+  assert.equal(usageCalls.length, 2)
+})
+
 test('stream: a pre-chunk quota failure cools the whole account and fails over', async () => {
   const usageCalls: string[] = []
   const codex = new FakeAdapter((_options, account) =>
@@ -591,7 +971,7 @@ test('stream: a transient failure does not invalidate the usage snapshot', async
   assert.equal(usageCalls.length, 1)
 })
 
-test('stream: quota_aware selection never re-hits a usage endpoint still cooling down from a 429 (issue #46)', async () => {
+for (const strategy of ['quota_aware', 'reset_aware'] as const) test(`stream: ${strategy} selection never re-hits a usage endpoint still cooling down from a 429 (issue #46)`, async () => {
   // Every quota_aware stream() re-consults quotaFor for every usable member
   // (see select() above), so a real completion loop calls it once per
   // request. Anthropic's usage endpoint rate-limits progressively — each hit
@@ -601,7 +981,7 @@ test('stream: quota_aware selection never re-hits a usage endpoint still cooling
   const error = new OAuthEndpointError('claude usage token endpoint error (HTTP 429)', 429, undefined, 60_000)
   const codex = new FakeAdapter((_options, account) => serveOk(account))
   const { pool } = makePool({ codex }, {
-    strategy: 'quota_aware',
+    strategy,
     usage: (provider, account) => {
       if (provider !== 'codex' || account !== 'a1') return undefined
       return () => { usageCalls.push(account); return Promise.reject(error) }
