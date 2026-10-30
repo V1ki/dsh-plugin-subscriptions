@@ -56,7 +56,9 @@ export const ANTIGRAVITY_TOKEN_URL = 'https://oauth2.googleapis.com/token'
 export const ANTIGRAVITY_USERINFO_URL = 'https://www.googleapis.com/oauth2/v2/userinfo'
 export const ANTIGRAVITY_DEFAULT_BASE_URL = 'https://daily-cloudcode-pa.googleapis.com'
 export const ANTIGRAVITY_PROD_BASE_URL = 'https://cloudcode-pa.googleapis.com'
-export const ANTIGRAVITY_DEFAULT_USER_AGENT = 'antigravity/1.104.0 dsh-plugin-subscriptions'
+const CURRENT_PLATFORM = (typeof process !== 'undefined' && process.platform) || 'darwin'
+const CURRENT_ARCH = (typeof process !== 'undefined' && process.arch) || 'arm64'
+export const ANTIGRAVITY_DEFAULT_USER_AGENT = `antigravity/cli/1.3.4 (aidev_client; ${CURRENT_PLATFORM}; ${CURRENT_ARCH})`
 export const ANTIGRAVITY_PREEMPT_MS = 5 * 60_000
 const ANTIGRAVITY_CALLBACK_PATH = '/oauth-callback'
 const ANTIGRAVITY_CONTEXT_WINDOW = 1_024_000
@@ -425,6 +427,79 @@ function usageWindow(
   }
 }
 
+interface AntigravityQuotaBucket {
+  displayName?: string
+  display_name?: string
+  description?: string
+  window?: string
+  remainingFraction?: number | string
+  remaining_fraction?: number | string
+  resetTime?: string
+  reset_time?: string
+}
+
+interface AntigravityQuotaGroup {
+  displayName?: string
+  display_name?: string
+  description?: string
+  buckets?: AntigravityQuotaBucket[]
+}
+
+interface AntigravityQuotaSummaryResponse {
+  groups?: AntigravityQuotaGroup[]
+}
+
+function parseRemainingFraction(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (trimmed.endsWith('%')) {
+      const num = Number.parseFloat(trimmed.slice(0, -1))
+      return Number.isFinite(num) ? num / 100 : undefined
+    }
+    const num = Number.parseFloat(trimmed)
+    return Number.isFinite(num) ? num : undefined
+  }
+  return undefined
+}
+
+function parseBucketKind(window?: string, label?: string): UsageWindow['kind'] {
+  const raw = (window ?? '').toLowerCase().trim()
+  if (/(?:5|five)[_-]?h(?:our)?/i.test(raw)) return 'session'
+  if (/week/i.test(raw)) return 'weekly'
+  const normLabel = (label ?? '').toLowerCase().trim()
+  if (/(?:5|five)[ -]?hour/i.test(normLabel)) return 'session'
+  if (/week/i.test(normLabel)) return 'weekly'
+  return 'other'
+}
+
+export function parseSummaryWindows(summary: AntigravityQuotaSummaryResponse): UsageWindow[] {
+  const windows: UsageWindow[] = []
+  for (const group of summary.groups ?? []) {
+    const groupName = group.displayName ?? group.display_name ?? 'Quota'
+    const buckets = group.buckets ?? []
+    const sorted = [...buckets].sort((a, b) => {
+      const kindA = parseBucketKind(a.window, a.displayName ?? a.display_name)
+      const kindB = parseBucketKind(b.window, b.displayName ?? b.display_name)
+      return (kindA === 'session' ? 0 : 1) - (kindB === 'session' ? 0 : 1)
+    })
+    for (const bucket of sorted) {
+      const frac = parseRemainingFraction(bucket.remainingFraction ?? bucket.remaining_fraction)
+      if (frac === undefined) continue
+      const rawLabel = bucket.displayName ?? bucket.display_name ?? bucket.description
+      const kind = parseBucketKind(bucket.window, rawLabel)
+      const resetsAt = resetTime(bucket.resetTime ?? bucket.reset_time)
+      windows.push({
+        kind,
+        scope: groupName,
+        usedPercent: Math.max(0, Math.min(100, Math.round((1 - frac) * 100))),
+        ...resetsAt === undefined ? {} : { resetsAt },
+      })
+    }
+  }
+  return windows
+}
+
 /** Fetch plan and per-model quota windows when the upstream exposes them. */
 export async function fetchAntigravityUsage(
   session: AntigravitySession,
@@ -433,19 +508,38 @@ export async function fetchAntigravityUsage(
   signal?: AbortSignal,
 ): Promise<ProviderUsage> {
   const metadata = { ideType: 'ANTIGRAVITY', platform: 'PLATFORM_UNSPECIFIED', pluginType: 'GEMINI' }
-  const [models, account] = await Promise.all([
-    callInternal<AntigravityModelsResponse>(
-      'fetchAvailableModels', { project: session.projectId }, session.accessToken, runtime, fetchFn, signal,
-    ),
-    callInternal<LoadCodeAssistResponse>('loadCodeAssist', { metadata }, session.accessToken, runtime, fetchFn, signal),
-  ])
-  const windows: UsageWindow[] = []
-  for (const [modelId, model] of Object.entries(models.models ?? {})) {
-    const ordinary = usageWindow('other', modelId, model.quotaInfo)
-    const weekly = usageWindow('weekly', modelId, model.weeklyQuotaInfo ?? model.weeklyQuota)
-    if (ordinary !== undefined) windows.push(ordinary)
-    if (weekly !== undefined) windows.push(weekly)
+  const accountPromise = callInternal<LoadCodeAssistResponse>(
+    'loadCodeAssist', { metadata }, session.accessToken, runtime, fetchFn, signal,
+  )
+  let windows: UsageWindow[] = []
+  try {
+    const summary = await callInternal<AntigravityQuotaSummaryResponse>(
+      'retrieveUserQuotaSummary', { project: session.projectId }, session.accessToken, runtime, fetchFn, signal,
+    )
+    windows = parseSummaryWindows(summary)
+  } catch (error) {
+    if (signal?.aborted) throw error
+    windows = []
   }
+
+  if (windows.length === 0) {
+    try {
+      const models = await callInternal<AntigravityModelsResponse>(
+        'fetchAvailableModels', { project: session.projectId }, session.accessToken, runtime, fetchFn, signal,
+      )
+      for (const [modelId, model] of Object.entries(models.models ?? {})) {
+        const ordinary = usageWindow('other', modelId, model.quotaInfo)
+        const weekly = usageWindow('weekly', modelId, model.weeklyQuotaInfo ?? model.weeklyQuota)
+        if (ordinary !== undefined) windows.push(ordinary)
+        if (weekly !== undefined) windows.push(weekly)
+      }
+    } catch (error) {
+      if (signal?.aborted) throw error
+      // Keep empty windows if legacy endpoint also fails
+    }
+  }
+
+  const account = await accountPromise
   const plan = account.paidTier?.name ?? account.paidTier?.id
     ?? account.currentTier?.name ?? account.currentTier?.id ?? session.plan
   const credits = account.paidTier?.availableCredits?.[0]?.creditAmount

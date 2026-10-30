@@ -153,21 +153,45 @@ function usedPercent(w: UsageWindow): number {
   return Math.round(Math.min(100, Math.max(0, w.usedPercent)))
 }
 
+/** Whether a window applies to the currently active model (supporting both exact IDs and group scopes). */
+export function windowMatchesModel(w: UsageWindow, model: string | undefined, provider?: SubscriptionProvider): boolean {
+  if (model === undefined) return false
+  if (!w.scope) return true
+  if (w.scope === model) return true
+  if (provider === 'antigravity') {
+    if (w.scope.includes(' ')) {
+      const s = w.scope.toLowerCase()
+      if (s.includes('argon')) return model.includes('argon')
+      if (s.includes('gemini')) return model.startsWith('gemini-') && !model.includes('argon')
+      const matchClaude = s.includes('claude') && model.startsWith('claude-')
+      const matchGpt = s.includes('gpt') && model.startsWith('gpt-')
+      if (s.includes('claude') || s.includes('gpt')) return matchClaude || matchGpt
+    }
+    return false
+  }
+  const target = w.scope.toLowerCase().trim()
+  const m = model.toLowerCase().trim()
+  if (m === target) return true
+  const normalizedTarget = target.replace(/[-_]/g, ' ')
+  const normalizedModel = m.replace(/[-_]/g, ' ')
+  const escaped = normalizedTarget.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`\\b${escaped}\\b`, 'i').test(normalizedModel)
+}
+
 /** Keep model quotas separate: matching percentages do not imply a shared pool. */
-export function prioritizeWindows(windows: readonly UsageWindow[], model?: string): UsageWindow[] {
+export function prioritizeWindows(windows: readonly UsageWindow[], model?: string, provider?: SubscriptionProvider): UsageWindow[] {
   return model === undefined ? [...windows] : [
-    ...windows.filter(w => w.scope === model),
-    ...windows.filter(w => w.scope !== model),
+    ...windows.filter(w => windowMatchesModel(w, model, provider)),
+    ...windows.filter(w => !windowMatchesModel(w, model, provider)),
   ]
 }
 
 /** Small previews keep a live model catalog from taking over the dialog. */
 export const WINDOW_PREVIEW_LIMIT = 4
 export function previewWindows(windows: readonly UsageWindow[], model?: string, provider?: SubscriptionProvider) {
-  const ordered = prioritizeWindows(windows, model)
-  // Antigravity has many model-specific quotas: preview only the current model.
+  const ordered = prioritizeWindows(windows, model, provider)
   const limit = provider === 'antigravity'
-    ? Math.min(2, model === undefined ? 0 : windows.filter(w => w.scope === model).length)
+    ? Math.min(2, model === undefined ? 0 : windows.filter(w => windowMatchesModel(w, model, provider)).length)
     : WINDOW_PREVIEW_LIMIT
   return { shown: ordered.slice(0, limit), hidden: ordered.slice(limit) }
 }
@@ -176,7 +200,7 @@ export function previewWindows(windows: readonly UsageWindow[], model?: string, 
 export function compactSegment(d: ProviderUsageDisplay, model?: string, t: Translate = fallbackTranslate): string {
   const windows = pillAccountOf(d).windows
   if (d.provider === 'antigravity') {
-    const matching = model === undefined ? [] : windows.filter(w => w.scope === model)
+    const matching = model === undefined ? [] : windows.filter(w => windowMatchesModel(w, model, 'antigravity'))
     if (matching.length === 0) {
       return `${d.name} ${t(model === undefined ? 'usageBadgeModelCount' : 'usageBadgeModelUnavailable', {
         count: new Set(windows.map(w => w.scope).filter(Boolean)).size,
@@ -576,7 +600,7 @@ export function AccountWindows({ windows, model, provider, translate }: {
   const rows = (items: readonly UsageWindow[]) => (
     <dl style={styles.details}>
       {items.map((w, i) => (
-        <WindowRow key={i} label={`${usageWindowLabel(translate, w)}${model !== undefined && w.scope === model ? ` · ${translate('usageBadgeCurrent')}` : ''}`} window={w} />
+        <WindowRow key={i} label={`${usageWindowLabel(translate, w)}${windowMatchesModel(w, model, provider) ? ` · ${translate('usageBadgeCurrent')}` : ''}`} window={w} />
       ))}
     </dl>
   )

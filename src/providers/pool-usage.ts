@@ -258,7 +258,13 @@ function cooldownFor(error: unknown, defaultTtlMs: number): number {
  */
 function windowApplies(window: UsageWindow, model: string): boolean {
   if (window.scope === undefined) return true
-  return model.toLowerCase().includes(window.scope.toLowerCase())
+  const s = window.scope.toLowerCase()
+  if (s.includes('argon')) return model.includes('argon')
+  if (s.includes('gemini')) return model.startsWith('gemini-') && !model.includes('argon')
+  const matchClaude = s.includes('claude') && model.startsWith('claude-')
+  const matchGpt = s.includes('gpt') && model.startsWith('gpt-')
+  if (s.includes('claude') || s.includes('gpt')) return matchClaude || matchGpt
+  return model.toLowerCase().replace(/[-_]/g, ' ').includes(s.replace(/[-_]/g, ' '))
 }
 
 /** The required burn rate of one window (fraction per ms). */
