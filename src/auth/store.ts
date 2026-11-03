@@ -18,6 +18,7 @@ import { decodeJwtPayload } from './jwt.js'
 import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
+import { parseJsonText } from '../json-text.js'
 
 /** Provider routes this plugin can serve. */
 export type ProviderId = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity'
@@ -357,7 +358,9 @@ export async function loadStore(path = authFilePath()): Promise<SessionMap> {
 function parseStore(text: string, path: string): SessionMap {
   let parsed: unknown
   try {
-    parsed = JSON.parse(text)
+    // A BOM here would read as "no account, everywhere": the user would appear
+    // signed out of every provider (see json-text.ts).
+    parsed = parseJsonText(text)
   } catch {
     throw new Error(`subscriptions auth store at ${path} is not valid JSON; fix or delete the file`)
   }

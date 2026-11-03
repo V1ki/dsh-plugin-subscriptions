@@ -228,11 +228,18 @@ export interface ResponsesStreamEvent {
   response?: {
     status?: string
     usage?: ResponsesUsage
-    error?: { code?: string; message?: string }
+    error?: { code?: string; message?: string; headers?: unknown }
     incomplete_details?: { reason?: string }
   }
   code?: string
   message?: string
+  /**
+   * Present on `error` events: the provider nests the real failure inside it
+   * (`{"type":"error","error":{"code","message","headers"}}`). The top-level
+   * `code`/`message` above stay for the flat shape Copilot and some gateways
+   * emit, so read both.
+   */
+  error?: { code?: string; message?: string; headers?: unknown }
 }
 
 /** Responses `usage` object shape. */
@@ -261,21 +268,51 @@ export function mapResponsesUsage(usage: ResponsesUsage): TokenUsage {
 }
 
 /**
+ * Read the provider's own backoff hint off a Responses error payload.
+ *
+ * Overload shedding arrives as
+ * `{"error":{"code":"server_is_overloaded","headers":{"retry-after":"317","retry-after-ms":"317000"}}}`.
+ * The retry plugin honours `providerRetryAfterMs` for every retryable code
+ * (see `httpLlmError`), so surfacing it here replaces a blind exponential
+ * backoff with the delay upstream actually asked for.
+ * @param headers - the error payload's `headers` member, when present.
+ * @returns the wait in ms, or undefined when the payload carried none.
+ */
+function retryAfterMsFromPayload(headers: unknown): number | undefined {
+  if (typeof headers !== 'object' || headers === null) return undefined
+  const record = headers as Record<string, unknown>
+  const raw = record['retry-after-ms'] ?? record['retry-after']
+  if (raw === undefined || raw === null) return undefined
+  const value = Number(raw)
+  if (!Number.isFinite(value) || value <= 0) return undefined
+  // `retry-after` is expressed in seconds; `retry-after-ms` in milliseconds.
+  const ms = record['retry-after-ms'] !== undefined ? value : value * 1000
+  return Math.min(Math.max(Math.round(ms), 1), Number.MAX_SAFE_INTEGER)
+}
+
+/**
  * Classify a Responses failure payload into a thrown LlmError.
  * @param code - provider error code, when present.
  * @param message - provider error message, when present.
+ * @param headers - the payload's `headers` member, carrying `retry-after`.
  * @returns the mapped error (context overflow, quota, otherwise SERVER).
  */
-export function responsesFailure(code: string | undefined, message: string | undefined): LlmError {
+export function responsesFailure(
+  code: string | undefined,
+  message: string | undefined,
+  headers?: unknown,
+): LlmError {
   const text = message ?? code ?? 'the provider reported a failed response'
   const detail = `${code ?? ''} ${message ?? ''}`
+  const retryAfterMs = retryAfterMsFromPayload(headers)
+  const extra = retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs }
   if (code === 'context_window_exceeded' || isContextWindowExceededError(detail)) {
-    return new LlmError(text, CONTEXT_WINDOW_EXCEEDED_CODE)
+    return new LlmError(text, CONTEXT_WINDOW_EXCEEDED_CODE, extra)
   }
   if ((code !== undefined && /insufficient|quota/i.test(code)) || isQuotaExceededError(detail)) {
-    return new LlmError(text, QUOTA_EXCEEDED_CODE)
+    return new LlmError(text, QUOTA_EXCEEDED_CODE, extra)
   }
-  return new LlmError(text, 'SERVER')
+  return new LlmError(text, 'SERVER', extra)
 }
 
 /** One open harness block under assembly. */
@@ -475,7 +512,11 @@ export class ResponsesStreamTranslator {
         return chunks
       }
       case 'response.failed':
-        throw responsesFailure(event.response?.error?.code, event.response?.error?.message)
+        throw responsesFailure(
+          event.response?.error?.code,
+          event.response?.error?.message,
+          event.response?.error?.headers,
+        )
       case 'response.incomplete':
         throw responsesFailure(
           event.response?.incomplete_details?.reason,
@@ -483,7 +524,15 @@ export class ResponsesStreamTranslator {
             ?? `the provider reported an incomplete response (${event.response?.incomplete_details?.reason ?? 'unknown reason'})`,
         )
       case 'error':
-        throw responsesFailure(event.code, event.message)
+        // The wire shape is `{"type":"error","error":{"code","message","headers"}}`.
+        // Reading `event.code` / `event.message` here yielded undefined for both,
+        // so every streamed upstream failure collapsed to the generic "the
+        // provider reported a failed response" and lost its retry hint.
+        throw responsesFailure(
+          event.error?.code ?? event.code,
+          event.error?.message ?? event.message,
+          event.error?.headers,
+        )
       default:
         // response.created, response.in_progress, content_part events, etc.: no chunks.
         return chunks
