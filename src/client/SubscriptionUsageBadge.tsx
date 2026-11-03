@@ -36,6 +36,7 @@ import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
 import { hostIcon } from './host-icons.js'
 import { useUsageBadgeMode } from './usage-badge-preferences.js'
+import { visibleUsageWindows } from './usage-window-filter.js'
 import { DISPLAY_NAME_CHANGED, type DisplayNameChange } from './display-name-events.js'
 
 /** DSH renamed the data icon in 0.1.7; retain older supported hosts too. */
@@ -346,7 +347,9 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
           isDefault: account.isDefault,
           ...account.account === undefined ? {} : { account: account.account },
           ...plan === undefined ? {} : { plan },
-          windows,
+          // Filter only the display row, not lastKnown: restoring visibility
+          // must also work when the next usage request fails and uses the cache.
+          windows: visibleUsageWindows(provider, windows, statusResp.providers[provider]?.visibleModels),
         }
         const display = byProvider.get(provider)
         if (display === undefined) byProvider.set(provider, { provider, name: statusResp.providers[provider]?.displayName || PROVIDER_NAMES[provider], accounts: [row] })
@@ -568,10 +571,11 @@ function AccountMeta({ account, translate }: { account: AccountUsageDisplay; tra
   )
 }
 
-/** Preview each account independently; all remaining quotas stay accessible. */
+/** Preview each account independently; remaining visible quotas stay accessible. */
 export function AccountWindows({ windows, model, provider, translate }: {
   windows: readonly UsageWindow[]; model: string | undefined; provider?: SubscriptionProvider; translate: Translate
 }) {
+  if (windows.length === 0) return <p style={styles.providerMeta}>{translate('usageNoVisibleModels')}</p>
   const { shown, hidden } = previewWindows(windows, model, provider)
   const rows = (items: readonly UsageWindow[]) => (
     <dl style={styles.details}>

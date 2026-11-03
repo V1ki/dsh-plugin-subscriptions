@@ -19,6 +19,7 @@ css.deregister()
 import type { ProviderUsageDisplay } from '../src/client/SubscriptionUsageBadge.js'
 import type { UsageWindow } from '../src/client/SubscriptionsSection.js'
 import { en, zh } from '../src/client/locales.js'
+import { visibleUsageWindows } from '../src/client/usage-window-filter.js'
 
 test('media tool views render the preparing phase before arguments are available', () => {
   for (const [Component, name] of [[ImageGenerateToolview, 'image_generate'], [VideoGenerateToolview, 'video_generate']] as const) {
@@ -80,6 +81,27 @@ test('rendered account keeps other windows in a closed native disclosure with lo
     assert.ok(html.includes(translate('usageBadgeCurrent')))
     assert.ok(html.indexOf('gemini-model-59') < html.indexOf('<details'))
     assert.ok(html.includes('gemini-model-58'))
+  }
+})
+
+test('Google dialog previews and disclosure counts only include selected models', () => {
+  const filtered = visibleUsageWindows('antigravity', windows, ['gemini-model-1', 'gemini-model-59'])
+  const translate = (key: keyof typeof en, params?: Record<string, unknown>) =>
+    en[key].replace(/\{(\w+)\}/g, (_, name: string) => String(params?.[name] ?? ''))
+  const html = renderToStaticMarkup(createElement(AccountWindows, {
+    windows: filtered, model: 'gemini-model-59', provider: 'antigravity', translate,
+  }))
+  assert.equal((html.match(/<dt /g) ?? []).length, 2)
+  assert.ok(html.includes(translate('usageBadgeMoreWindows', { count: 1 })))
+  assert.ok(!html.includes('gemini-model-58'))
+  assert.equal(windows.length, 60)
+  for (const dictionary of [en, zh]) {
+    const empty = renderToStaticMarkup(createElement(AccountWindows, {
+      windows: [], model: 'gemini-model-59', provider: 'antigravity', translate: key => dictionary[key],
+    }))
+    assert.ok(empty.includes(dictionary.usageNoVisibleModels))
+    assert.ok(!empty.includes('<details'))
+    assert.ok(!empty.includes('<dt'))
   }
 })
 
