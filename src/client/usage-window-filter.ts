@@ -1,4 +1,5 @@
 import type { SubscriptionProvider, UsageWindow } from './SubscriptionsSection.js'
+import { antigravityQuotaApplies } from '../antigravity-model-id.js'
 
 /** Presentation only: never trim the raw snapshots used by quota/routing logic. */
 export function visibleUsageWindows(
@@ -9,6 +10,5 @@ export function visibleUsageWindows(
   const all = windows ?? []
   // Other providers may scope quotas by family rather than exact model ID.
   if (provider !== 'antigravity' || visibleModels === undefined) return all
-  const selected = new Set(visibleModels)
-  return all.filter(window => !window.scope || selected.has(window.scope))
+  return all.filter(window => !window.scope || visibleModels.some(model => antigravityQuotaApplies(window.scope, model)))
 }

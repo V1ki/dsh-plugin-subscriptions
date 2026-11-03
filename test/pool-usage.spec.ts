@@ -169,3 +169,27 @@ test('snapshotFor: a rate limit with no prior success still throws (nothing to f
   const { tracker } = trackerOf(() => Promise.reject(error))
   await assert.rejects(tracker.snapshotFor('claude', 'a1'), error)
 })
+
+test('Antigravity grouped pools respect exhausted concrete variant quotas', async () => {
+  const usage: ProviderUsage = { supported: true, windows: [
+    { kind: 'other', scope: 'gemini-4-argon-high', usedPercent: 100 },
+    { kind: 'other', scope: 'claude-opus-5-5-medium', usedPercent: 20 },
+  ] }
+  const tracker = new PoolUsageTracker(() => async () => usage)
+  const member = { provider: 'antigravity' as const, account: 'test', model: 'gemini-4-argon' }
+  assert.equal((await tracker.quotaFor(member)).available, false)
+  assert.equal((await tracker.quotaFor({ ...member, model: 'claude-opus-5-5' })).available, true)
+})
+
+test('shared Antigravity quotas constrain the matching families without crossing into Argon', async () => {
+  const tracker = new PoolUsageTracker(() => async () => ({ supported: true, windows: [
+    { kind: 'weekly', scope: 'Gemini Models', usedPercent: 100 },
+    { kind: 'session', scope: 'Claude and GPT models', usedPercent: 100 },
+    { kind: 'weekly', scope: 'Gemini 4 Argon', usedPercent: 33 },
+  ] }))
+  const member = { provider: 'antigravity' as const, account: 'test', model: 'gemini-3.8-flash' }
+  assert.equal((await tracker.quotaFor(member)).available, false)
+  assert.equal((await tracker.quotaFor({ ...member, model: 'claude-opus-5-5' })).available, false)
+  assert.equal((await tracker.quotaFor({ ...member, model: 'gpt-oss-120b' })).available, false)
+  assert.equal((await tracker.quotaFor({ ...member, model: 'gemini-4-argon' })).available, true)
+})
