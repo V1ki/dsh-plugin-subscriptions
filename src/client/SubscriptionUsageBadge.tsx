@@ -93,6 +93,17 @@ export interface ProviderUsageDisplay {
   accounts: AccountUsageDisplay[]
 }
 
+/** Display-only warning; does not infer model eligibility or uncached accounts. */
+export function CodexExhaustionNotice({ display, translate }: {
+  display: ProviderUsageDisplay
+  translate: (key: SubscriptionsKey) => string
+}) {
+  if (display.provider !== 'codex' || display.accounts.length === 0
+    || !display.accounts.every(account => account.windows.some(window =>
+      window.scope === undefined && window.usedPercent >= 100))) return null
+  return <p role="status">{translate('usageBadgeAllCodexExhausted')}</p>
+}
+
 /** The account the collapsed pill reads: the default one, else the first listed. */
 export function pillAccountOf(d: ProviderUsageDisplay): AccountUsageDisplay {
   return d.accounts.find(a => a.isDefault) ?? d.accounts[0]!
@@ -509,6 +520,7 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
                 </span>
                 {d.accounts.length === 1 && <AccountMeta account={d.accounts[0]!} translate={translate} />}
               </div>
+              <CodexExhaustionNotice display={d} translate={translate} />
               {d.accounts.map((account, accountIndex) => (
                 <div key={account.key} style={accountIndex === 0 ? undefined : styles.accountBlock}>
                   {d.accounts.length > 1 && (

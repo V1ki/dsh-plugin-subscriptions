@@ -11,7 +11,7 @@ const css = registerHooks({ load(url, context, nextLoad) {
     ? { format: 'module', source: 'export default {}', shortCircuit: true }
     : nextLoad(url, context)
 } })
-const { AccountWindows, compactSegment, createCurrentModelReader, previewWindows,
+const { AccountWindows, CodexExhaustionNotice, compactSegment, createCurrentModelReader, previewWindows,
   collapsedDisplays, expandedDisplays, retainSubscriptionSelection, usageBadgeIcon } = await import('../src/client/SubscriptionUsageBadge.js')
 const { ImageGenerateToolview } = await import('../src/client/ImageGenerateToolview.js')
 const { VideoGenerateToolview } = await import('../src/client/VideoGenerateToolview.js')
@@ -42,6 +42,25 @@ function display(provider: ProviderUsageDisplay['provider'] = 'antigravity', val
     { key: 'default', isDefault: true, windows: values },
   ] }
 }
+
+test('Codex exhaustion notice renders localized credits and reset guidance only for all displayed exhausted accounts', () => {
+  const d = display('codex', [{ kind: 'weekly', usedPercent: 100 }])
+  d.accounts.push({ key: 'second', isDefault: false, windows: [{ kind: 'session', usedPercent: 105 }] })
+  for (const dictionary of [en, zh]) {
+    const translate = (key: keyof typeof en) => dictionary[key]
+    const render = () => renderToStaticMarkup(createElement(CodexExhaustionNotice, { display: d, translate }))
+    assert.match(render(), /role="status"/)
+    assert.ok(render().includes(dictionary.usageBadgeAllCodexExhausted))
+    d.accounts[1]!.windows[0]!.usedPercent = 99.99
+    assert.equal(render(), '', 'do not treat rounded 100% as exhaustion')
+    d.accounts[1]!.windows = []
+    assert.equal(render(), '', 'unknown usage is not known exhaustion')
+    d.accounts[1]!.windows = [{ kind: 'session', usedPercent: 105 }]
+  }
+  assert.equal(renderToStaticMarkup(createElement(CodexExhaustionNotice, {
+    display: display('claude', [{ kind: 'weekly', usedPercent: 100 }]), translate: key => en[key],
+  })), '')
+})
 
 test('Antigravity compact readout selects exact current model, not the entire catalog', () => {
   const d = display('antigravity', [...windows, { kind: 'weekly', scope: 'gemini-model-59', usedPercent: 81 }])
