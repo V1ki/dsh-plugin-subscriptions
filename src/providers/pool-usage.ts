@@ -286,11 +286,26 @@ function windowApplies(window: UsageWindow, model: string): boolean {
   return model.toLowerCase().includes(window.scope.toLowerCase())
 }
 
-/** The required burn rate of one window (fraction per ms). */
+function windowTotalDurationMs(window: UsageWindow, horizon: number): number {
+  if (window.kind === 'weekly') return 7 * 24 * 60 * 60_000
+  if (window.kind === 'session') return 5 * 60 * 60_000
+  if (horizon <= 6 * 60 * 60_000) return 5 * 60 * 60_000
+  return 30 * 24 * 60 * 60_000
+}
+
+/**
+ * Normalized burn rate ratio: quota fraction remaining / time fraction remaining.
+ * Normalizing against the total window duration puts short rate-limiting sessions
+ * (3-5h) and tier budgets (7d weekly) onto a shared scale around 1.0 (on pace),
+ * so multi-day quotas nearing reset with abundant capacity are not dwarfed by
+ * millisecond scale differences.
+ */
 function windowUrgency(window: UsageWindow, now = Date.now()): number {
-  const remaining = Math.max(0, 1 - window.usedPercent / 100)
+  const remainingQuota = Math.max(0, 1 - window.usedPercent / 100)
   const horizon = window.resetsAt !== undefined
     ? Math.max(window.resetsAt - now, 1)
     : FALLBACK_HORIZON_MS[window.kind]
-  return remaining / horizon
+  const totalDuration = windowTotalDurationMs(window, horizon)
+  const timeRemainingFraction = Math.min(1, Math.max(0.001, horizon / totalDuration))
+  return remainingQuota / timeRemainingFraction
 }

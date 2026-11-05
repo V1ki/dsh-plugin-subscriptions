@@ -466,6 +466,35 @@ test('quota_aware: the most urgent window (soon reset, plenty left) wins', async
   assert.equal((chunks[0] as { text: string }).text, 'a2')
 })
 
+test('quota_aware: balances mixed session and weekly windows on a shared scale', async () => {
+  const codex = new FakeAdapter((_options, account) => serveOk(account))
+  // a1: Session window has 3h left (ratio ~1.33), weekly window has 6d left (ratio ~1.05)
+  // a2: Session window has 5h left (ratio 1.0), weekly window has 36h (~1.5d) left with 95% quota (ratio ~4.4)
+  // Under absolute ms scoring, a1's 3h session would dwarf a2's 36h weekly window.
+  // Under normalized burn rate ratios, a2's expiring weekly quota correctly outranks a1.
+  const { pool } = makePool({ codex }, {
+    strategy: 'quota_aware',
+    usage: usageFetchers({
+      'codex/a1': {
+        supported: true,
+        windows: [
+          { kind: 'session', usedPercent: 20, resetsAt: Date.now() + 3 * 60 * 60_000 },
+          { kind: 'weekly', usedPercent: 10, resetsAt: Date.now() + 6 * 24 * 60 * 60_000 },
+        ],
+      },
+      'codex/a2': {
+        supported: true,
+        windows: [
+          { kind: 'session', usedPercent: 0, resetsAt: Date.now() + 5 * 60 * 60_000 },
+          { kind: 'weekly', usedPercent: 5, resetsAt: Date.now() + 36 * 60 * 60_000 },
+        ],
+      },
+    }),
+  })
+  const chunks = await collect(pool.stream(OPTIONS))
+  assert.equal((chunks[0] as { text: string }).text, 'a2')
+})
+
 test('quota_aware: a near-full account is deferred behind a healthy account', async () => {
   const codex = new FakeAdapter((_options, account) => serveOk(account))
   const { pool } = makePool({ codex }, {
