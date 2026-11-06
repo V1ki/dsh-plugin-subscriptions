@@ -148,7 +148,7 @@ test('speed endpoints: per-session tier round trip and payload validation', asyn
     ok: true,
     value: { tier: 'fast', fastModels: [] },
   })
-  // Another session is unaffected; setting standard clears the entry.
+  // Another session is unaffected; Standard is an explicit session choice.
   assert.deepEqual(await handler('speed', { sessionId: 's2' }, signal), {
     ok: true,
     value: { tier: 'standard', fastModels: [] },

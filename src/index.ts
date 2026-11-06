@@ -12,12 +12,14 @@ import z from '@deepseek-ai/schemastery'
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import type {
   AdapterRegistrationHandle,
+  GenerateOptions,
   LlmAdapter,
   LlmModelInfo,
   LlmResolvedModelInfo,
 } from '@deepseek-ai/dsh-llm'
 // Type-only: activates the `ctx.tools` Context merge for the inject block.
 import type {} from '@deepseek-ai/dsh-tools'
+import type {} from '@deepseek-ai/dsh-agent'
 // Type-only: activates the `ctx.web` Context merge for optional registration.
 import type {} from '@deepseek-ai/dsh-web'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
@@ -791,10 +793,21 @@ export function apply(ctx: Context, config: Config): void {
   // Usage lookups resolve the session through the refresh-aware path, so an
   // expired access token renews instead of failing the lookup.
   const usageFetchers: UsageFetchers = {}
-  // The composer Speed toggle's state: per-session, in-memory (a restart
-  // restores standard routing), gated per request on the model's discovered
-  // fast-tier support so a stale choice cannot leak onto a plain model.
+  // Explicit Speed choices are per-session and reset on restart. Subagents
+  // without an explicit choice use their persisted model default. Every
+  // request still gates Fast on the model's discovered capability.
   const speedBySession = new Map<string, SpeedTier>()
+  const selectedSpeed = (sessionId: string, model?: string): SpeedTier => {
+    const explicit = speedBySession.get(sessionId)
+    if (explicit !== undefined) return explicit
+    // The request itself carries no subagent flag. The live registry exposes
+    // durable origin metadata for spawn, fork, and resumed subagents alike.
+    const agent = ctx.get('agents')?.get(sessionId as NonNullable<GenerateOptions['sessionId']>)
+    if (model !== undefined && agent?.session.header.origin === 'subagent') {
+      return preferences.subagentSpeed(parseAccountModelId(model)?.model ?? model)
+    }
+    return 'standard'
+  }
   let codexAdapter: CodexAdapter | undefined
   // Dropped on every copilot auth transition so replay state (captured
   // reasoning) never survives an account switch in memory.
@@ -856,7 +869,7 @@ export function apply(ctx: Context, config: Config): void {
           pool: () => poolAdapter,
           speedFor: (sessionId: string | undefined, model: string): boolean | Promise<boolean> =>
             sessionId !== undefined
-            && speedBySession.get(sessionId) === 'fast'
+            && selectedSpeed(sessionId, model) === 'fast'
             && adapter.supportsFastTier(model),
         })
         codexAdapter = adapter
@@ -1118,7 +1131,7 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   const speed: SpeedController = {
-    async speed(sessionId) {
+    async speed(sessionId, model) {
       const fastModels = await codexAdapter?.fastCapableModels() ?? []
       const accountPreferences = preferences.get('codex').accounts
       for (const { key } of await codexTokens?.list() ?? []) {
@@ -1129,13 +1142,13 @@ export function apply(ctx: Context, config: Config): void {
         }
       }
       return {
-        tier: speedBySession.get(sessionId) ?? 'standard',
+        tier: selectedSpeed(sessionId, model),
         fastModels,
       }
     },
     async setSpeed(sessionId, tier) {
-      if (tier === 'standard') speedBySession.delete(sessionId)
-      else speedBySession.set(sessionId, tier)
+      // Keep explicit Standard too: a child can override a saved Fast default.
+      speedBySession.set(sessionId, tier)
     },
   }
   // Per-model default effort overrides (the Settings page's model pickers).
@@ -1253,6 +1266,7 @@ export function apply(ctx: Context, config: Config): void {
     test: payload => proxyTestConnection(payload.url, payload.proxy),
   }, modelDefaults, {
     displayName: provider => preferences.get(provider).displayName,
+    visibleModels: provider => preferences.get(provider).visibleModels,
     async get(provider, force) {
       await loadModelDefaults()
       const adapter = adapters.get(provider)
@@ -1272,6 +1286,7 @@ export function apply(ctx: Context, config: Config): void {
         models: await withTimeout(signal => adapter.listOwnModels(provider, account.key, signal, !force), DISCOVERY_TIMEOUT_MS).catch(() => undefined),
       })))
       const tierIds = new Set((await poolAdapter?.modelsForProvider(provider).catch(() => []) ?? []).map(model => model.id))
+      const fastModels = new Set(provider === 'codex' ? await codexAdapter?.fastCapableModels() ?? [] : [])
       const rows = await Promise.all(models.map(async model => {
         const contexts: { default: number; max: number }[] = []
         if (provider === 'codex' && codexAdapter) {
@@ -1289,6 +1304,7 @@ export function apply(ctx: Context, config: Config): void {
           contextWindow: info?.context?.contextWindow,
           efforts: tierIds.has(model.id) ? [] : info?.reasoning?.efforts.map(({ id, name }) => ({ id, name })) ?? [],
           configured: defaultEffortOf(provider, model.id),
+          ...(provider === 'codex' ? { fastTier: !tierIds.has(model.id) && fastModels.has(model.id) } : {}),
           ...(contexts.length ? {
             defaultContextWindow: Math.min(...contexts.map(entry => entry.default)),
             maxContextWindow: Math.min(...contexts.map(entry => entry.max)),

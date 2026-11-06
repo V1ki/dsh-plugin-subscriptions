@@ -114,9 +114,17 @@ export function toAntigravityTools(tools: readonly ToolSchema[], model = 'gemini
 
 const SKIP_THOUGHT_SIGNATURE_VALIDATOR = 'skip_thought_signature_validator'
 
-/** Gemini 3 validates the first function call in every model tool-call step. */
+/**
+ * Whether this model validates thought signatures on replayed function calls.
+ *
+ * Gemini 3 and 4 require a signature on the first function call of each step;
+ * foreign history uses the documented placeholder when no signature can be reused.
+ * https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures
+ * Keep this scoped to these model families; future versions and unversioned aliases
+ * need verification before enabling the same fallback.
+ */
 function requiresThoughtSignatures(model?: string): boolean {
-  return model !== undefined && /^gemini-3(?:[.-]|$)/i.test(model)
+  return model !== undefined && /^gemini-[34](?:[.-]|$)/i.test(model.trim())
 }
 
 /**

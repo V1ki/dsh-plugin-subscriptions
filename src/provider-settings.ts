@@ -15,6 +15,7 @@ export type SubscriptionTool = 'image_generate' | 'video_generate' | 'x_search' 
 /** Mirrors `PromptCacheTtl` in translate/anthropic.ts; kept here so the client bundle needs no translate import. */
 export const PROMPT_CACHE_TTLS = ['5m', '1h'] as const
 export type PromptCacheTtlSetting = typeof PROMPT_CACHE_TTLS[number]
+export type SubagentSpeedTier = 'standard' | 'fast'
 export interface AccountPreferences {
   alias?: string
   /** Absent means included. */
@@ -32,6 +33,8 @@ export interface ProviderPreferences {
   /** Absent follows discovery; an explicit selection hides newly discovered models. */
   visibleModels?: string[]
   contextWindows?: Record<string, number>
+  /** Codex only: per-model defaults for subagents, independent of main-session speed. */
+  subagentSpeeds?: Record<string, SubagentSpeedTier>
   tools?: Partial<Record<SubscriptionTool, boolean>>
   /** Claude only: overrides the plugin config's `claudePromptCacheTtl`; absent follows config. */
   promptCacheTtl?: PromptCacheTtlSetting
@@ -122,6 +125,19 @@ export function validatePreferences(provider: ProviderId, input: unknown): Provi
     }
     result.promptCacheTtl = raw.promptCacheTtl as PromptCacheTtlSetting
   }
+  if (raw.subagentSpeeds !== undefined) {
+    if (provider !== 'codex') throw new Error('subagent speeds are currently supported only for Codex')
+    if (!raw.subagentSpeeds || typeof raw.subagentSpeeds !== 'object' || Array.isArray(raw.subagentSpeeds)) {
+      throw new Error('subagent speeds must be a model-to-speed map')
+    }
+    result.subagentSpeeds = Object.create(null) as Record<string, SubagentSpeedTier>
+    for (const [model, tier] of Object.entries(raw.subagentSpeeds)) {
+      if (!model.trim() || (tier !== 'standard' && tier !== 'fast')) {
+        throw new Error('subagent speeds require a model id and either "standard" or "fast"')
+      }
+      result.subagentSpeeds[model] = tier
+    }
+  }
   if (raw.tools !== undefined) {
     if (!raw.tools || typeof raw.tools !== 'object' || Array.isArray(raw.tools)) throw new Error('tools must be an object')
     result.tools = {}
@@ -175,6 +191,12 @@ export class ProviderSettingsStore {
   contextWindow(model: string): number | undefined {
     const windows = this.current.providers.codex?.contextWindows
     return windows && Object.hasOwn(windows, model) ? windows[model] : undefined
+  }
+
+  /** Read on every request so saved changes apply to the next subagent request. */
+  subagentSpeed(model: string): SubagentSpeedTier {
+    const speeds = this.current.providers.codex?.subagentSpeeds
+    return speeds && Object.hasOwn(speeds, model) ? speeds[model] : 'standard'
   }
 
   /** The Settings-page Claude cache TTL; undefined follows the plugin config. Read per request, so no clone. */

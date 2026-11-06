@@ -771,3 +771,105 @@ test('Antigravity OAuth selects defaults or one complete override source without
     else process.env.ANTIGRAVITY_CLIENT_SECRET = clientSecret
   }
 })
+
+test(
+  'replaying a tool call from another model to Gemini 4 carries the signature placeholder (issue #148)',
+  () => {
+    const foreign = { kind: 'model' as const, provider: 'claude', model: 'claude-sonnet-4' }
+    const messages: TranslatableMessage[] = [
+      message('user', [{ type: 'text', text: 'inspect' }]),
+      message('assistant', [
+        { type: 'text', text: 'running' },
+        { type: 'tool-call', id: ToolCallId('call-1'), name: 'bash', arguments: '{"cmd":"ls"}' },
+        { type: 'tool-call', id: ToolCallId('call-2'), name: 'bash', arguments: '{"cmd":"pwd"}' },
+      ], foreign),
+    ]
+    const payload = toAntigravityRequest({ ...options([]), model: 'gemini-4-argon-low' }, messages, 'project-123')
+    const parts = payload.request.contents.find(content => content.role === 'model')?.parts ?? []
+    const calls = parts.filter(part => part.functionCall !== undefined)
+    assert.equal(calls.length, 2)
+    assert.equal(calls[0].thoughtSignature, 'skip_thought_signature_validator')
+    // Only the first call of a step is validated, so the second stays as it is.
+    assert.equal(calls[1].thoughtSignature, undefined)
+  },
+)
+
+test('the placeholder follows the model version, not the block shape', () => {
+  const foreign = { kind: 'model' as const, provider: 'claude', model: 'claude-sonnet-4' }
+  const messages: TranslatableMessage[] = [
+    message('user', [{ type: 'text', text: 'inspect' }]),
+    message('assistant', [{ type: 'tool-call', id: ToolCallId('call-1'), name: 'bash', arguments: '{}' }], foreign),
+  ]
+  const signatureFor = (model: string) => {
+    const payload = toAntigravityRequest({ ...options([]), model }, messages, 'project-123')
+    const parts = payload.request.contents.find(content => content.role === 'model')?.parts ?? []
+    return parts.find(part => part.functionCall !== undefined)?.thoughtSignature
+  }
+  assert.equal(signatureFor('gemini-4-argon-low'), 'skip_thought_signature_validator')
+  assert.equal(signatureFor('gemini-4-argon-high'), 'skip_thought_signature_validator')
+  assert.equal(signatureFor('gemini-4.5-pro'), 'skip_thought_signature_validator')
+  assert.equal(signatureFor('gemini-5-pro'), undefined)
+  assert.equal(signatureFor('gemini-10-pro'), undefined)
+  assert.equal(signatureFor('gemini-30-pro'), undefined)
+  assert.equal(signatureFor('gemini-40-pro'), undefined)
+  assert.equal(signatureFor('gemini-3-pro-preview'), 'skip_thought_signature_validator')
+  // Preserve older models and unverified aliases without adding a placeholder.
+  assert.equal(signatureFor('gemini-2.5-flash'), undefined)
+  assert.equal(signatureFor('gemini-pro'), undefined)
+})
+
+test('the model match is case-insensitive and ignores surrounding space', () => {
+  const foreign = { kind: 'model' as const, provider: 'claude', model: 'claude-sonnet-4' }
+  const messages: TranslatableMessage[] = [
+    message('user', [{ type: 'text', text: 'inspect' }]),
+    message('assistant', [{ type: 'tool-call', id: ToolCallId('call-1'), name: 'bash', arguments: '{}' }], foreign),
+  ]
+  const signatureFor = (model: string) => {
+    const payload = toAntigravityRequest({ ...options([]), model }, messages, 'project-123')
+    const parts = payload.request.contents.find(content => content.role === 'model')?.parts ?? []
+    return parts.find(part => part.functionCall !== undefined)?.thoughtSignature
+  }
+  // Model ids arrive from a catalog, but nothing guarantees their casing — a case-sensitive
+  // match would silently drop the placeholder and bring the 400 back.
+  assert.equal(signatureFor('GEMINI-4-ARGON-LOW'), 'skip_thought_signature_validator')
+  assert.equal(signatureFor('Gemini-4-Pro'), 'skip_thought_signature_validator')
+  assert.equal(signatureFor('GEMINI-3-PRO-PREVIEW'), 'skip_thought_signature_validator')
+  assert.equal(signatureFor(' gemini-4-pro'), 'skip_thought_signature_validator')
+  assert.equal(signatureFor('gemini-4-pro '), 'skip_thought_signature_validator')
+  // The version boundary: `4x` is not a major version, and 2.x/1.x never asked for one.
+  assert.equal(signatureFor('gemini-4x'), undefined)
+  assert.equal(signatureFor('gemini-2.5-pro'), undefined)
+  assert.equal(signatureFor('GEMINI-2.5-PRO'), undefined)
+})
+test('Gemini 4 reuses a real signature only for the same provider and model', () => {
+  const source = {
+    kind: 'model' as const,
+    provider: 'antigravity',
+    model: 'gemini-4-argon-low',
+    replayState: {
+      response: { kind: 'antigravity', version: 1 },
+      blocks: [{}, { thoughtSignature: 'real-signature' }],
+    },
+  }
+  const messages: TranslatableMessage[] = [
+    message('user', [{ type: 'text', text: 'inspect' }]),
+    message('assistant', [
+      { type: 'text', text: 'running' },
+      { type: 'tool-call', id: ToolCallId('call-1'), name: 'bash', arguments: '{}' },
+    ], source),
+  ]
+  const payload = toAntigravityRequest({ ...options([]), model: 'gemini-4-argon-low' }, messages, 'project-123')
+  const parts = payload.request.contents.find(content => content.role === 'model')?.parts ?? []
+  assert.equal(parts.find(part => part.functionCall !== undefined)?.thoughtSignature, 'real-signature')
+  for (const previous of [
+    { provider: 'antigravity', model: 'gemini-3-flash' },
+    { provider: 'claude', model: 'gemini-4-argon-low' },
+  ]) {
+    const foreign = messages.map(entry => entry.role === 'assistant'
+      ? { ...entry, source: { ...source, ...previous } }
+      : entry)
+    const switched = toAntigravityRequest({ ...options([]), model: 'gemini-4-argon-low' }, foreign, 'project-123')
+    const call = switched.request.contents.flatMap(content => content.parts).find(part => part.functionCall)
+    assert.equal(call?.thoughtSignature, 'skip_thought_signature_validator')
+  }
+})

@@ -16,8 +16,10 @@ import type { ProviderUsage, UsageWindow } from './common.js'
 import type { ProviderId } from '../auth/store.js'
 import type { ConcretePoolMember } from './pool-family.js'
 
-/** A member is taken out of rotation once any window crosses this fill level. */
+/** Near-full members are tried only after members below this fill level. */
 export const QUOTA_FULL_PERCENT = 95
+/** Exhausted subscription windows must not silently spill over into paid credits. */
+export const QUOTA_EXHAUSTED_PERCENT = 100
 /** How long a usage snapshot is trusted before a background refresh. */
 export const USAGE_TTL_MS = 5 * 60_000
 
@@ -30,8 +32,10 @@ const FALLBACK_HORIZON_MS: Record<UsageWindow['kind'], number> = {
 
 /** The scheduling view of one member's quota. */
 export interface MemberQuota {
-  /** False when a window is effectively full or the login is gone. */
+  /** False when a window is near-full or the login is gone. */
   available: boolean
+  /** A known exhausted window: exclude even if the upstream would accept paid credits. */
+  exhausted?: true
   /** Required burn rate (fraction of window per ms); 0 when unknown. */
   urgency: number
   /** Epoch ms of the snapshot this was computed from; 0 when none. */
@@ -90,17 +94,14 @@ export class PoolUsageTracker {
 
   /**
    * The quota view of one member. A cold cache awaits the first fetch; a
-   * stale one answers immediately while the refresh serves the NEXT call
-   * (member selection must never block on the network mid-conversation). A
-   * failure still cooling down degrades immediately with no network call.
+   * stale non-exhausted snapshot answers immediately while refreshing in the
+   * background. Exhausted snapshots await their expired-cache refresh so a
+   * reset can restore routing on this call. A live failure cooldown never
+   * triggers another fetch.
    *
-   * Deliberately does NOT fall back to `lastSnapshot` the way
-   * {@link snapshotFor} does: scoring routing decisions off data that is
-   * known to be stale-and-unrefreshable risks steering traffic by a urgency
-   * number the endpoint itself is no longer vouching for, whereas
-   * `snapshotFor`'s stale-display concern (the Settings page, the composer
-   * badge) has no such downside — showing an old percentage beats showing
-   * nothing.
+   * Failures discard stale urgency but preserve known exhaustion: an outage
+   * must not turn a blocked subscription into permission to spend credits.
+   * Only a successful usage lookup (or explicit invalidation) clears it.
    * @param member - the pool member to score (account resolved).
    * @returns availability plus the urgency score.
    */
@@ -112,18 +113,33 @@ export class PoolUsageTracker {
     if (entry !== undefined) {
       const fresh = Date.now() - entry.at < (entry.cooldownMs ?? this.ttlMs)
       if (entry.snapshot !== undefined) {
-        if (!fresh) void this.refresh(key, fetcher).catch(() => undefined)
-        return this.score(member, entry)
+        const quota = this.score(member, entry)
+        if (fresh) return quota
+        if (!quota.exhausted && entry.at !== Number.NEGATIVE_INFINITY) {
+          void this.refresh(key, fetcher).catch(() => undefined)
+          return quota
+        }
+        // A reset may have restored the subscription since the last lookup.
+      } else if (fresh) {
+        return this.failedQuota(member, entry.error, entry.lastSnapshot)
       }
-      if (fresh) return degradedQuota(entry.error)
       // The cooldown expired: fall through to a fresh, blocking attempt.
     }
     try {
       const snapshot = await this.refresh(key, fetcher)
       return this.score(member, { snapshot, at: Date.now() })
     } catch (error: unknown) {
-      return degradedQuota(error)
+      return this.failedQuota(member, error, entry?.snapshot ?? entry?.lastSnapshot)
     }
+  }
+
+  /** Keep a known credit-spending risk blocked through usage-endpoint failures. */
+  private failedQuota(member: ConcretePoolMember, error: unknown, snapshot?: ProviderUsage): MemberQuota {
+    const degraded = degradedQuota(error)
+    if (snapshot !== undefined && this.score(member, { snapshot, at: 0 }).exhausted) {
+      return { ...degraded, available: false, exhausted: true }
+    }
+    return degraded
   }
 
   /**
@@ -166,6 +182,14 @@ export class PoolUsageTracker {
       if (failed?.snapshot === undefined && failed?.lastSnapshot !== undefined) return failed.lastSnapshot
       throw error
     }
+  }
+
+  /** Recheck after an inference quota failure without erasing another model lane's exhaustion. */
+  expire(provider: ProviderId, account: string): void {
+    const key = `${provider}/${account}`
+    const entry = this.entries.get(key)
+    // Respect a usage-endpoint cooldown; inference errors do not lift it.
+    if (entry?.snapshot !== undefined) this.entries.set(key, { ...entry, at: Number.NEGATIVE_INFINITY })
   }
 
   /** Drop cached snapshots: one account, or a whole provider when `account` is omitted. */
@@ -230,7 +254,8 @@ export class PoolUsageTracker {
       if (window.usedPercent >= QUOTA_FULL_PERCENT) available = false
       urgency = Math.max(urgency, windowUrgency(window))
     }
-    return { available, urgency, fetchedAt: entry.at }
+    const exhausted = windows.some(window => window.usedPercent >= QUOTA_EXHAUSTED_PERCENT)
+    return { available, urgency, fetchedAt: entry.at, ...exhausted ? { exhausted: true as const } : {} }
   }
 }
 

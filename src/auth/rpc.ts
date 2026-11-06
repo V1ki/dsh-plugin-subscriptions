@@ -67,16 +67,16 @@ export type SpeedTier = 'standard' | 'fast'
 
 /** `speed` endpoint value: the session's choice plus the visibility list. */
 export interface SpeedState {
-  /** The session's current speed tier (default `standard`). */
+  /** Explicit session speed, or the subagent's model default when supplied. */
   tier: SpeedTier
   /** Codex model ids whose catalog advertises a fast tier. */
   fastModels: string[]
 }
 
-/** Speed state the RPC handler delegates to (in-memory, per session). */
+/** Session overrides plus persisted subagent model defaults. */
 export interface SpeedController {
-  /** Current speed state: the session's tier and the fast-capable codex models. */
-  speed(sessionId: string): Promise<SpeedState>
+  /** Pass the current Codex model to resolve a subagent's default speed. */
+  speed(sessionId: string, model?: string): Promise<SpeedState>
   /** Set one session's speed tier. */
   setSpeed(sessionId: string, tier: SpeedTier): Promise<void>
 }
@@ -97,6 +97,8 @@ export interface AccountStatus {
 
 /** Login state of one provider, as rendered by the Settings page. */
 export interface ProviderStatus {
+  /** Saved picker visibility, attached by the status RPC from local preferences. */
+  visibleModels?: string[]
   displayName?: string
   /** Whether a login attempt is currently waiting for its code. */
   busy: boolean
@@ -154,6 +156,8 @@ export interface ProviderAccountCatalog {
 export interface ProviderSettingsController {
   /** Local preferences only: status must not fetch a model catalog. */
   displayName?(provider: ProviderId): string | undefined
+  /** Local picker selection, without triggering model discovery. */
+  visibleModels?(provider: ProviderId): string[] | undefined
   get(provider: ProviderId, force: boolean): Promise<unknown>
   set(provider: ProviderId, settings: unknown): Promise<void>
 }
@@ -548,7 +552,9 @@ async function dispatch(
       ))
       return ok({ providers: Object.fromEntries(entries.map(([provider, status]) => {
         const displayName = providerSettings?.displayName?.(provider)
-        return [provider, { ...status, ...(displayName ? { displayName } : {}) }]
+        const visibleModels = providerSettings?.visibleModels?.(provider)
+        return [provider, { ...status, ...(displayName ? { displayName } : {}),
+          ...(visibleModels === undefined ? {} : { visibleModels }) }]
       })) })
     }
     case 'login': {
@@ -589,7 +595,8 @@ async function dispatch(
     case 'video':
       return ok(await controller.readVideo(readVideoName(payload), signal))
     case 'speed':
-      return ok(await speed.speed(readSessionId(payload)))
+      return ok(await speed.speed(readSessionId(payload),
+        (payload as Record<string, unknown>).model === undefined ? undefined : readString(payload, 'model')))
     case 'setSpeed':
       await speed.setSpeed(readSessionId(payload), readSpeedTier(payload))
       return ok({ ok: true })

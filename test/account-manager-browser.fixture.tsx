@@ -16,10 +16,10 @@ const rpc = { call: async (_channel: string, endpoint: string, payload: any) => 
     return { ok: true, value: {} }
   }
   if (endpoint.endsWith('.setModelDefault')) { state.efforts.push(payload); return { ok: true, value: {} } }
-  return { ok: true, value: { settings: structuredClone(state.settings), tools: ['image_generate'], models: [
-    { id: 'alpha', name: 'Alpha', efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], defaultContextWindow: 272000, maxContextWindow: 872000 },
+  return { ok: true, value: { settings: structuredClone(state.settings), tools: ['image_generate'], models: state.models ?? [
+    { id: 'alpha', name: 'Alpha', fastTier: state.supportsFast !== false, efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], defaultContextWindow: 272000, maxContextWindow: 872000 },
     { id: 'beta', name: 'Beta' },
-  ], accounts: [
+  ], accounts: state.accounts ?? [
     { key: 'personal', label: 'personal@example.com', models: state.preview ? [{ id: 'gpt-5.4', name: 'GPT-5.4' }, { id: 'gpt-5.1-codex', name: 'GPT-5.1 Codex' }] : [{ id: 'alpha', name: 'Alpha' }, { id: 'beta', name: 'Beta' }] },
     { key: 'work', label: 'work@example.com', models: state.preview ? [{ id: 'gpt-5.4', name: 'GPT-5.4' }, { id: 'gpt-5.1-codex', name: 'GPT-5.1 Codex' }] : [], unavailable: !state.preview },
   ] } }
@@ -28,7 +28,7 @@ function App() {
   const [open, setOpen] = useState(false)
   const dictionary = state.locale === 'zh' ? zh : en
   return <><button onClick={() => setOpen(true)}>Manage</button>{open && <ProviderAccountManager
-    provider="codex" name="Codex (ChatGPT)" rpc={rpc} onClose={() => setOpen(false)}
+    provider={state.provider ?? 'codex'} name={state.provider === 'claude' ? 'Claude' : 'Codex (ChatGPT)'} rpc={rpc} onClose={() => setOpen(false)}
     t={(key, params) => Object.entries(params ?? {}).reduce((text, [name, value]) => text.replaceAll(`{${name}}`, String(value)), dictionary[key])} />}</>
 }
 createRoot(document.getElementById('root')!).render(<App />)

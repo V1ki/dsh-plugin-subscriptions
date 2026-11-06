@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { registerHooks } from 'node:module'
+import { PartialArguments } from '@deepseek-ai/dsh-util-values'
 // The host primitives ship CSS modules; Node needs only their empty class map
 // for these pure-logic / server-render tests, not a browser stylesheet loader.
 const css = registerHooks({ load(url, context, nextLoad) {
@@ -10,7 +11,7 @@ const css = registerHooks({ load(url, context, nextLoad) {
     ? { format: 'module', source: 'export default {}', shortCircuit: true }
     : nextLoad(url, context)
 } })
-const { AccountWindows, compactSegment, createCurrentModelReader, previewWindows,
+const { AccountWindows, CodexExhaustionNotice, compactSegment, createCurrentModelReader, previewWindows,
   collapsedDisplays, expandedDisplays, retainSubscriptionSelection, usageBadgeIcon } = await import('../src/client/SubscriptionUsageBadge.js')
 const { ImageGenerateToolview } = await import('../src/client/ImageGenerateToolview.js')
 const { VideoGenerateToolview } = await import('../src/client/VideoGenerateToolview.js')
@@ -18,10 +19,16 @@ css.deregister()
 import type { ProviderUsageDisplay } from '../src/client/SubscriptionUsageBadge.js'
 import type { UsageWindow } from '../src/client/SubscriptionsSection.js'
 import { en, zh } from '../src/client/locales.js'
+import { visibleUsageWindows } from '../src/client/usage-window-filter.js'
 
 test('media tool views render the preparing phase before arguments are available', () => {
   for (const [Component, name] of [[ImageGenerateToolview, 'image_generate'], [VideoGenerateToolview, 'video_generate']] as const) {
-    const block = { phase: 'preparing' as const, callId: 'media-call', name, turn: 0, step: 0, time: 0, subCalls: [] }
+    // `args` is required on every tool-call head since DSH 0.2.1-rc.2; EMPTY is
+    // the honest view for a call whose arguments have not arrived yet.
+    const block = {
+      phase: 'preparing' as const, callId: 'media-call', name, turn: 0, step: 0, time: 0,
+      subCalls: [], args: PartialArguments.EMPTY,
+    }
     const html = renderToStaticMarkup(createElement(Component, { block }))
     assert.ok(html.includes(name))
   }
@@ -35,6 +42,25 @@ function display(provider: ProviderUsageDisplay['provider'] = 'antigravity', val
     { key: 'default', isDefault: true, windows: values },
   ] }
 }
+
+test('Codex exhaustion notice renders localized credits and reset guidance only for all displayed exhausted accounts', () => {
+  const d = display('codex', [{ kind: 'weekly', usedPercent: 100 }])
+  d.accounts.push({ key: 'second', isDefault: false, windows: [{ kind: 'session', usedPercent: 105 }] })
+  for (const dictionary of [en, zh]) {
+    const translate = (key: keyof typeof en) => dictionary[key]
+    const render = () => renderToStaticMarkup(createElement(CodexExhaustionNotice, { display: d, translate }))
+    assert.match(render(), /role="status"/)
+    assert.ok(render().includes(dictionary.usageBadgeAllCodexExhausted))
+    d.accounts[1]!.windows[0]!.usedPercent = 99.99
+    assert.equal(render(), '', 'do not treat rounded 100% as exhaustion')
+    d.accounts[1]!.windows = []
+    assert.equal(render(), '', 'unknown usage is not known exhaustion')
+    d.accounts[1]!.windows = [{ kind: 'session', usedPercent: 105 }]
+  }
+  assert.equal(renderToStaticMarkup(createElement(CodexExhaustionNotice, {
+    display: display('claude', [{ kind: 'weekly', usedPercent: 100 }]), translate: key => en[key],
+  })), '')
+})
 
 test('Antigravity compact readout selects exact current model, not the entire catalog', () => {
   const d = display('antigravity', [...windows, { kind: 'weekly', scope: 'gemini-model-59', usedPercent: 81 }])
@@ -74,6 +100,27 @@ test('rendered account keeps other windows in a closed native disclosure with lo
     assert.ok(html.includes(translate('usageBadgeCurrent')))
     assert.ok(html.indexOf('gemini-model-59') < html.indexOf('<details'))
     assert.ok(html.includes('gemini-model-58'))
+  }
+})
+
+test('Google dialog previews and disclosure counts only include selected models', () => {
+  const filtered = visibleUsageWindows('antigravity', windows, ['gemini-model-1', 'gemini-model-59'])
+  const translate = (key: keyof typeof en, params?: Record<string, unknown>) =>
+    en[key].replace(/\{(\w+)\}/g, (_, name: string) => String(params?.[name] ?? ''))
+  const html = renderToStaticMarkup(createElement(AccountWindows, {
+    windows: filtered, model: 'gemini-model-59', provider: 'antigravity', translate,
+  }))
+  assert.equal((html.match(/<dt /g) ?? []).length, 2)
+  assert.ok(html.includes(translate('usageBadgeMoreWindows', { count: 1 })))
+  assert.ok(!html.includes('gemini-model-58'))
+  assert.equal(windows.length, 60)
+  for (const dictionary of [en, zh]) {
+    const empty = renderToStaticMarkup(createElement(AccountWindows, {
+      windows: [], model: 'gemini-model-59', provider: 'antigravity', translate: key => dictionary[key],
+    }))
+    assert.ok(empty.includes(dictionary.usageNoVisibleModels))
+    assert.ok(!empty.includes('<details'))
+    assert.ok(!empty.includes('<dt'))
   }
 })
 

@@ -34,6 +34,8 @@
 
 目录声明了 fast tier(即 codex CLI 的 fast 模式)的 Codex 模型,会在输入框工具行(模型选择器旁)多出一个**速度**开关 —— 标准 / 快速(`service_tier: priority`),按会话生效。`/fast` 斜杠命令提供同样的弹窗选择;当前模型不支持快速档时会提示原因。
 
+子代理的默认速度单独按模型设置：**设置 → 订阅 → ChatGPT（Codex）→ 管理 → 编辑模型列表 → 子代理默认速度**。点击「保存更改」后，对子代理的后续请求生效，正在运行的子代理也会采用新设置。该设置重启后保留，与父会话使用什么模型无关；主会话的速度不会传递给子代理。如果在某个子会话中明确选择了速度（包括标准档），则优先使用该会话的选择；会话内的明确选择重启后重置。快速档仍要求实际使用的 Codex 模型目录声明支持。宿主无法提供运行中 Agent 的来源元数据时，未明确设置速度的会话保持标准档。
+
 ![速度开关及其标准/快速菜单](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
 
 输入框下方的统计行会多出一个**订阅用量**胶囊，显示当前会话所选模型对应服务商的已用百分比和重置窗口（选 Codex 模型时显示 Codex，选 Grok 模型时显示 Grok，以此类推）。状态栏最多显示一家：切到非订阅模型时，保留当前会话视图中最近选择的订阅；没有记录则隐藏。最近模型记录不会跨页面刷新保存。点击可展开查看所有已登录服务商及其全部账号 —— 默认账号带星标，当前服务商排在最前。Antigravity 仅预览当前模型的额度窗口（每个账号最多两个），其余模型窗口默认折叠，仍可点击展开。
@@ -85,9 +87,13 @@ Codex 编辑走 `/backend-api/codex/images/edits`，Grok 编辑走 `/v1/images/e
 
 ### DSH 兼容性
 
-`0.9.7` 版本新增对 DSH `0.2.0-rc.2` 的支持，开发依赖已固定到该版本。适配请求态消息、独立工具结果、工具准备状态和已省略图片的文本占位，同时保留旧历史格式转换。不会自动放行其他 `0.2` 预发布版本。
+DSH peer 统一使用两段短范围，不设上限：`>=0.2.0-rc.2 || >=0.2.1-0`。第一段保留最低支持版本；第二段让所有 `0.2.1` alpha/RC 都满足 npm/pnpm 默认的 peer 匹配规则，避免这五个 DSH peer 对该版本线产生版本不匹配警告。以后每条受支持的预发布版本线只维护一个锚点，不再逐个追加 RC。开发依赖仍固定到 `0.2.1-rc.2`。
 
-当前版本支持已发布的 DSH `0.1.1-rc.2`、`0.1.2-alpha`/`rc`、`0.1.3-alpha`、`0.1.5-alpha`/`rc` 和 `0.1.7-rc` 版本线，包括 `0.1.5-rc.2` 和 `0.1.7-rc.2`。peer 范围使用 `0.1.5-alpha.1` 作为锚点，按照 npm semver 规则也覆盖之后的 `0.1.5-alpha`、`0.1.5-rc` 和稳定版 `0.1.5`；`0.1.7-rc.1` 锚点同样覆盖之后的 `0.1.7-rc` 和稳定版 `0.1.7`。DSH `0.1.6-alpha` 和 `0.1.7-alpha` 尚未单独验证，因此暂不纳入支持范围。
+Harness 使用 `includePrerelease: true`，放行不低于下限的所有版本，包括未来预发布版。npm/pnpm 默认规则允许更高的正式版，但新的预发布版本线仍需显式锚点，例如为 `0.2.2` 预发布版添加 `>=0.2.2-0`。当前不设上限，不会拦截未来可能不兼容的版本；准入不代表运行时兼容保证。
+
+DSH `0.2.1-rc.2` 加载时优先使用已声明的 `engines.dsh`；未声明时，要求所有 `@deepseek-ai/dsh` 和 `@deepseek-ai/dsh-*` peer 范围均匹配当前 DSH 版本，预发布版本也参与匹配。本插件未声明 `engines.dsh`，因此由 DSH peer 范围决定是否允许加载。`@deepseek-ai/cordis` 与 `@deepseek-ai/schemastery` 的 peer 影响包管理器的依赖解析，不参与这项加载检查；它们保留 `^4.0.1` / `^3.18.1` 下限，并额外列出 DSH `0.2.1-alpha.2`、`0.2.1-alpha.3` 自带的 `4.0.5-alpha` / `3.18.5-alpha` 版本，因为这些脱字符范围按 npm 默认的 semver 规则不包含上述预发布版本。
+
+不再支持 DSH `0.1.x`。仍使用该版本线的用户需要升级到受支持的 DSH 版本，或保留与其兼容的旧版插件。
 
 ### 管理账号与 Pool 模型
 
@@ -235,7 +241,7 @@ Antigravity 为 Gemini 使用 `parametersJsonSchema`，为 Claude/GPT-OSS 使用
   `account` 填 `status` 接口返回的稳定账号 key——Claude 是邮箱,Grok / Copilot / Antigravity 是登录名。Codex 的 key 同时包含 workspace 和用户(`["<workspace-id>","user","<user-id>"]`),因此 Codex 也可以直接填登录邮箱,或在该 workspace 只登录了一个用户时填 workspace ID;有歧义的引用不会解析到任何账号,以免打到别人的账号。
 - **档位额外项(`tiers`,可选)**：额外的选择器条目,failover 可以跨模型;出现在首个成员所在的 provider 分组。不会自动创建。
 
-成员选择按会话粘性(prompt 缓存不失效),两种策略:`priority`(按顺序取第一个健康成员)和 `quota_aware`(默认——按"必需消耗速率 = 剩余配额 / 距重置时间"给成员打分,快重置且剩余多的窗口优先被用掉而不是浪费;粘性成员除非被挑战者以 `switchMargin` 倍分差击败否则不换)。任一用量窗口超过 95% 的成员会被硬门槛挡下;首个流式 chunk 之前的失败会记冷却并切换下一家(provider 给了 `retry-after` 就用它)——配额与认证类失败按整个账号冷却(配额是账号级的;Claude 的分模型窗口则只冷却出错成员),瞬时服务端失败只冷却出错成员。Copilot 没有用量接口,恒为 0 分,自然充当最后的保底。
+成员选择按会话粘性(prompt 缓存不失效),两种策略:`priority`(按顺序取第一个健康成员)和 `quota_aware`(默认——按"必需消耗速率 = 剩余配额 / 距重置时间"给成员打分,快重置且剩余多的窗口优先被用掉而不是浪费;粘性成员除非被挑战者以 `switchMargin` 倍分差击败否则不换)。`quota_aware` 会把适用窗口已用 95%～不足 100% 的成员放到后备组，组内仍按消耗速率排序。**两种策略都会跳过任一适用窗口已知达到 100% 的成员**；当前健康候选全部满额时，停止请求并提示额度耗尽，不再静默消耗付费 credits。展开的订阅用量面板也会在当前显示的 Codex 账号均满额时提示。外部使用重置卡后，请点击对应账号的 **设置 → 订阅 → 刷新**（用量接口处于失败冷却时仍需等待）。这是基于缓存用量的尽力保护，不是账单硬上限：未知用量仍可用、缓存可能滞后，独立账号/直连及图片视频路由不受此模型账号池保护。首个流式 chunk 之前的失败会记冷却并切换下一家(provider 给了 `retry-after` 就用它)——配额与认证类失败按整个账号冷却(配额是账号级的;Claude 的分模型窗口则只冷却出错成员),瞬时服务端失败只冷却出错成员。Copilot 没有用量接口,恒为 0 分,自然充当最后的保底。
 
 ```yaml
 - id: llm-subscriptions
@@ -300,12 +306,12 @@ DSH `v0.1.3-alpha.1` 新增宿主统一代理支持。建议在启动环境或 `
 本插件只提供模型路由,审批策略由其他插件负责:
 
 - [`dsh-plugin-auto-review`](https://github.com/delef/dsh-plugin-auto-review) —— 面向 DSH 工具审批的 provider 原生自动审查。它在本插件注册的 `codex` / `grok` 路由(或其他 DSH LLM adapter 的兼容路由)之上,通过 `ctx.llm.stream()` 复现 Codex Guardian 与 Grok 提权审查逻辑,不接触账号与凭据。安装:`dsh plugin --profile web add dsh-plugin-auto-review`。
-- [`dsh-sidebar-session-provider-icon`](https://github.com/prgrmrwy/dsh-sidebar-session-provider-icon) —— 让本插件注册的路由在会话列表里一眼可分：在侧边栏每个会话标题前显示输入框当前选中模型的品牌 logo，不用打开会话就能认出它是 `codex`、`claude`、`grok`、`copilot` 还是聚合路由。数据取自 DSH 自己的模型选择状态，历史会话回退到最近一次请求；自身不发起网络请求。安装：`dsh plugin --profile web add dsh-sidebar-session-provider-icon`。
+- [`dsh-sidebar-session-provider-icon`](https://github.com/prgrmrwy/dsh-sidebar-session-provider-icon) —— 让本插件注册的路由在会话列表里一眼可分：在侧边栏每个会话标题前显示输入框当前选中模型的品牌 logo，不用打开会话就能认出它是 `codex`、`claude`、`grok`、`copilot` 还是聚合路由。数据取自 DSH 自己的模型选择状态，历史会话回退到最近一次请求。它复用宿主模型目录，不直接请求模型提供商。安装：`dsh plugin --profile web add dsh-sidebar-session-provider-icon`。
 
 ## 开发
 
 ```sh
-pnpm install   # 开发基线：已发布的 DSH 0.2.0-rc.2 依赖
+pnpm install   # 开发基线：已发布的 DSH 0.2.1-rc.2 依赖
 pnpm build     # tsc(lib/)+ tsdown(lib/client.js 浏览器 bundle)
 pnpm test      # 编译后跑 node --test 单测
 ```
