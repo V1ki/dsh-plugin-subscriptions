@@ -755,6 +755,28 @@ test('stream: an exhausted pool throws RATE_LIMIT with the earliest recovery hin
   )
 })
 
+test('Codex stream overload preserves the reported seconds through pool exhaustion', async t => {
+  const now = Date.now()
+  t.mock.timers.enable({ apis: ['Date'], now })
+  const { ResponsesStreamTranslator } = await import('../src/translate/responses.js')
+  const codex = new FakeAdapter(async function* () {
+    new ResponsesStreamTranslator().push({ type: 'response.failed', response: { error: {
+      code: 'server_is_overloaded', message: 'busy', headers: { 'retry-after-ms': null, 'retry-after': '120' },
+    } } })
+  })
+  const { pool } = makePool({ codex })
+  for (const expected of [120000, 30000]) {
+    await assert.rejects(collect(pool.stream(OPTIONS)), (error: unknown) => {
+      assert.ok(error instanceof LlmError)
+      assert.equal(error.code, 'SERVER')
+      assert.equal(error.failure.providerRetryAfterMs, expected)
+      return true
+    })
+    assert.deepEqual(codex.accounts, ['a1', 'a2'])
+    t.mock.timers.tick(90000)
+  }
+})
+
 test('stream: a transport failure on a single-member pool is reported as TRANSPORT, not RATE_LIMIT (issue #139)', async () => {
   const transport = new LlmError('codex API request failed: ECONNRESET', 'TRANSPORT')
   const codex = new FakeAdapter(() => serveFail(transport))
