@@ -12,7 +12,7 @@ import assert from 'node:assert/strict'
 import { LlmError } from '@deepseek-ai/dsh-llm'
 import { OAuthEndpointError } from '../src/providers/common.js'
 import type { ProviderUsage } from '../src/providers/common.js'
-import { PoolUsageTracker } from '../src/providers/pool-usage.js'
+import { normalizedWindowUrgency, PoolUsageTracker } from '../src/providers/pool-usage.js'
 import type { ProviderId } from '../src/auth/store.js'
 
 const MEMBER = { provider: 'claude' as const, account: 'a1', model: 'claude-opus-5' }
@@ -257,4 +257,26 @@ test('snapshotFor: a rate limit with no prior success still throws (nothing to f
   const error = new OAuthEndpointError('claude usage token endpoint error (HTTP 429)', 429, undefined, 60_000)
   const { tracker } = trackerOf(() => Promise.reject(error))
   await assert.rejects(tracker.snapshotFor('claude', 'a1'), error)
+})
+
+test('normalized urgency uses total duration, never guesses from time to reset', () => {
+  const hour = 3600000
+  const now = 1_800_000_000_000
+  const score = (duration: number | undefined, left: number, used = 0) => normalizedWindowUrgency({
+    kind: 'other', usedPercent: used, resetsAt: now + left,
+    ...(duration === undefined ? {} : { durationMs: duration }),
+  }, now)
+  for (const length of [3, 5, 7 * 24]) {
+    assert.equal(score(length * hour, length * hour), 1)
+    assert.equal(score(length * hour, length * hour / 2), 2)
+  }
+  const scores = [-1, 0, 1].map(ms => score(24 * hour, 6 * hour + ms))
+  assert.equal(scores[1], 4)
+  assert.ok(scores[0] > scores[1] && scores[1] > scores[2] && scores[0] - scores[2] < 0.000001)
+  for (const duration of [undefined, 0, NaN, Infinity]) {
+    for (const left of [-1, 6 * hour - 1, 6 * hour + 1]) assert.equal(score(duration, left, 25), 0.75)
+  }
+  assert.equal(normalizedWindowUrgency({kind: 'other', usedPercent: 25, durationMs: hour}, now), 0.75)
+  assert.equal(score(hour, -1), 1000)
+  assert.equal(score(hour, -1, 100), 0)
 })

@@ -332,7 +332,7 @@ function claudeResetsAt(value: unknown): number | undefined {
 }
 
 /** Map one legacy `{utilization, resets_at}` bucket; undefined when null or unusable. */
-function claudeLegacyWindow(value: unknown, kind: UsageWindow['kind'], scope?: string): UsageWindow | undefined {
+function claudeLegacyWindow(value: unknown, kind: 'session' | 'weekly', scope?: string): UsageWindow | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   const bucket = value as { utilization?: number; resets_at?: string }
   if (typeof bucket.utilization !== 'number' || !Number.isFinite(bucket.utilization)) return undefined
@@ -341,6 +341,7 @@ function claudeLegacyWindow(value: unknown, kind: UsageWindow['kind'], scope?: s
     kind,
     ...scope === undefined ? {} : { scope },
     usedPercent: bucket.utilization,
+    durationMs: kind === 'session' ? 5 * 3600_000 : 7 * 24 * 3600_000,
     ...resetsAt === undefined ? {} : { resetsAt },
   }
 }
@@ -370,6 +371,7 @@ function claudeLimitsWindows(value: unknown): UsageWindow[] {
       kind,
       ...typeof scope === 'string' && scope.length > 0 ? { scope } : {},
       usedPercent: entry.percent,
+      ...kind === 'weekly' ? { durationMs: 7 * 24 * 3600_000 } : {},
       ...resetsAt === undefined ? {} : { resetsAt },
     })
   }

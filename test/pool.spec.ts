@@ -180,7 +180,7 @@ interface PoolHarness {
 function makePool(
   adapters: Partial<Record<ProviderId, FakeAdapter>>,
   options: {
-    strategy?: 'priority' | 'quota_aware'
+    strategy?: 'priority' | 'quota_aware' | 'quota_normalized'
     switchMargin?: number
     usage?: (provider: ProviderId, account: string) => (() => Promise<ProviderUsage>) | undefined
     families?: Map<string, PoolDefinition>
@@ -466,10 +466,39 @@ test('quota_aware: the most urgent window (soon reset, plenty left) wins', async
   assert.equal((chunks[0] as { text: string }).text, 'a2')
 })
 
-test('quota_aware: a near-full account is deferred behind a healthy account', async () => {
+for (const strategy of ['quota_aware', 'quota_normalized'] as const) test(`${strategy}: independently selects across mixed session and weekly windows`, async () => {
+  const codex = new FakeAdapter((_options, account) => serveOk(account))
+  // a1: Session window has 3h left (ratio ~1.33), weekly window has 6d left (ratio ~1.05)
+  // a2: Session window has 5h left (ratio 1.0), weekly window has 36h (~1.5d) left with 95% quota (ratio ~4.4)
+  // Under absolute ms scoring, a1's 3h session would dwarf a2's 36h weekly window.
+  // Under normalized burn rate ratios, a2's expiring weekly quota correctly outranks a1.
+  const { pool } = makePool({ codex }, {
+    strategy,
+    usage: usageFetchers({
+      'codex/a1': {
+        supported: true,
+        windows: [
+          { kind: 'session', durationMs: 18000000, usedPercent: 20, resetsAt: Date.now() + 3 * 60 * 60_000 },
+          { kind: 'weekly', durationMs: 604800000, usedPercent: 10, resetsAt: Date.now() + 6 * 24 * 60 * 60_000 },
+        ],
+      },
+      'codex/a2': {
+        supported: true,
+        windows: [
+          { kind: 'session', durationMs: 18000000, usedPercent: 0, resetsAt: Date.now() + 5 * 60 * 60_000 },
+          { kind: 'weekly', durationMs: 604800000, usedPercent: 5, resetsAt: Date.now() + 36 * 60 * 60_000 },
+        ],
+      },
+    }),
+  })
+  const chunks = await collect(pool.stream(OPTIONS))
+  assert.equal((chunks[0] as { text: string }).text, strategy === 'quota_aware' ? 'a1' : 'a2')
+})
+
+for (const strategy of ['quota_aware', 'quota_normalized'] as const) test(`${strategy}: a near-full account is deferred behind a healthy account`, async () => {
   const codex = new FakeAdapter((_options, account) => serveOk(account))
   const { pool } = makePool({ codex }, {
-    strategy: 'quota_aware',
+    strategy,
     usage: usageFetchers({
       'codex/a1': windowUsage(50, 5 * 60 * 60_000),
       'codex/a2': windowUsage(96, 30 * 60_000),
@@ -479,7 +508,7 @@ test('quota_aware: a near-full account is deferred behind a healthy account', as
   assert.deepEqual(codex.accounts, ['a1'])
 })
 
-for (const strategy of ['priority', 'quota_aware'] as const) {
+for (const strategy of ['priority', 'quota_aware', 'quota_normalized'] as const) {
   for (const full of [100, 105]) test(`${strategy}: ${full}% never spends credits ahead of 95%`, async () => {
     const codex = new FakeAdapter((_options, account) => serveOk(account))
     const { pool } = makePool({ codex }, { strategy, usage: usageFetchers({
@@ -755,7 +784,7 @@ test('stream: empty completions in one session do not stall another session', as
   assert.deepEqual(codex.accounts, ['a1', 'a2', 'a1'])
 })
 
-for (const strategy of ['priority', 'quota_aware'] as const) test(`stream: ${strategy} gives no wait when the member with an empty completion can retry at once`, async () => {
+for (const strategy of ['priority', 'quota_aware', 'quota_normalized'] as const) test(`stream: ${strategy} gives no wait when the member with an empty completion can retry at once`, async () => {
   for (const limitMs of [60 * 60_000, 3 * 24 * 60 * 60_000]) {
     let empties = 0
     const codex = new FakeAdapter((_options, account) => {

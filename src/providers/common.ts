@@ -499,6 +499,8 @@ export interface UsageWindow {
   scope?: string
   /** Percent of the window already consumed (0–100). */
   usedPercent: number
+  /** Total window length when known from provider telemetry (not time left until reset). */
+  durationMs?: number
   /** Epoch milliseconds at which the window resets, when the provider discloses it. */
   resetsAt?: number
 }
