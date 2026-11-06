@@ -171,6 +171,64 @@ test('model discovery and quota display map fetchAvailableModels data', async ()
   ])
 })
 
+test('quota display maps retrieveUserQuotaSummary when models omit weekly quota', async () => {
+  const modelsURL = `${runtime.baseURL}/v1internal:fetchAvailableModels`
+  const loadURL = `${runtime.baseURL}/v1internal:loadCodeAssist`
+  const summaryURL = `${runtime.baseURL}/v1internal:retrieveUserQuotaSummary`
+  const modelsPayload = {
+    models: {
+      'gemini-3-flash': {
+        displayName: 'Gemini 3 Flash',
+        quotaInfo: { remainingFraction: 0.8, resetTime: '2026-08-24T00:00:00Z' },
+      },
+      'claude-sonnet-4-6': {
+        displayName: 'Claude Sonnet 4.6',
+        quotaInfo: { remainingFraction: 1.0, resetTime: '2026-08-24T00:00:00Z' },
+      },
+    },
+  }
+  const summaryPayload = {
+    groups: [
+      {
+        displayName: 'Gemini Models',
+        buckets: [
+          {
+            bucketId: 'gemini-weekly',
+            window: 'weekly',
+            remainingFraction: 0.5,
+            resetTime: '2026-08-30T00:00:00Z',
+          },
+        ],
+      },
+      {
+        displayName: 'Claude and GPT models',
+        buckets: [
+          {
+            bucketId: '3p-weekly',
+            window: 'weekly',
+            remainingFraction: 0.25,
+            resetTime: '2026-08-29T00:00:00Z',
+          },
+        ],
+      },
+    ],
+  }
+  const fetchFn = routed({
+    [modelsURL]: modelsPayload,
+    [loadURL]: { paidTier: { name: 'Google AI Pro' } },
+    [summaryURL]: summaryPayload,
+  })
+  const usage = await fetchAntigravityUsage(session, runtime, fetchFn)
+  assert.equal(usage.supported, true)
+  assert.equal(usage.plan, 'Google AI Pro')
+  assert.deepEqual(usage.windows?.map(window => [window.kind, window.scope, Math.round(window.usedPercent)]), [
+    ['other', 'gemini-3-flash', 20],
+    ['weekly', 'gemini-3-flash', 50],
+    ['other', 'claude-sonnet-4-6', 0],
+    ['weekly', 'claude-sonnet-4-6', 75],
+  ])
+})
+
 test('request conversion carries system, images, tools, tool results, and signed tool replay', () => {
   const assistantSource = {
     kind: 'model' as const,

@@ -372,6 +372,40 @@ interface AntigravityModelsResponse {
   models?: Record<string, AntigravityWireModel>
 }
 
+interface AntigravityQuotaBucket {
+  bucketId?: string
+  displayName?: string
+  window?: string
+  resetTime?: string
+  remainingFraction?: number
+}
+
+interface AntigravityQuotaGroup {
+  buckets?: AntigravityQuotaBucket[]
+  displayName?: string
+}
+
+interface AntigravityUserQuotaSummaryResponse {
+  groups?: AntigravityQuotaGroup[]
+}
+
+function weeklyQuotaFromSummary(
+  modelId: string,
+  summary: AntigravityUserQuotaSummaryResponse | undefined,
+): { remainingFraction?: number; resetTime?: string } | undefined {
+  if (!summary?.groups || !Array.isArray(summary.groups)) return undefined
+  const lower = modelId.toLowerCase()
+  for (const group of summary.groups) {
+    for (const bucket of group.buckets ?? []) {
+      if (bucket.window !== 'weekly') continue
+      if (bucket.bucketId?.includes('argon') && lower.includes('argon')) return bucket
+      if (bucket.bucketId?.startsWith('3p') && (lower.includes('claude') || lower.includes('gpt'))) return bucket
+      if (bucket.bucketId?.includes('gemini') && !bucket.bucketId?.includes('argon') && lower.includes('gemini') && !lower.includes('argon')) return bucket
+    }
+  }
+  return undefined
+}
+
 /** Fetch the authenticated account's live Antigravity model catalog. */
 export async function fetchAntigravityModels(
   session: AntigravitySession,
@@ -433,16 +467,20 @@ export async function fetchAntigravityUsage(
   signal?: AbortSignal,
 ): Promise<ProviderUsage> {
   const metadata = { ideType: 'ANTIGRAVITY', platform: 'PLATFORM_UNSPECIFIED', pluginType: 'GEMINI' }
-  const [models, account] = await Promise.all([
+  const [models, account, quotaSummary] = await Promise.all([
     callInternal<AntigravityModelsResponse>(
       'fetchAvailableModels', { project: session.projectId }, session.accessToken, runtime, fetchFn, signal,
     ),
     callInternal<LoadCodeAssistResponse>('loadCodeAssist', { metadata }, session.accessToken, runtime, fetchFn, signal),
+    callInternal<AntigravityUserQuotaSummaryResponse>(
+      'retrieveUserQuotaSummary', { project: session.projectId }, session.accessToken, runtime, fetchFn, signal,
+    ).catch(() => undefined),
   ])
   const windows: UsageWindow[] = []
   for (const [modelId, model] of Object.entries(models.models ?? {})) {
     const ordinary = usageWindow('other', modelId, model.quotaInfo)
-    const weekly = usageWindow('weekly', modelId, model.weeklyQuotaInfo ?? model.weeklyQuota)
+    const weeklyQuota = model.weeklyQuotaInfo ?? model.weeklyQuota ?? weeklyQuotaFromSummary(modelId, quotaSummary)
+    const weekly = usageWindow('weekly', modelId, weeklyQuota)
     if (ordinary !== undefined) windows.push(ordinary)
     if (weekly !== undefined) windows.push(weekly)
   }
