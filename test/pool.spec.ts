@@ -756,6 +756,57 @@ test('stream: request-fault failures rethrow without trying other accounts', asy
   assert.equal(health.isAvailable(memberKey('codex', 'a1', 'm')), true)
 })
 
+test('stream: an empty completion fails over without parking the member', async () => {
+  const codex = new FakeAdapter((_options, account) =>
+    account === 'a1'
+      ? serveFail(new LlmError('model returned a completed response with no content', 'EMPTY_RESPONSE'))
+      : serveOk('a2'))
+  const { pool, health } = makePool({ codex })
+  const chunks = await collect(pool.stream(OPTIONS))
+  assert.equal((chunks[0] as { text: string }).text, 'a2')
+  assert.equal(health.isMemberAvailable('codex', 'a1', 'm'), true)
+})
+
+test('stream: empty completions in one session do not stall another session', async () => {
+  const codex = new FakeAdapter((options, account) =>
+    options.sessionId === SessionId('poison')
+      ? serveFail(new LlmError('model returned a completed response with no content', 'EMPTY_RESPONSE'))
+      : serveOk(account))
+  const { pool } = makePool({ codex })
+  await assert.rejects(collect(pool.stream({ ...OPTIONS, sessionId: SessionId('poison') })), (error: unknown) => {
+    assert.ok(error instanceof LlmError)
+    assert.equal(error.code, 'EMPTY_RESPONSE')
+    assert.equal(error.failure.providerRetryAfterMs, undefined)
+    return true
+  })
+  const chunks = await collect(pool.stream({ ...OPTIONS, sessionId: SessionId('healthy') }))
+  assert.equal((chunks[0] as { text: string }).text, 'a1')
+  assert.deepEqual(codex.accounts, ['a1', 'a2', 'a1'])
+})
+
+for (const strategy of ['priority', 'quota_aware'] as const) test(`stream: ${strategy} gives no wait when the member with an empty completion can retry at once`, async () => {
+  for (const limitMs of [60 * 60_000, 3 * 24 * 60 * 60_000]) {
+    let empties = 0
+    const codex = new FakeAdapter((_options, account) => {
+      if (account === 'a1') return serveFail(new LlmError('usage limit', 'RATE_LIMIT', { providerRetryAfterMs: limitMs }))
+      return empties++ === 0
+        ? serveFail(new LlmError('model returned a completed response with no content', 'EMPTY_RESPONSE'))
+        : serveOk(account)
+    })
+    const { pool, health } = makePool({ codex }, { strategy })
+    await assert.rejects(collect(pool.stream(OPTIONS)), (error: unknown) => {
+      assert.ok(error instanceof LlmError)
+      assert.equal(error.code, 'EMPTY_RESPONSE')
+      assert.equal(error.failure.providerRetryAfterMs, undefined, `a1's ${limitMs} ms limit must not set the wait`)
+      return true
+    })
+    assert.equal(health.isMemberAvailable('codex', 'a2', 'm'), true)
+    const chunks = await collect(pool.stream(OPTIONS))
+    assert.equal((chunks[0] as { text: string }).text, 'a2')
+    assert.deepEqual(codex.accounts, ['a1', 'a2', 'a2'])
+  }
+})
+
 test('stream: an empty first stream counts as a transient failure', async () => {
   const codex = new FakeAdapter((_options, account) =>
     account === 'a1' ? serveEmpty() : serveOk('a2'))
@@ -782,6 +833,28 @@ test('stream: an exhausted pool throws RATE_LIMIT with the earliest recovery hin
       return true
     },
   )
+})
+
+test('Codex stream overload preserves the reported seconds through pool exhaustion', async t => {
+  const now = Date.now()
+  t.mock.timers.enable({ apis: ['Date'], now })
+  const { ResponsesStreamTranslator } = await import('../src/translate/responses.js')
+  const codex = new FakeAdapter(async function* () {
+    new ResponsesStreamTranslator().push({ type: 'response.failed', response: { error: {
+      code: 'server_is_overloaded', message: 'busy', headers: { 'retry-after-ms': null, 'retry-after': '120' },
+    } } })
+  })
+  const { pool } = makePool({ codex })
+  for (const expected of [120000, 30000]) {
+    await assert.rejects(collect(pool.stream(OPTIONS)), (error: unknown) => {
+      assert.ok(error instanceof LlmError)
+      assert.equal(error.code, 'SERVER')
+      assert.equal(error.failure.providerRetryAfterMs, expected)
+      return true
+    })
+    assert.deepEqual(codex.accounts, ['a1', 'a2'])
+    t.mock.timers.tick(90000)
+  }
 })
 
 test('stream: a transport failure on a single-member pool is reported as TRANSPORT, not RATE_LIMIT (issue #139)', async () => {
