@@ -926,20 +926,56 @@ test('grok discovery merges CLI-catalog reasoning metadata by model id', async (
   assert.equal(models[0].description, 'frontier')
 
   const g46 = await adapter.resolveModel('grok', 'grok-4.6')
-  assert.deepEqual(g46.reasoning?.efforts.map(effort => effort.id), ['xhigh', 'high', 'medium', 'low'])
-  assert.equal(g46.reasoning?.efforts[1].name, 'High Effort')
-  assert.equal(g46.reasoning?.efforts[1].description, 'extensive reasoning')
+  // The CLI lists levels strongest-first; the harness contract is weakest-first.
+  assert.deepEqual(g46.reasoning?.efforts.map(effort => effort.id), ['low', 'medium', 'high', 'xhigh'])
+  assert.equal(g46.reasoning?.efforts[2].name, 'High Effort')
+  assert.equal(g46.reasoning?.efforts[2].description, 'extensive reasoning')
   // The top-level reasoning_effort wins over the double default flags.
   assert.equal(g46.reasoning?.defaultEffort, 'high')
   assert.equal(g46.context?.contextWindow, 500_000)
 
   const g45 = await adapter.resolveModel('grok', 'grok-4.5')
-  assert.deepEqual(g45.reasoning?.efforts.map(effort => effort.id), ['high', 'medium', 'low'])
+  assert.deepEqual(g45.reasoning?.efforts.map(effort => effort.id), ['low', 'medium', 'high'])
 
   // A model the CLI catalog does not cover exposes no efforts.
   const build = await adapter.resolveModel('grok', 'grok-build-0.1')
   assert.equal(build.reasoning, undefined)
   assert.equal(build.context?.contextWindow, 256_000)
+})
+
+test('grok discovery orders CLI efforts weakest-first and keeps unknown ids last', async () => {
+  const adapter = new GrokAdapter({
+    models: STATIC_GROK,
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens(grokSession),
+    discovery: true,
+    fetchFn: grokDualFetch({
+      data: [{
+        id: 'grok-4.6',
+        supports_reasoning_effort: true,
+        reasoning_effort: 'high',
+        reasoning_efforts: [
+          { value: 'turbo' },
+          { value: 'max' },
+          { value: 'constructor' },
+          { value: 'xhigh' },
+          { value: 'high' },
+          { value: 'minimal' },
+          { value: 'medium' },
+          { value: 'low' },
+        ],
+      }],
+    }),
+  })
+  await adapter.listModels('grok')
+  const g46 = await adapter.resolveModel('grok', 'grok-4.6')
+  // Unknown ids (including Object.prototype keys) sort after the known tiers
+  // and keep their catalog order; the default is untouched by the reorder.
+  assert.deepEqual(
+    g46.reasoning?.efforts.map(effort => effort.id),
+    ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'turbo', 'constructor'],
+  )
+  assert.equal(g46.reasoning?.defaultEffort, 'high')
 })
 
 test('grok discovery survives a CLI catalog failure with a warning', async () => {
@@ -1022,7 +1058,7 @@ test('grok discovery keeps last-known reasoning when the CLI catalog omits a mod
   const g46 = await adapter.resolveModel('grok', 'grok-4.6')
   assert.deepEqual(g46.reasoning?.efforts.map(effort => effort.id), ['xhigh', 'high'])
   const g45 = await adapter.resolveModel('grok', 'grok-4.5')
-  assert.deepEqual(g45.reasoning?.efforts.map(effort => effort.id), ['high', 'medium', 'low'])
+  assert.deepEqual(g45.reasoning?.efforts.map(effort => effort.id), ['low', 'medium', 'high'])
 })
 
 test('grok entries without reasoning support expose no efforts', async () => {
@@ -1134,7 +1170,7 @@ test('grok resolveModel on a cold cache fetches the catalog itself', async () =>
   // No listModels first: after a restart, a resumed session's prepareCall can
   // be the first caller.
   const resolved = await adapter.resolveModel('grok', 'grok-4.6')
-  assert.deepEqual(resolved.reasoning?.efforts.map(effort => effort.id), ['xhigh', 'high', 'medium', 'low'])
+  assert.deepEqual(resolved.reasoning?.efforts.map(effort => effort.id), ['low', 'medium', 'high', 'xhigh'])
   assert.equal(resolved.reasoning?.defaultEffort, 'high')
 })
 
