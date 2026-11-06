@@ -403,7 +403,9 @@ function codexUsageWindow(value: unknown, fallbackKind: UsageWindow['kind']): Us
   } else if (typeof window.reset_after_seconds === 'number' && window.reset_after_seconds > 0) {
     resetsAt = Date.now() + window.reset_after_seconds * 1000
   }
+  const durationMs = typeof window.limit_window_seconds === 'number' ? window.limit_window_seconds * 1000 : undefined
   return {
+    ...(durationMs !== undefined && Number.isFinite(durationMs) && durationMs > 0 ? { durationMs } : {}),
     kind: codexWindowKind(window, fallbackKind),
     usedPercent: window.used_percent,
     ...resetsAt === undefined ? {} : { resetsAt },

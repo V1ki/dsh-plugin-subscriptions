@@ -36,7 +36,7 @@ export interface MemberQuota {
   available: boolean
   /** A known exhausted window: exclude even if the upstream would accept paid credits. */
   exhausted?: true
-  /** Required burn rate (fraction of window per ms); 0 when unknown. */
+  /** Burn rate in strategy-specific units; 0 when unmeasured. */
   urgency: number
   /** Epoch ms of the snapshot this was computed from; 0 when none. */
   fetchedAt: number
@@ -105,7 +105,7 @@ export class PoolUsageTracker {
    * @param member - the pool member to score (account resolved).
    * @returns availability plus the urgency score.
    */
-  async quotaFor(member: ConcretePoolMember): Promise<MemberQuota> {
+  async quotaFor(member: ConcretePoolMember, normalized = false): Promise<MemberQuota> {
     const key = `${member.provider}/${member.account}`
     const fetcher = this.fetcherFor(member.provider, member.account)
     if (fetcher === undefined) return { available: true, urgency: 0, fetchedAt: 0 }
@@ -113,7 +113,7 @@ export class PoolUsageTracker {
     if (entry !== undefined) {
       const fresh = Date.now() - entry.at < (entry.cooldownMs ?? this.ttlMs)
       if (entry.snapshot !== undefined) {
-        const quota = this.score(member, entry)
+        const quota = this.score(member, entry, normalized)
         if (fresh) return quota
         if (!quota.exhausted && entry.at !== Number.NEGATIVE_INFINITY) {
           void this.refresh(key, fetcher).catch(() => undefined)
@@ -127,7 +127,7 @@ export class PoolUsageTracker {
     }
     try {
       const snapshot = await this.refresh(key, fetcher)
-      return this.score(member, { snapshot, at: Date.now() })
+      return this.score(member, { snapshot, at: Date.now() }, normalized)
     } catch (error: unknown) {
       return this.failedQuota(member, error, entry?.snapshot ?? entry?.lastSnapshot)
     }
@@ -246,13 +246,13 @@ export class PoolUsageTracker {
   }
 
   /** Score one member against a snapshot's windows. */
-  private score(member: ConcretePoolMember, entry: SnapshotEntry): MemberQuota {
+  private score(member: ConcretePoolMember, entry: SnapshotEntry, normalized = false): MemberQuota {
     const windows = (entry.snapshot.windows ?? []).filter(window => windowApplies(window, member.model))
     let available = true
     let urgency = 0
     for (const window of windows) {
       if (window.usedPercent >= QUOTA_FULL_PERCENT) available = false
-      urgency = Math.max(urgency, windowUrgency(window))
+      urgency = Math.max(urgency, normalized ? normalizedWindowUrgency(window, Date.now()) : windowUrgency(window))
     }
     const exhausted = windows.some(window => window.usedPercent >= QUOTA_EXHAUSTED_PERCENT)
     return { available, urgency, fetchedAt: entry.at, ...exhausted ? { exhausted: true as const } : {} }
@@ -286,26 +286,21 @@ function windowApplies(window: UsageWindow, model: string): boolean {
   return model.toLowerCase().includes(window.scope.toLowerCase())
 }
 
-function windowTotalDurationMs(window: UsageWindow, horizon: number): number {
-  if (window.kind === 'weekly') return 7 * 24 * 60 * 60_000
-  if (window.kind === 'session') return 5 * 60 * 60_000
-  if (horizon <= 6 * 60 * 60_000) return 5 * 60 * 60_000
-  return 30 * 24 * 60 * 60_000
+/** Dimensionless urgency for the opt-in strategy. Missing timing adds no reset bonus. */
+export function normalizedWindowUrgency(window: UsageWindow, now: number): number {
+  const remaining = Math.max(0, Math.min(1, 1 - window.usedPercent / 100))
+  const { durationMs, resetsAt } = window
+  if (durationMs === undefined || !Number.isFinite(durationMs) || durationMs <= 0
+    || resetsAt === undefined || !Number.isFinite(resetsAt)) return remaining
+  const timeFraction = Math.min(1, Math.max(0.001, (resetsAt - now) / durationMs))
+  return remaining / timeFraction
 }
 
-/**
- * Normalized burn rate ratio: quota fraction remaining / time fraction remaining.
- * Normalizing against the total window duration puts short rate-limiting sessions
- * (3-5h) and tier budgets (7d weekly) onto a shared scale around 1.0 (on pace),
- * so multi-day quotas nearing reset with abundant capacity are not dwarfed by
- * millisecond scale differences.
- */
+/** The required burn rate of one window (fraction per ms). */
 function windowUrgency(window: UsageWindow, now = Date.now()): number {
-  const remainingQuota = Math.max(0, 1 - window.usedPercent / 100)
+  const remaining = Math.max(0, 1 - window.usedPercent / 100)
   const horizon = window.resetsAt !== undefined
     ? Math.max(window.resetsAt - now, 1)
     : FALLBACK_HORIZON_MS[window.kind]
-  const totalDuration = windowTotalDurationMs(window, horizon)
-  const timeRemainingFraction = Math.min(1, Math.max(0.001, horizon / totalDuration))
-  return remainingQuota / timeRemainingFraction
+  return remaining / horizon
 }

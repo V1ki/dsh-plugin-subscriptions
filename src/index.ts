@@ -196,7 +196,7 @@ export interface Config {
     /** Enable account pooling (default true; needs ≥2 accounts of one provider). */
     enabled?: boolean
     /** Member selection: plain priority failover, or quota-aware urgency scheduling. */
-    strategy?: 'priority' | 'quota_aware'
+    strategy?: 'priority' | 'quota_aware' | 'quota_normalized'
     /** A challenger must out-score the sticky member by this factor to take over (default 2). */
     switchMargin?: number
     /** Auto-pool every catalog model across a provider's logged-in accounts (default true). */
@@ -251,7 +251,7 @@ export const Config: z<Config> = z.object({
   }),
   pool: z.object({
     enabled: z.boolean().default(true),
-    strategy: z.union(['priority', 'quota_aware']).default('quota_aware'),
+    strategy: z.union(['priority', 'quota_aware', 'quota_normalized']).default('quota_aware'),
     switchMargin: z.number().min(1).default(2),
     autoAccounts: z.boolean().default(true),
     autoFamilies: z.boolean(),
