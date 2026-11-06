@@ -17,7 +17,9 @@ test('composer model speeds persist independently and concurrent writes retain a
     assert.equal(restored.get('second'), 'standard')
     assert.equal(restored.get('__proto__'), 'fast')
     assert.deepEqual(JSON.parse(await readFile(path, 'utf8')), JSON.parse('{"first":"fast","second":"standard","__proto__":"fast"}'))
-    await writeFile(path, '{"first":"invalid"}')
+    await writeFile(path, '\uFEFF{"first":"fast"}')
+    assert.equal(new ModelSpeeds(path).get('first'), 'fast')
+    await writeFile(path, '\uFEFF{"first":"invalid"}')
     assert.throws(() => new ModelSpeeds(path), /Cannot read model speeds/)
   } finally { await rm(dir, { recursive: true, force: true }) }
 })

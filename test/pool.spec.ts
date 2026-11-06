@@ -466,7 +466,7 @@ test('quota_aware: the most urgent window (soon reset, plenty left) wins', async
   assert.equal((chunks[0] as { text: string }).text, 'a2')
 })
 
-test('quota_aware: a window past the full mark gates its account out', async () => {
+test('quota_aware: a near-full account is deferred behind a healthy account', async () => {
   const codex = new FakeAdapter((_options, account) => serveOk(account))
   const { pool } = makePool({ codex }, {
     strategy: 'quota_aware',
@@ -477,6 +477,76 @@ test('quota_aware: a window past the full mark gates its account out', async () 
   })
   await collect(pool.stream(OPTIONS))
   assert.deepEqual(codex.accounts, ['a1'])
+})
+
+for (const strategy of ['priority', 'quota_aware'] as const) {
+  for (const full of [100, 105]) test(`${strategy}: ${full}% never spends credits ahead of 95%`, async () => {
+    const codex = new FakeAdapter((_options, account) => serveOk(account))
+    const { pool } = makePool({ codex }, { strategy, usage: usageFetchers({
+      'codex/a1': windowUsage(full, 60_000),
+      'codex/a2': windowUsage(95, 86_400_000),
+    }) })
+    for (let i = 0; i < 3; i++) await collect(pool.stream({ ...OPTIONS, sessionId: SessionId('credits') }))
+    assert.deepEqual(codex.accounts, ['a2', 'a2', 'a2'])
+  })
+
+  test(`${strategy}: all exhausted accounts stop with actionable quota notice, without requests`, async () => {
+    const codex = new FakeAdapter(() => serveOk('would spend credits'))
+    const { pool, warnings } = makePool({ codex }, { strategy, usage: usageFetchers({
+      'codex/a1': windowUsage(100, 60_000),
+      'codex/a2': windowUsage(105, 120_000),
+    }) })
+    await assert.rejects(collect(pool.stream(OPTIONS)), (error: unknown) => {
+      assert.ok(error instanceof LlmError)
+      assert.equal(error.code, 'QUOTA')
+      assert.match(error.message, /all currently usable accounts.*exhausted subscription quota/)
+      assert.match(error.message, /paid credits/)
+      assert.match(error.message, /Settings > Subscriptions/)
+      return true
+    })
+    assert.deepEqual(codex.accounts, [])
+    assert.ok(warnings.some(message => message.includes('exhausted subscription quota')))
+  })
+
+  test(`${strategy}: sticky account loses eligibility once exhausted and returns after reset`, async () => {
+    let firstUsed = 10
+    const codex = new FakeAdapter((_options, account) => serveOk(account))
+    const { pool, usage } = makePool({ codex }, { strategy,
+      usage: (_provider, account) => async () => windowUsage(account === 'a1' ? firstUsed : 96, 60_000),
+    })
+    const options = { ...OPTIONS, sessionId: SessionId('sticky-reset') }
+    await collect(pool.stream(options))
+    firstUsed = 100
+    usage.invalidate('codex', 'a1')
+    await collect(pool.stream(options))
+    assert.deepEqual(codex.accounts, ['a1', 'a2'])
+    firstUsed = 0
+    usage.invalidate('codex', 'a1')
+    // A new session has no priority stickiness to the second account.
+    await collect(pool.stream({ ...OPTIONS, sessionId: SessionId('after-reset') }))
+    assert.equal(codex.accounts.at(-1), 'a1')
+  })
+}
+
+test('quota_aware: near-full accounts rank by remaining quota rather than pool order', async () => {
+  const codex = new FakeAdapter((_options, account) => serveOk(account))
+  const { pool } = makePool({ codex }, { strategy: 'quota_aware', usage: usageFetchers({
+    'codex/a1': windowUsage(99, 86_400_000),
+    'codex/a2': windowUsage(95, 86_400_000),
+  }) })
+  await collect(pool.stream(OPTIONS))
+  assert.deepEqual(codex.accounts, ['a2'])
+})
+
+test('quota_aware: fallback failure never falls through to a known exhausted account', async () => {
+  const codex = new FakeAdapter((_options, account) => account === 'a1'
+    ? serveOk('would spend credits') : serveFail(new LlmError('offline', 'TRANSPORT')))
+  const { pool } = makePool({ codex }, { strategy: 'quota_aware', usage: usageFetchers({
+    'codex/a1': windowUsage(100, 60_000),
+    'codex/a2': windowUsage(95, 60_000),
+  }) })
+  await assert.rejects(collect(pool.stream(OPTIONS)))
+  assert.deepEqual(codex.accounts, ['a2'])
 })
 
 test('quota_aware: an account without telemetry sinks behind a measured one', async () => {

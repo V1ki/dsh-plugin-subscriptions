@@ -13,6 +13,9 @@ const selections = {
   antigravity: { provider: 'antigravity', model: 'gemini-model-29' },
 }
 let selection = selections.api
+let visibleModels: string[] | undefined
+let failGoogleUsage = false
+let secondGoogleAccount = false
 let grokDisplayName: string | undefined
 let reads = 0
 let statusCalls = 0
@@ -26,8 +29,9 @@ const rpc = { call: async (_channel: string, method: string, payload: { provider
   if (method.endsWith('.status')) return { ok: true, value: { providers: {
     codex: { accounts: [{ key: 'codex-test', isDefault: true }] },
     grok: { displayName: grokDisplayName, accounts: [{ key: 'grok-test', isDefault: true }] },
-    antigravity: { accounts: [{ key: 'anti-test', isDefault: true }] },
+    antigravity: { visibleModels, accounts: [{ key: 'anti-test', isDefault: true }, ...(secondGoogleAccount ? [{ key: 'anti-secondary', isDefault: false }] : [])] },
   } } }
+  if (method.endsWith('.usage') && payload.provider === 'antigravity' && failGoogleUsage) throw new Error('Simulated quota failure')
   if (method.endsWith('.usage')) return { ok: true, value: {
     supported: true, windows: payload.provider === 'antigravity'
       ? Array.from({ length: 30 }, (_, i) => ({ kind: 'other', scope: `gemini-model-${i}`, usedPercent: i }))
@@ -42,6 +46,11 @@ function App() {
   const t = (key: keyof typeof en, params?: Record<string, unknown>) => dictionary[key]
     .replace(/\{(\w+)\}/g, (_, name: string) => String(params?.[name] ?? ''))
   return <>
+    <button onClick={() => { visibleModels = ['gemini-model-29', 'gemini-model-2']; secondGoogleAccount = true }}>Select Google models</button>
+    <button onClick={() => { visibleModels = ['gemini-model-2'] }}>Hide current Google model</button>
+    <button onClick={() => { visibleModels = [] }}>Clear Google models</button>
+    <button onClick={() => { visibleModels = undefined }}>Show all Google models</button>
+    <button onClick={() => { failGoogleUsage = true }}>Fail Google usage</button>
     <button onClick={() => { grokDisplayName = '我的 Grok'; notifyDisplayNameChange('grok', grokDisplayName) }}>Rename Grok</button>
     <button onClick={() => { grokDisplayName = undefined; notifyDisplayNameChange('grok', '') }}>Reset Grok</button>
     <button onClick={() => setLocale(locale === 'en' ? 'zh' : 'en')}>Locale</button>

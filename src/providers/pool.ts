@@ -301,11 +301,11 @@ export class PoolAdapter extends LlmAdapter {
             classification.cooldownMs,
             classification.reason,
           )
-          // A quota failure invalidates the cached usage snapshot so the NEXT
-          // selection re-polls instead of trusting minutes-old percentages.
+          // Re-poll after quota failure, preserving known exhaustion on other
+          // model lanes if that lookup fails. Usage-endpoint cooldowns remain.
           // Transient/auth failures say nothing about quota — keep the cache.
           if (classification.reason === QUOTA_EXCEEDED_CODE || classification.reason === 'RATE_LIMIT') {
-            this.options.usage.invalidate(member.provider, member.account)
+            this.options.usage.expire(member.provider, member.account)
           }
         }
         this.options.onWarn(
@@ -341,12 +341,11 @@ export class PoolAdapter extends LlmAdapter {
   }
 
   /**
-   * Order the candidates for one request. Health filters both strategies;
-   * `quota_aware` then ranks by urgency (members without telemetry, e.g.
-   * copilot, score zero and sink to the bottom of their class), while
-   * quota-exhausted members stay as a last-resort tail in pool order. The
-   * sticky member keeps its lead unless a challenger out-scores it by
-   * `switchMargin`.
+   * Health and known quota exhaustion filter BOTH strategies: >=100% must
+   * never silently spend paid credits. `quota_aware` ranks healthy members
+   * by urgency, then tries near-full (95–<100%) members by urgency too.
+   * Members without telemetry score zero. Stickiness cannot retain an
+   * exhausted member; within the preferred class it uses `switchMargin`.
    */
   private async select(
     poolId: string,
@@ -357,21 +356,32 @@ export class PoolAdapter extends LlmAdapter {
       this.options.adapters[member.provider] !== undefined
       && this.options.health.isMemberAvailable(member.provider, member.account, member.model))
     if (usable.length === 0) return []
-    const stickyMember = sessionId === undefined
-      ? undefined
-      : usable.find(member =>
-        memberKey(member.provider, member.account, member.model) === this.sticky.get(stickyKey(poolId, sessionId)))
-    if (this.options.strategy === 'priority') {
-      return stickyMember === undefined
-        ? usable
-        : [stickyMember, ...usable.filter(member => member !== stickyMember)]
-    }
     const quotas = new Map<ConcretePoolMember, MemberQuota>(
       await Promise.all(usable.map(async member => [member, await this.options.usage.quotaFor(member)] as const)),
     )
-    const scored = usable.filter(member => quotas.get(member)?.available === true)
-    const quotaFull = usable.filter(member => quotas.get(member)?.available === false)
-    scored.sort((a, b) => (quotas.get(b)?.urgency ?? 0) - (quotas.get(a)?.urgency ?? 0))
+    const eligible = usable.filter(member => !quotas.get(member)?.exhausted)
+    if (eligible.length === 0) {
+      const message = `pool "${poolId}": all currently usable accounts have exhausted subscription quota (>=100% in an applicable window).`
+        + ' Request stopped to avoid spending paid credits. Wait for a quota reset, or refresh this account’s usage in Settings > Subscriptions after using a reset card.'
+        + ' 订阅额度已耗尽，已停止请求以避免消耗付费 credits；使用重置卡后，请在设置 → 订阅中刷新对应账号的用量。'
+      this.options.onWarn(message)
+      throw new LlmError(message, QUOTA_EXCEEDED_CODE)
+    }
+    const stickyMember = sessionId === undefined
+      ? undefined
+      : eligible.find(member =>
+        memberKey(member.provider, member.account, member.model) === this.sticky.get(stickyKey(poolId, sessionId)))
+    if (this.options.strategy === 'priority') {
+      return stickyMember === undefined
+        ? eligible
+        : [stickyMember, ...eligible.filter(member => member !== stickyMember)]
+    }
+    const scored = eligible.filter(member => quotas.get(member)?.available === true)
+    const quotaFull = eligible.filter(member => quotas.get(member)?.available === false)
+    const byUrgency = (a: ConcretePoolMember, b: ConcretePoolMember): number =>
+      (quotas.get(b)?.urgency ?? 0) - (quotas.get(a)?.urgency ?? 0)
+    scored.sort(byUrgency)
+    quotaFull.sort(byUrgency)
     if (stickyMember !== undefined && scored.includes(stickyMember)) {
       const best = scored[0]
       const stickyUrgency = quotas.get(stickyMember)?.urgency ?? 0

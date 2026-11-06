@@ -32,6 +32,7 @@ export interface SpeedState {
 /** What {@link SpeedSelect} renders from: visibility plus the current tier. */
 export interface SpeedSelectState {
   visible: boolean
+  model?: string
   tier: SpeedTier
 }
 
@@ -55,7 +56,7 @@ export interface SpeedSelectInjected {
   /** Load the session's speed state; `visible` false keeps the control hidden. */
   loadSpeed: () => Promise<SpeedSelectState>
   /** Set the session's speed tier; resolves false when the write failed. */
-  setSpeed: (tier: SpeedTier) => Promise<boolean>
+  setSpeed: (tier: SpeedTier, displayedModel?: string) => Promise<boolean>
 }
 
 /**
@@ -87,13 +88,19 @@ export function createSpeedLoader(
 ): SpeedSelectInjected['loadSpeed'] {
   return async () => {
     const directories = models()
-    const current = directories === undefined ? null : (await directories.directoryFor(sessionId).load()).current
+    const directory = directories?.directoryFor(sessionId)
+    const current = (await directory?.load())?.current ?? null
     const state = await callSubscriptionsAuth<SpeedState>(connection.rpc, 'speed', {
       sessionId, ...(current?.provider === 'codex' ? { model: current.model } : {}),
     })
     const visible = current !== null && current.provider === 'codex'
       && state.fastModels.includes(current.model)
-    return { visible, tier: state.tier }
+    // Selection may change while the speed RPC is pending.
+    const latest = (await directory?.load())?.current ?? null
+    if (latest?.provider !== current?.provider || latest?.model !== current?.model) {
+      throw new Error('Model changed while loading speed')
+    }
+    return { visible, tier: state.tier, ...(visible && current ? { model: current.model } : {}) }
   }
 }
 
@@ -103,11 +110,12 @@ export function createSpeedSetter(
   sessionId: string,
   models?: () => ModelDirectoriesLike | undefined,
 ): SpeedSelectInjected['setSpeed'] {
-  return async tier => {
+  return async (tier, displayedModel) => {
     try {
       const directories = models?.()
       const current = directories === undefined ? null : (await directories.directoryFor(sessionId).load()).current
       if (models !== undefined && current?.provider !== 'codex') return false
+      if (displayedModel !== undefined && current?.model !== displayedModel) return false
       await callSubscriptionsAuth(connection.rpc, 'setSpeed', {
         sessionId, tier, ...(current?.provider === 'codex' ? { model: current.model } : {}),
       })
@@ -154,22 +162,32 @@ export function SpeedSelect({ loadSpeed, setSpeed, t }: SpeedSelectProps) {
   const loadRef = useRef(loadSpeed)
   loadRef.current = loadSpeed
 
+  const generation = useRef(0)
+  const mounted = useRef(false)
+  const refresh = async (): Promise<void> => {
+    if (!mounted.current) return
+    const id = ++generation.current
+    try {
+      const loaded = await loadRef.current?.()
+      if (loaded && id === generation.current) setState(loaded)
+    } catch { /* preserve the last confirmed state; a later poll can retry */ }
+  }
   useEffect(() => {
     if (loadRef.current === undefined) return
+    mounted.current = true
     let cancelled = false
     let inflight = false
     const reload = (): void => {
       const load = loadRef.current
-      if (load === undefined || inflight) return
+      if (load === undefined || inflight || cancelled) return
       inflight = true
-      void load().then(
-        (loaded) => { if (!cancelled) setState(loaded) },
-        () => { /* keep the last known state; the next tick retries */ },
-      ).finally(() => { inflight = false })
+      void refresh().finally(() => { inflight = false })
     }
     reload()
     const timer = setInterval(reload, POLL_INTERVAL_MS)
     return () => {
+      mounted.current = false
+      ++generation.current
       cancelled = true
       clearInterval(timer)
     }
@@ -195,20 +213,17 @@ export function SpeedSelect({ loadSpeed, setSpeed, t }: SpeedSelectProps) {
       return
     }
     setBusy(true)
-    void setSpeed(tier).then((ok) => {
+    void setSpeed(tier, state.model).then((ok) => {
+      if (!mounted.current) return
       setBusy(false)
-      if (ok) {
-        setState({ visible: true, tier })
-        setOpen(false)
-      }
-    })
+      if (ok) setOpen(false)
+      void refresh() // Read the currently selected model, even when the save concerned another.
+    }, () => { if (mounted.current) { setBusy(false); void refresh() } })
   }
 
   const show = (): void => {
     setOpen(true)
-    const load = loadRef.current
-    if (load === undefined) return
-    void load().then(setState, () => { /* keep showing the last good state */ })
+    void refresh()
   }
 
   const tierName = (tier: SpeedTier): string =>

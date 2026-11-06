@@ -78,6 +78,44 @@ try {
   await panel.waitFor()
   assert.equal(await anti.locator('dt:visible').count(), 1)
   assert.match(await anti.locator('dt:visible').innerText(), /gemini-model-29/)
+  // Opening the dialog rereads visibility; both accounts and disclosure counts
+  // must use filtered windows, even when quota requests fall back to cached data.
+  const reopenAfter = async name => {
+    await page.keyboard.press('Escape')
+    await panel.waitFor({ state: 'detached' })
+    await page.getByRole('button', { name, exact: true }).click()
+    await badge.click()
+    await panel.waitFor()
+  }
+  const waitGoogleRows = async count => {
+    await page.waitForFunction(count => {
+      const section = [...document.querySelectorAll('[role="dialog"] section')].find(node => node.textContent.startsWith('Antigravity'))
+      return section?.querySelectorAll('dt').length === count
+    }, count)
+  }
+  await reopenAfter('Select Google models')
+  await waitGoogleRows(4)
+  assert.equal(await anti.locator('dt:visible').count(), 2, 'each account previews only the selected current model')
+  assert.equal(await anti.locator('summary').count(), 2)
+  for (const summary of await anti.locator('summary').all()) await summary.click()
+  assert.equal(await anti.locator('dt:visible').count(), 4)
+  assert.ok((await anti.locator('dt').allTextContents()).every(text => /gemini-model-(29|2)(?: ·|$)/.test(text)))
+  assert.equal(await panel.locator('section').filter({ hasText: 'Codex' }).locator('dt').count(), 1)
+  await reopenAfter('Hide current Google model')
+  await waitGoogleRows(2)
+  assert.equal(await anti.locator('dt:visible').count(), 0, 'hidden current model must not bypass the filter')
+  assert.match(await badge.innerText(), /Current model quota unavailable/)
+  await reopenAfter('Clear Google models')
+  await waitGoogleRows(0)
+  assert.equal(await anti.getByText('No quota windows match the selected models.', { exact: true }).count(), 2)
+  assert.equal(await anti.locator('summary').count(), 0)
+  await page.keyboard.press('Escape')
+  await page.getByRole('button', { name: 'Fail Google usage', exact: true }).click()
+  await page.getByRole('button', { name: 'Show all Google models', exact: true }).click()
+  await badge.click()
+  await waitGoogleRows(60)
+  assert.match(await badge.innerText(), /29%/, 'raw cached quotas survive hiding and can be restored after a failed fetch')
+  console.log('Google visibility: previews, expanded counts, multiple accounts, empty selection and raw-cache recovery verified')
   // Change the preference from a second tab while the quota dialog is open.
   const other = await context.newPage()
   await other.goto('http://subscription-usage.test/')

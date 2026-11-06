@@ -12,7 +12,7 @@ export class ModelSpeeds {
 
   constructor(private readonly path = dshHomePath('plugins', 'subscriptions', 'model-speeds.json')) {
     try {
-      const raw: unknown = JSON.parse(readFileSync(path, 'utf8'))
+      const raw: unknown = JSON.parse(readFileSync(path, 'utf8').replace(/^\uFEFF/, ''))
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('expected model-to-speed map')
       for (const [model, tier] of Object.entries(raw)) {
         if (!model.trim() || (tier !== 'standard' && tier !== 'fast')) throw new Error('invalid model speed')

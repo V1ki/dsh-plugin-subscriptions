@@ -146,6 +146,24 @@ test('Antigravity registers the real multi-account adapter with provider setting
     assert.equal((await call('setProviderSettings', { provider: 'antigravity', settings: { displayName: 'Qwen', visibleModels: ['m2'] } })).ok, true)
     assert.deepEqual(llm.listProviders(), [{ id: 'antigravity', name: 'Qwen' }])
     assert.deepEqual((await adapter.listModels('antigravity')).map(model => model.id), ['m2'])
+    // Status carries local visibility without fetching a catalog. Closing the
+    // manager refreshes status, so the usage panel can re-filter cached quotas.
+    const originalList = adapter.listOwnModels
+    adapter.listOwnModels = async () => { throw new Error('status must not discover models') }
+    const selection = async () => {
+      const result = await call('status', {})
+      assert.ok(result.ok)
+      return (result.value as { providers: { antigravity: { visibleModels?: string[] } } }).providers.antigravity
+    }
+    try {
+      assert.deepEqual((await selection()).visibleModels, ['m2'])
+      assert.equal((await call('setProviderSettings', { provider: 'antigravity', settings: { visibleModels: [] } })).ok, true)
+      assert.deepEqual((await selection()).visibleModels, [])
+      assert.equal((await call('setProviderSettings', { provider: 'antigravity', settings: {} })).ok, true)
+      assert.equal(Object.hasOwn(await selection(), 'visibleModels'), false)
+    } finally {
+      adapter.listOwnModels = originalList
+    }
     assert.equal((await call('setProviderSettings', { provider: 'antigravity', settings: { tools: { image_generate: true } } })).ok, false)
   } finally {
     await runtime.dispose()

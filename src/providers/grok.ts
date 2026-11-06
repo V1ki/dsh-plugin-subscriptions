@@ -417,6 +417,29 @@ interface GrokCliWireModel {
 /** Per-model metadata the CLI catalog contributes to a discovered model. */
 type GrokCliModelMeta = Partial<Pick<DiscoveredModel, 'name' | 'description' | 'contextWindow' | 'reasoning'>>
 
+/**
+ * Strength rank of the well-known effort ids, weakest first. The harness
+ * treats `LlmModelReasoningInfo.efforts` as weakest-to-strongest (the order
+ * the claude/codex catalogs already use), so effort pickers that place
+ * levels by array position need it; the CLI catalog lists levels
+ * strongest-first. A Map (not an object literal) so an unknown id can never
+ * hit an `Object.prototype` key such as `constructor`.
+ */
+const EFFORT_STRENGTH: ReadonlyMap<string, number> = new Map([
+  ['off', 0],
+  ['minimal', 1],
+  ['low', 2],
+  ['medium', 3],
+  ['high', 4],
+  ['xhigh', 5],
+  ['max', 6],
+])
+
+/** Rank of one effort id; unknown ids sort after every known tier. */
+function effortStrength(id: string): number {
+  return EFFORT_STRENGTH.get(id) ?? Number.MAX_SAFE_INTEGER
+}
+
 /** Map one CLI catalog entry's reasoning fields, or undefined when unsupported. */
 function grokCliReasoning(entry: GrokCliWireModel): NonNullable<DiscoveredModel['reasoning']> | undefined {
   if (entry.supports_reasoning_effort !== true) return undefined
@@ -429,6 +452,8 @@ function grokCliReasoning(entry: GrokCliWireModel): NonNullable<DiscoveredModel[
         ? { description: level.description }
         : {},
     }))
+    // Weakest first; Array#sort is stable, so unknown ids keep catalog order.
+    .sort((left, right) => effortStrength(left.id) - effortStrength(right.id))
   if (efforts.length === 0) return undefined
   // The per-entry `default` flags are unreliable (the live catalog marks
   // several levels default at once), so the top-level `reasoning_effort`
