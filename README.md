@@ -16,6 +16,8 @@ Antigravity now advertises one picker entry per effort group, using the same nat
 
 Group defaults prefer High, then Medium, then Low when no valid saved preference exists. Existing concrete model IDs remain callable. Account pools retain their existing conservative intersection of members' efforts. Refresh the model list after installing so older caches acquire roster metadata. Without roster metadata, legacy/internal filtering is best effort; exact parity with the official client requires checking the live account. See [verification notes](docs/issue180-testing.md).
 
+Antigravity usage keeps only explicitly reported shared limits from `retrieveUserQuotaSummary`. If a family such as Argon is absent, it supplements uncovered selectable models from `fetchAvailableModels`; both the settings page and badge retain these model-scoped quotas. A reset timestamp alone never establishes a weekly, five-hour, or shared limit. Supplemental failures retain valid summary windows; cancellation propagates.
+
 ## Demo
 
 Settings → **Subscriptions**: per-provider login/logout, no API keys. Claude imports credentials from Claude Code when available and otherwise uses OAuth, as Codex and Grok always do (settings screenshots use demo accounts and catalog data):

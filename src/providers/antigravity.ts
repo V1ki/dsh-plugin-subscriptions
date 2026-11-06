@@ -17,6 +17,7 @@ import type { FlowSpec } from '../auth/oauth-flow.js'
 import type { AntigravitySession, ProviderId } from '../auth/store.js'
 import { resolveImages } from '../translate/resolved.js'
 import { parseAntigravityQuotaSummary } from './antigravity-usage.js'
+import { ANTIGRAVITY_QUOTA_SCOPES, antigravityQuotaApplies } from '../antigravity-model-id.js'
 import { groupAntigravityModels, selectAntigravityVariant, isAntigravityChatModel } from './antigravity-models.js'
 import { antigravityReasoning } from '../translate/antigravity-thinking.js'
 import {
@@ -478,26 +479,36 @@ export async function fetchAntigravityUsage(
 ): Promise<ProviderUsage> {
   const metadata = { ideType: 'ANTIGRAVITY', platform: 'PLATFORM_UNSPECIFIED', pluginType: 'GEMINI' }
   const readWindows = async (): Promise<UsageWindow[]> => {
+    let shared: UsageWindow[] = []
     try {
       const summary = await callInternal<unknown>(
         'retrieveUserQuotaSummary', { project: session.projectId }, session.accessToken, runtime, fetchFn, signal,
       )
-      const windows = parseAntigravityQuotaSummary(summary)
-      if (windows.length) return windows
+      shared = parseAntigravityQuotaSummary(summary)
+      if (ANTIGRAVITY_QUOTA_SCOPES.every(scope => shared.some(window => window.scope === scope))) return shared
     } catch (error) {
       if (isDiscoveryAborted(error, signal)) throw error
       // Auth and throttling failures must surface rather than trigger extra requests.
       if (error instanceof LlmError && ['AUTH', 'RATE_LIMIT'].includes(error.code)) throw error
     }
-    const models = await callInternal<AntigravityModelsResponse>(
-      'fetchAvailableModels', { project: session.projectId }, session.accessToken, runtime, fetchFn, signal,
-    )
+    let models: AntigravityModelsResponse
+    try {
+      models = await callInternal<AntigravityModelsResponse>(
+        'fetchAvailableModels', { project: session.projectId }, session.accessToken, runtime, fetchFn, signal,
+      )
+    } catch (error) {
+      if (isDiscoveryAborted(error, signal) || shared.length === 0) throw error
+      // A missing supplemental lane must not discard valid shared quotas.
+      return shared
+    }
     const roster = (models.agentModelSorts ?? []).flatMap(sort => (sort.groups ?? []).flatMap(group => group.modelIds ?? []))
     const selectable = roster.length ? new Set(roster) : undefined
-    const windows: UsageWindow[] = []
+    const windows: UsageWindow[] = [...shared]
     for (const [id, model] of Object.entries(models.models ?? {})) {
       if (model.isInternal || model.disabled || model.selectable === false
         || !(selectable ? selectable.has(id) : isAntigravityChatModel(id))) continue
+      // Missing groups (notably Argon) retain their explicitly reported model quota.
+      if (shared.some(window => antigravityQuotaApplies(window.scope, id))) continue
       const ordinary = usageWindow('other', id, model.quotaInfo)
       const weekly = usageWindow('weekly', id, model.weeklyQuotaInfo ?? model.weeklyQuota)
       if (ordinary !== undefined) windows.push(ordinary)

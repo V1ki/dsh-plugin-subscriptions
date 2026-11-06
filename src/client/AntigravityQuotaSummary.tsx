@@ -1,4 +1,4 @@
-import { ANTIGRAVITY_QUOTA_SCOPES } from '../antigravity-model-id.js'
+import { ANTIGRAVITY_QUOTA_SCOPES, antigravityQuotaScope } from '../antigravity-model-id.js'
 import type { SubscriptionsKey } from './locales.js'
 import type { UsageWindow } from './SubscriptionsSection.js'
 
@@ -45,6 +45,23 @@ export function AntigravityQuotaSummary({ windows, t }: { windows: readonly Usag
             </div>
           })}
         </div>
+      </section>
+    })}
+    {windows.filter(window => !antigravityQuotaScope(window.scope)).map((window, index) => {
+      const remaining = Math.round(Math.max(0, Math.min(100, 100 - window.usedPercent)))
+      const label = t(window.kind === 'weekly' ? 'usageWeeklyLimit'
+        : window.kind === 'session' ? 'usageFiveHourLimit' : 'usageWindow')
+      return <section key={`model-${index}`} aria-label={`${window.scope ?? ''} · ${label}`}>
+        <h4 style={{ margin: '0 0 10px', fontSize: 13, fontWeight: 600 }}>{window.scope}</h4>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, fontSize: 12 }}>
+          <span>{label}</span>
+          <span role="progressbar" aria-label={`${window.scope ?? ''} · ${label}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={remaining}>
+            {t('usageRemaining', { percent: remaining })}
+          </span>
+        </div>
+        {window.resetsAt !== undefined && <div style={{ marginTop: 4, textAlign: 'right', fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }}>
+          {t('usageResetsIn', { time: resetDuration(window.resetsAt) })}
+        </div>}
       </section>
     })}
   </div>

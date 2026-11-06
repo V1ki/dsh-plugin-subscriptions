@@ -1052,6 +1052,45 @@ test('usage prefers shared summary over model-by-model quota enumeration', async
   assert.ok(!calls.some(call => call.url.includes('fetchAvailableModels')))
 })
 
+test('partial shared summary supplements only uncovered selectable model quotas', async () => {
+  const { antigravityQuotaSummary } = await import('./fixtures/antigravity-quota-summary.js')
+  const summary = antigravityQuotaSummary()
+  summary.groups = summary.groups.filter(group => group.displayName !== 'Gemini 4 Argon')
+  const calls: RecordedCall[] = []
+  const usage = await fetchAntigravityUsage(session, runtime, routed({
+    [`${runtime.baseURL}/v1internal:retrieveUserQuotaSummary`]: summary,
+    [`${runtime.baseURL}/v1internal:loadCodeAssist`]: {},
+    [`${runtime.baseURL}/v1internal:fetchAvailableModels`]: {
+      agentModelSorts: [{ groups: [{ modelIds: ['gemini-4-argon-high', 'gemini-3.8-flash-high'] }] }],
+      models: {
+        'gemini-4-argon-high': { quotaInfo: { remainingFraction: 0.96, resetTime: '2026-11-06T19:04:45Z' } },
+        'gemini-3.8-flash-high': { quotaInfo: { remainingFraction: 0.96 } },
+        chat_23310: { isInternal: true, quotaInfo: { remainingFraction: 1 } },
+      },
+    },
+  }, calls))
+  const fallback = usage.windows?.filter(window => window.scope === 'gemini-4-argon-high')
+  assert.equal(fallback?.length, 1)
+  assert.equal(fallback?.[0].kind, 'other', 'reset proximity does not prove a 5h or weekly cadence')
+  assert.ok(Math.abs(fallback![0].usedPercent - 4) < 0.001)
+  assert.ok(!usage.windows?.some(window => window.scope === 'gemini-3.8-flash-high'))
+  assert.equal(usage.windows?.length, 5)
+  assert.equal(calls.filter(call => call.url.includes('fetchAvailableModels')).length, 1)
+})
+
+test('partial summary survives supplemental quota fetch failure without retrying auth or throttling', async () => {
+  for (const status of [401, 403, 429, 503]) {
+    const calls: RecordedCall[] = []
+    const usage = await fetchAntigravityUsage(session, runtime, routed({
+      [`${runtime.baseURL}/v1internal:retrieveUserQuotaSummary`]: { groups: [{ displayName: 'Gemini Models', buckets: [{ window: 'weekly', remainingFraction: 0.8 }] }] },
+      [`${runtime.baseURL}/v1internal:loadCodeAssist`]: {},
+      [`${runtime.baseURL}/v1internal:fetchAvailableModels`]: new Response('', { status }),
+    }, calls))
+    assert.equal(usage.windows?.length, 1)
+    assert.equal(calls.filter(call => call.url.includes('fetchAvailableModels')).length, 1)
+  }
+})
+
 test('usage summary fallback excludes internal and non-selectable model quota windows', async () => {
   const usage = await fetchAntigravityUsage(session, runtime, routed({
     [`${runtime.baseURL}/v1internal:retrieveUserQuotaSummary`]: new Response('', { status: 404 }),
