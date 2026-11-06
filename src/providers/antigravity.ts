@@ -708,7 +708,7 @@ export class AntigravityAdapter extends LlmAdapter {
       if (response.body === null) {
         throw new LlmError('Antigravity API returned no response body', EMPTY_RESPONSE_CODE)
       }
-      yield* streamAntigravity(response.body, () => { watchdog.pulse() })
+      yield* streamAntigravity(response.body, () => { watchdog.pulse() }, this.options.resolveAttachments?.(), watchdog.signal)
     } catch (error) {
       throw mapFetchFailure('Antigravity API', error, watchdog, options.signal)
     } finally {
@@ -729,6 +729,6 @@ export class AntigravityAdapter extends LlmAdapter {
       options.signal,
     )
     if (!response.ok) throw await httpLlmError(response, 'Antigravity API')
-    return parseAntigravityResponse(await response.json() as AntigravityResponseEvent)
+    return parseAntigravityResponse(await response.json() as AntigravityResponseEvent, this.options.resolveAttachments?.(), options.signal)
   }
 }

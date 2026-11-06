@@ -195,9 +195,9 @@ export async function resolveImages(
     const stored = await attachments.readImage(ref, signal)
     return { data: stored.data, mediaType: stored.ref.mediaType, ref: stored.ref }
   }
-  const resolveBlock = async (block: ContentBlock): Promise<TranslatableBlock[]> => {
+  const resolveBlock = async (block: ContentBlock, assistant = false): Promise<TranslatableBlock[]> => {
     if (block.type === 'tool-result') {
-      return [{ ...block, content: (await Promise.all(block.content.map(resolveBlock))).flat() }]
+      return [{ ...block, content: (await Promise.all(block.content.map(part => resolveBlock(part)))).flat() }]
     }
     if (block.type !== 'image') return [block]
     if ('offloaded' in block && block.offloaded === true) {
@@ -209,11 +209,16 @@ export async function resolveImages(
     }
     const { data, mediaType: sentType, ref } = await readForRequest(block.attachment)
     const { attachmentId, mediaType, bytes, width, height, name } = ref
-    return [{
+    const image: ResolvedImagePart = {
       type: 'image',
       mediaType: sentType,
       dataBase64: Buffer.from(data).toString('base64'),
-    }, {
+    }
+    // Assistant replay metadata is indexed by content block. Adding a helper
+    // text block here would shift every later thought signature onto the wrong
+    // block. User/tool image references still carry the editing-tool hint.
+    if (assistant) return [image]
+    return [image, {
       type: 'text',
       text: `Image reference (for image_generate.referenceImages): ${JSON.stringify({
         attachmentId, mediaType, bytes, width, height, ...name === undefined ? {} : { name },
@@ -222,6 +227,6 @@ export async function resolveImages(
   }
   return Promise.all(messages.map(async (message): Promise<TranslatableMessage> => ({
     ...message,
-    content: (await Promise.all(message.content.map(resolveBlock))).flat(),
+    content: (await Promise.all(message.content.map(block => resolveBlock(block, message.role === 'assistant')))).flat(),
   })))
 }

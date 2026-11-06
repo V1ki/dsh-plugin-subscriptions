@@ -260,9 +260,9 @@ test('failed tool results preserve their error flag in current and legacy histor
   }
 })
 
-test('stream translator emits reasoning, text, tool call, usage, finish, and replay signature', () => {
+test('stream translator emits reasoning, text, tool call, usage, finish, and replay signature', async () => {
   const translator = new AntigravityStreamTranslator()
-  const chunks = translator.push({
+  const chunks = await translator.push({
     response: {
       candidates: [{
         content: { parts: [
