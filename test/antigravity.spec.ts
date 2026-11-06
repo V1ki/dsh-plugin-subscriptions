@@ -139,6 +139,19 @@ test('refreshAntigravity preserves a rotating-token omission and account metadat
   assert.equal(form.get('refresh_token'), session.refreshToken)
 })
 
+test('discovery corrects a stale Gemini label without adding, hiding or rewriting any service ID', async () => {
+  const listed = {
+    'gemini-2.5-flash-lite': { displayName: 'Gemini 3.5 Flash Lite', model: 'MODEL_GOOGLE_GEMINI_2_5_FLASH_LITE' },
+    'gemini-3.8-flash-tiered': { displayName: 'Tiered', model: 'MODEL_PLACEHOLDER_M322' },
+    'gemini-3-flash': { displayName: 'Keep upstream label', model: 'MODEL_GOOGLE_GEMINI_2_5_FLASH' },
+  }
+  const result = await fetchAntigravityModels(session, runtime, routed({
+    [`${runtime.baseURL}/v1internal:fetchAvailableModels`]: { models: listed },
+  }))
+  assert.deepEqual(result.map(m => m.id), Object.keys(listed))
+  assert.deepEqual(result.map(m => m.name), ['Gemini 2.5 Flash Lite', 'Tiered', 'Keep upstream label'])
+})
+
 test('model discovery and quota display map fetchAvailableModels data', async () => {
   const modelsURL = `${runtime.baseURL}/v1internal:fetchAvailableModels`
   const loadURL = `${runtime.baseURL}/v1internal:loadCodeAssist`
