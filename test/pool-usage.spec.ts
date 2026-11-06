@@ -292,7 +292,7 @@ test('Antigravity grouped pools respect exhausted concrete variant quotas', asyn
   assert.equal((await tracker.quotaFor({ ...member, model: 'claude-opus-5-5' })).available, true)
 })
 
-test('shared Antigravity quotas constrain the matching families without crossing into Argon', async () => {
+test('shared Antigravity Gemini quotas also constrain Argon and retain explicit extra limits', async () => {
   const tracker = new PoolUsageTracker(() => async () => ({ supported: true, windows: [
     { kind: 'weekly', scope: 'Gemini Models', usedPercent: 100 },
     { kind: 'session', scope: 'Claude and GPT models', usedPercent: 100 },
@@ -302,5 +302,5 @@ test('shared Antigravity quotas constrain the matching families without crossing
   assert.equal((await tracker.quotaFor(member)).available, false)
   assert.equal((await tracker.quotaFor({ ...member, model: 'claude-opus-5-5' })).available, false)
   assert.equal((await tracker.quotaFor({ ...member, model: 'gpt-oss-120b' })).available, false)
-  assert.equal((await tracker.quotaFor({ ...member, model: 'gemini-4-argon' })).available, true)
+  assert.equal((await tracker.quotaFor({ ...member, model: 'gemini-4-argon' })).available, false)
 })

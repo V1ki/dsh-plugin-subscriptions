@@ -21,7 +21,8 @@
  * user-visible string goes through the locale `t` of the
  * 'settings.subscriptions' namespace.
  */
-import { antigravityQuotaApplies } from '../antigravity-model-id.js'
+import { antigravityQuotaApplies, antigravityQuotaScope } from '../antigravity-model-id.js'
+import { AntigravityQuotaSummary } from './AntigravityQuotaSummary.js'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ComponentType, CSSProperties } from 'react'
 import { subscriptionChromeCss } from './provider-settings-styles.js'
@@ -195,7 +196,13 @@ export function compactSegment(d: ProviderUsageDisplay, model?: string, t: Trans
         count: new Set(windows.map(w => w.scope).filter(Boolean)).size,
       })}`
     }
-    const parts = matching.slice(0, 2).map(w => `${w.kind === 'weekly' ? t('usageWeekly') : t('usageWindow')} ${usedPercent(w)}%`)
+    const parts = matching.slice(0, 2).map(w => {
+      const label = w.kind === 'weekly' ? t('usageWeekly')
+        : w.kind === 'session' ? t('usageFiveHourLimit') : t('usageWindow')
+      const percent = antigravityQuotaScope(w.scope)
+        ? t('usageRemaining', { percent: 100 - usedPercent(w) }) : `${usedPercent(w)}%`
+      return `${label} ${percent}`
+    })
     return `${d.name} ${parts.join(' · ')}`
   }
   const parts = windows.slice(0, 2).map(w => `${windowLabel(w)} ${usedPercent(w)}%`)
@@ -589,6 +596,9 @@ export function AccountWindows({ windows, model, provider, translate }: {
   windows: readonly UsageWindow[]; model: string | undefined; provider?: SubscriptionProvider; translate: Translate
 }) {
   if (windows.length === 0) return <p style={styles.providerMeta}>{translate('usageNoVisibleModels')}</p>
+  if (provider === 'antigravity' && windows.some(window => antigravityQuotaScope(window.scope))) {
+    return <AntigravityQuotaSummary windows={windows} t={translate} />
+  }
   const { shown, hidden } = previewWindows(windows, model, provider)
   const rows = (items: readonly UsageWindow[]) => (
     <dl style={styles.details}>

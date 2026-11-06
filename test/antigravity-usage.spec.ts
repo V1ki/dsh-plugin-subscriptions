@@ -33,9 +33,10 @@ test('summary tolerates snake case and percent strings but never invents a windo
   }
 })
 
-test('shared quota membership isolates Argon from Gemini and includes both Claude and GPT', () => {
+test('native Gemini shared quotas include Argon and Claude/GPT stays separate', () => {
   assert.equal(antigravityQuotaApplies('Gemini Models', 'gemini-3.8-flash'), true)
-  assert.equal(antigravityQuotaApplies('Gemini Models', 'gemini-4-argon'), false)
+  assert.equal(antigravityQuotaApplies('Gemini Models', 'gemini-4-argon'), true)
+  assert.equal(antigravityQuotaApplies('Gemini Models', 'gemini-4-argon-high'), true)
   assert.equal(antigravityQuotaApplies('Gemini 4 Argon', 'gemini-3.8-flash'), false)
   assert.equal(antigravityQuotaApplies('Gemini 4 Argon', 'gemini-4-argon-high'), true)
   for (const model of ['claude-opus-5-5', 'claude-sonnet-5-5-low', 'gpt-oss-120b']) {

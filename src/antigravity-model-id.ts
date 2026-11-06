@@ -19,7 +19,7 @@ export function antigravityQuotaScope(value: string | undefined): AntigravityQuo
 export function antigravityQuotaApplies(scope: string | undefined, model: string | undefined): boolean {
   if (model === undefined) return false
   switch (antigravityQuotaScope(scope)) {
-    case 'Gemini Models': return /^gemini-/.test(model) && !/^gemini-4-argon(?:-|$)/.test(model)
+    case 'Gemini Models': return /^gemini-/.test(model)
     case 'Claude and GPT models': return /^(?:claude-|gpt-oss-)/.test(model)
     case 'Gemini 4 Argon': return /^gemini-4-argon(?:-|$)/.test(model)
     default: return sameAntigravityModel(scope, model)

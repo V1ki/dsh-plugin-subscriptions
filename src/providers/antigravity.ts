@@ -485,7 +485,7 @@ export async function fetchAntigravityUsage(
         'retrieveUserQuotaSummary', { project: session.projectId }, session.accessToken, runtime, fetchFn, signal,
       )
       shared = parseAntigravityQuotaSummary(summary)
-      if (ANTIGRAVITY_QUOTA_SCOPES.every(scope => shared.some(window => window.scope === scope))) return shared
+      if (ANTIGRAVITY_QUOTA_SCOPES.slice(0, 2).every(scope => shared.some(window => window.scope === scope))) return shared
     } catch (error) {
       if (isDiscoveryAborted(error, signal)) throw error
       // Auth and throttling failures must surface rather than trigger extra requests.

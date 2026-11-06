@@ -1052,10 +1052,28 @@ test('usage prefers shared summary over model-by-model quota enumeration', async
   assert.ok(!calls.some(call => call.url.includes('fetchAvailableModels')))
 })
 
+test('native two-group summary covers Argon without fetching duplicate effort quotas', async () => {
+  const calls: RecordedCall[] = []
+  const usage = await fetchAntigravityUsage(session, runtime, routed({
+    [`${runtime.baseURL}/v1internal:retrieveUserQuotaSummary`]: { groups: [
+      { displayName: 'Gemini Models', buckets: [
+        { window: 'weekly', remainingFraction: 0.73 }, { window: '5h', remainingFraction: 0.93 },
+      ] },
+      { displayName: 'Claude and GPT models', buckets: [
+        { window: 'weekly', remainingFraction: 0.23 }, { window: '5h', remainingFraction: 1 },
+      ] },
+    ] },
+    [`${runtime.baseURL}/v1internal:loadCodeAssist`]: {},
+  }, calls))
+  assert.equal(usage.windows?.length, 4)
+  assert.ok(!calls.some(call => call.url.includes('fetchAvailableModels')))
+  assert.deepEqual(usage.windows?.map(window => Math.round(window.usedPercent)), [27, 7, 77, 0])
+})
+
 test('partial shared summary supplements only uncovered selectable model quotas', async () => {
   const { antigravityQuotaSummary } = await import('./fixtures/antigravity-quota-summary.js')
   const summary = antigravityQuotaSummary()
-  summary.groups = summary.groups.filter(group => group.displayName !== 'Gemini 4 Argon')
+  summary.groups = summary.groups.filter(group => group.displayName === 'Claude and GPT models')
   const calls: RecordedCall[] = []
   const usage = await fetchAntigravityUsage(session, runtime, routed({
     [`${runtime.baseURL}/v1internal:retrieveUserQuotaSummary`]: summary,
@@ -1073,8 +1091,8 @@ test('partial shared summary supplements only uncovered selectable model quotas'
   assert.equal(fallback?.length, 1)
   assert.equal(fallback?.[0].kind, 'other', 'reset proximity does not prove a 5h or weekly cadence')
   assert.ok(Math.abs(fallback![0].usedPercent - 4) < 0.001)
-  assert.ok(!usage.windows?.some(window => window.scope === 'gemini-3.8-flash-high'))
-  assert.equal(usage.windows?.length, 5)
+  assert.ok(usage.windows?.some(window => window.scope === 'gemini-3.8-flash-high'))
+  assert.equal(usage.windows?.length, 4)
   assert.equal(calls.filter(call => call.url.includes('fetchAvailableModels')).length, 1)
 })
 
