@@ -320,6 +320,8 @@ export class AntigravityStreamTranslator {
   private closed: AntigravityBlockReplay[] = []
   private nextIndex = 0
   private sawContent = false
+  private sawThoughtImage = false
+  private sawReasoning = false
   private sawToolCall = false
   terminated = false
   private usage: TokenUsage | undefined
@@ -362,7 +364,7 @@ export class AntigravityStreamTranslator {
       response: { kind: 'antigravity', version: 1 } satisfies AntigravityReplayResponse,
       blocks: this.closed,
     }
-    if (!this.sawContent) {
+    if (!this.sawContent && (!this.sawReasoning || this.sawThoughtImage)) {
       return {
         type: 'finish',
         reason: { kind: 'error', failure: { message: 'Antigravity returned no content', code: EMPTY_RESPONSE_CODE } },
@@ -386,11 +388,18 @@ export class AntigravityStreamTranslator {
     if (usage !== undefined) this.usage = mapAntigravityUsage(usage)
     const candidate = event.response?.candidates?.[0]
     for (const [partIndex, part] of (candidate?.content?.parts ?? []).entries()) {
+      if (part.thought === true && part.inlineData !== undefined) {
+        // Intermediate sketches are not answer attachments or replayable final images.
+        // Keep the parts on either side separate so their signatures stay aligned.
+        this.closeAll(chunks)
+        this.sawThoughtImage = true
+        continue
+      }
       if (part.thought === true && typeof part.text === 'string' && part.text.length > 0) {
         const block = this.blocks.get('reasoning') ?? this.open('reasoning', 'reasoning', chunks)
         block.text += part.text
         if (part.thoughtSignature !== undefined) block.thoughtSignature = part.thoughtSignature
-        this.sawContent = true
+        this.sawReasoning = true
         chunks.push({ type: 'reasoning-delta', index: block.index, text: part.text })
       } else if (typeof part.text === 'string' && part.text.length > 0) {
         const block = this.blocks.get('text') ?? this.open('text', 'text', chunks)

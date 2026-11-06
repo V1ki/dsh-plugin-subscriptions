@@ -133,3 +133,5 @@ independently verified here. The checked-in normal tests use locked DSH
   [`@deepseek-ai/dsh-attachment-local@0.2.1-rc.3`](https://www.npmjs.com/package/@deepseek-ai/dsh-attachment-local/v/0.2.1-rc.3),
   [`@deepseek-ai/dsh-client-ui-chat@0.2.1-rc.3`](https://www.npmjs.com/package/@deepseek-ai/dsh-client-ui-chat/v/0.2.1-rc.3),
   and [`@deepseek-ai/dsh-client-ui-attachment@0.2.1-rc.3`](https://www.npmjs.com/package/@deepseek-ai/dsh-client-ui-attachment/v/0.2.1-rc.3).
+
+A Gemini inline image marked `thought: true` is an intermediate sketch, not an answer attachment. It is omitted from visible history and request replay. Only final image bytes are saved and replayed with their own signatures; a sketch without final output yields `EMPTY_RESPONSE`. See [Google’s image-generation thought signature rules](https://ai.google.dev/gemini-api/docs/generate-content/image-generation?hl=en).

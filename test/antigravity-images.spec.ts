@@ -111,6 +111,28 @@ for (const transport of ['SSE', 'JSON']) for (const text of [false, true]) {
   })
 }
 
+for (const transport of ['SSE', 'JSON']) for (const final of [false, true]) {
+  test(`${transport}: intermediate sketches never count as final output (final=${final})`, async () => {
+    const store = new Store({ maxImagesPerMessage: 1 })
+    const thought: AntigravityPart = { thought: true, inlineData: { mimeType: 'image/png', data: PNG } }
+    const reasoning = { thought: true, text: 'planning', thoughtSignature: 'reasoning-signature' }
+    const parts = [reasoning, thought, ...(final ? [IMAGE] : [])]
+    const raw = adapter(transport === 'SSE' ? [frame([reasoning, thought]), frame(final ? [IMAGE] : [], 'STOP')] : [frame(parts, 'STOP')], store)
+    const result = assemble(transport === 'SSE' ? await collect(raw.stream(OPTIONS)) : await raw.generate(OPTIONS))
+    assert.equal(store.saved.length, Number(final))
+    assert.equal(result.blocks().filter(b => b.type === 'image').length, Number(final))
+    if (!final) {
+      assert.equal(result.finish.kind, 'error')
+      assert.equal(result.finish.kind === 'error' && result.finish.failure.code, 'EMPTY_RESPONSE')
+      return
+    }
+    assert.equal(result.finish.kind, 'stop')
+    const msg = result.message({ provider: 'antigravity', model: OPTIONS.model, replayState: result.replayState })
+    const replay = toAntigravityContents(await resolveImages([msg], store), OPTIONS.model)
+    assert.deepEqual(replay[0].parts, [reasoning, IMAGE])
+  })
+}
+
 test('multiple images and interleaved text across SSE frames preserve order, signatures and latest usage', async () => {
   const store = new Store()
   const frames = [frame([{ text: 'a' }, IMAGE]), frame([{ text: 'b' }]), frame([IMAGE, { text: 'c' }]), frame([], 'STOP', false)]
@@ -243,10 +265,10 @@ for (const mode of ['success', 'empty', 'missing-store', 'invalid', 'storage'] a
       assert.deepEqual(calls, ['Bearer alice', 'Bearer alice'])
       assert.deepEqual(warnings, [])
     } else {
-      await assert.rejects(collect(pool.stream(OPTIONS)), (error: unknown) => error instanceof LlmError)
+      await assert.rejects(collect(pool.stream(OPTIONS)), (error: unknown) => error instanceof LlmError && (mode !== 'empty' || error.code === 'EMPTY_RESPONSE'))
       assert.equal(calls.length, mode === 'empty' ? 2 : 1)
     }
-    assert.equal(health.isAvailable(memberKey('antigravity', 'alice', OPTIONS.model)), mode !== 'empty')
-    assert.equal(health.isAvailable(memberKey('antigravity', 'bob', OPTIONS.model)), mode !== 'empty')
+    assert.equal(health.isAvailable(memberKey('antigravity', 'alice', OPTIONS.model)), true)
+    assert.equal(health.isAvailable(memberKey('antigravity', 'bob', OPTIONS.model)), true)
   })
 }

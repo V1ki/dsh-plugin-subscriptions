@@ -8,6 +8,7 @@ import { join, resolve } from 'node:path'
 import { runInNewContext } from 'node:vm'
 import { pathToFileURL } from 'node:url'
 import { parseAntigravityResponse, streamAntigravity, toAntigravityContents } from '../lib-test/src/translate/antigravity.js'
+import { AntigravityAdapter } from '../lib-test/src/providers/antigravity.js'
 import { resolveImages } from '../lib-test/src/translate/resolved.js'
 
 const hostRoot = process.argv[2]
@@ -63,6 +64,54 @@ try {
     const store = new LocalAttachmentStore(new Context(), { dshHome: home })
     await assert.rejects(parseAntigravityResponse(frame([{ inlineData: { mimeType: format === 'png' ? 'image/jpeg' : 'image/png', data: data.toString('base64') } }]), store), { code: 'IMAGE_OUTPUT_STORAGE' })
     await assert.rejects(parseAntigravityResponse(frame([{ inlineData: { mimeType: `image/${format}`, data: data.subarray(0, 12).toString('base64') } }]), store), { code: 'IMAGE_OUTPUT_STORAGE' })
+  }
+  // Distinct valid images: only the final image can enter history, disk or the next request.
+  const raster = async color => sharp({ create: { width: 2, height: 2, channels: 3, background: color } }).png().toBuffer()
+  const sketch = { thought: true, inlineData: { mimeType: 'image/png', data: (await raster('#111111')).toString('base64') } }
+  const finalImage = { inlineData: { mimeType: 'image/png', data: (await raster('#eeeeee')).toString('base64') }, thoughtSignature: 'final-image-signature' }
+  for (const transport of ['SSE', 'JSON']) for (const final of [false, true]) {
+    let activeStore = new LocalAttachmentStore(new Context(), { dshHome: home })
+    const event = frame([sketch, ...(final ? [finalImage] : [])])
+    let requestContents
+    const adapter = new AntigravityAdapter({
+      models: [{ id: model }], discovery: false, streamIdleTimeoutMs: 5000,
+      tokens: { session: async () => ({ accessToken: 'fixture', projectId: 'fixture' }) },
+      runtime: { baseURL: 'https://fixture.invalid', onboard: false },
+      resolveAttachments: () => activeStore,
+      fetchFn: async (url, init) => {
+        assert.equal(new URL(url).origin, 'https://fixture.invalid')
+        requestContents = JSON.parse(init.body).request.contents
+        return String(url).includes('streamGenerateContent')
+          ? new Response(`data: ${JSON.stringify(event)}\n\n`, { headers: { 'content-type': 'text/event-stream' } })
+          : Response.json(event)
+      },
+    })
+    const run = messages => {
+      const options = { provider: 'antigravity', model, messages }
+      return transport === 'JSON' ? adapter.generate(options) : Array.fromAsync(adapter.stream(options))
+    }
+    const chunks = await run([])
+    const acc = new AssistantStreamAccumulator()
+    chunks.forEach((chunk, time) => acc.push({ time, chunk }))
+    const assembled = new BlockAssembler()
+    for (const { chunk } of expandAssistantStream(JSON.parse(JSON.stringify(acc.snapshot())))) assembled.push(chunk)
+    assert.equal(assembled.blocks().filter(b => b.type === 'image').length, Number(final))
+    if (final) {
+      assert.equal(assembled.finish.kind, 'stop')
+      const file = join(home, 'thought-message.json')
+      await writeFile(file, JSON.stringify(assembled.message({ provider: 'antigravity', model, replayState: assembled.replayState })))
+      const message = JSON.parse(await readFile(file, 'utf8'))
+      const reopened = new LocalAttachmentStore(new Context(), { dshHome: home })
+      activeStore = reopened
+      await run([message])
+      assert.deepEqual(requestContents.find(content => content.role === 'model').parts, [finalImage])
+      lastImage = message.content.find(block => block.type === 'image')
+      lastData = (await reopened.readImage(lastImage.attachment)).data
+    } else {
+      assert.equal(assembled.finish.kind, 'error')
+      assert.equal(assembled.finish.failure.code, 'EMPTY_RESPONSE')
+    }
+    report.cases.push(`${transport}/thought image + final=${final}: ${Number(final)} visible image(s), ${assembled.finish.kind}`)
   }
   const large = await sharp(randomBytes(768 * 512 * 3), { raw: { width: 768, height: 512, channels: 3 } }).png().toBuffer()
   assert.ok(large.toString('base64').length > 927472, 'exceeds the payload size reported in #186')
