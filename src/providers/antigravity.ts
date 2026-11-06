@@ -358,6 +358,7 @@ export function isAntigravityPermanentRefreshError(error: unknown): boolean {
 }
 
 interface AntigravityWireModel {
+  model?: string
   displayName?: string
   description?: string
   inputTokenLimit?: number
@@ -370,6 +371,20 @@ interface AntigravityWireModel {
 
 interface AntigravityModelsResponse {
   models?: Record<string, AntigravityWireModel>
+}
+
+/** Correct a stale Gemini version label only when the wire enum and the actual catalog ID agree. */
+function catalogName(id: string, model: AntigravityWireModel): string {
+  const fallback = id.split('-').map(word => word.length === 0 ? word : word[0].toUpperCase() + word.slice(1)).join(' ')
+  const label = model.displayName?.trim() || undefined
+  const concrete = typeof model.model === 'string' && /^MODEL_GOOGLE_GEMINI_(\d+(?:_\d+)*)_([A-Z]+(?:_[A-Z]+)*)$/.exec(model.model)
+  if (!concrete) return label ?? fallback
+  const version = concrete[1].replace(/_/g, '.')
+  const suffix = concrete[2].toLowerCase().split('_')
+  if (id !== ['gemini', version, ...suffix].join('-')) return label ?? fallback
+  const inLabel = label && /\bGemini\s+(\d+(?:\.\d+)*)\b/i.exec(label)
+  if (label && (!inLabel || inLabel[1] === version)) return label
+  return ['Gemini', version, ...suffix.map(word => word[0].toUpperCase() + word.slice(1))].join(' ')
 }
 
 /** Fetch the authenticated account's live Antigravity model catalog. */
@@ -392,7 +407,7 @@ export async function fetchAntigravityModels(
   }
   const models = Object.entries(payload.models).map(([id, model]): DiscoveredModel => ({
     id,
-    name: model.displayName ?? id.split('-').map(word => word.length === 0 ? word : word[0].toUpperCase() + word.slice(1)).join(' '),
+    name: catalogName(id, model),
     ...model.description === undefined ? {} : { description: model.description },
     contextWindow: model.inputTokenLimit ?? model.maxInputTokens ?? ANTIGRAVITY_CONTEXT_WINDOW,
     ...typeof model.maxOutputTokens === 'number' && Number.isSafeInteger(model.maxOutputTokens) && model.maxOutputTokens > 0

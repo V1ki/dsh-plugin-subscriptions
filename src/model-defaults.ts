@@ -20,6 +20,7 @@ import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { PROVIDER_IDS, type ProviderId } from './auth/store.js'
+import { parseJsonText } from './json-text.js'
 
 /** One model id → its configured default reasoning effort id. */
 export type ModelDefaultMap = Readonly<Record<string, string>>
@@ -90,7 +91,7 @@ async function loadFile(path: string): Promise<ModelDefaults> {
     throw error
   }
   try {
-    const { defaults, dropped } = sanitizeDefaults(JSON.parse(text))
+    const { defaults, dropped } = sanitizeDefaults(parseJsonText(text))
     if (dropped.length > 0) loadError = new Error(
       `subscriptions model defaults: ${dropped.length} malformed entr${dropped.length === 1 ? 'y' : 'ies'} skipped (${dropped.join(', ')}); fix or delete the file`,
     )
