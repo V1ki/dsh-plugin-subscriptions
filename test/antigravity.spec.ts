@@ -18,6 +18,7 @@ import {
   exchangeAntigravityCode,
   fetchAntigravityModels,
   fetchAntigravityUsage,
+  parseSummaryWindows,
   refreshAntigravity,
   requestAntigravityContent,
 } from '../src/providers/antigravity.js'
@@ -872,4 +873,85 @@ test('Gemini 4 reuses a real signature only for the same provider and model', ()
     const call = switched.request.contents.flatMap(content => content.parts).find(part => part.functionCall)
     assert.equal(call?.thoughtSignature, 'skip_thought_signature_validator')
   }
+})
+
+test('parseSummaryWindows handles groups, gRPC window variants, and percentage parsing', () => {
+  const summary = {
+    groups: [
+      {
+        displayName: 'Gemini Models',
+        buckets: [
+          {
+            displayName: 'Weekly Limit',
+            window: 'weekly',
+            remainingFraction: 0.85,
+            resetTime: '2026-11-05T08:42:47Z',
+          },
+          {
+            displayName: '5h Limit',
+            window: 'WINDOW_5_HOUR',
+            remainingFraction: 1.0,
+            resetTime: '2026-10-30T11:31:58Z',
+          },
+        ],
+      },
+      {
+        displayName: 'Gemini 4 Argon',
+        buckets: [
+          {
+            displayName: 'Weekly Quota',
+            window: 'weekly',
+            remainingFraction: '75%',
+          },
+        ],
+      },
+    ],
+  }
+  const windows = parseSummaryWindows(summary)
+  assert.equal(windows.length, 3)
+  // Gemini 5h should be sorted first within its group
+  assert.deepEqual(windows[0], {
+    kind: 'session',
+    scope: 'Gemini Models',
+    usedPercent: 0,
+    resetsAt: Date.parse('2026-10-30T11:31:58Z'),
+  })
+  assert.deepEqual(windows[1], {
+    kind: 'weekly',
+    scope: 'Gemini Models',
+    usedPercent: 15,
+    resetsAt: Date.parse('2026-11-05T08:42:47Z'),
+  })
+  assert.deepEqual(windows[2], {
+    kind: 'weekly',
+    scope: 'Gemini 4 Argon',
+    usedPercent: 25,
+  })
+})
+
+test('fetchAntigravityUsage prefers retrieveUserQuotaSummary over legacy model iteration', async () => {
+  const fetchFn: FetchFn = async (input, init) => {
+    const url = String(input)
+    if (url.includes('retrieveUserQuotaSummary')) {
+      return new Response(JSON.stringify({
+        groups: [{
+          displayName: 'Gemini Models',
+          buckets: [{ window: '5h', remainingFraction: 0.9 }],
+        }],
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }
+    if (url.includes('loadCodeAssist')) {
+      return new Response(JSON.stringify({
+        paidTier: { name: 'Antigravity Pro' },
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }
+    return new Response(JSON.stringify({ error: 'unexpected' }), { status: 500 })
+  }
+  const usage = await fetchAntigravityUsage(session, runtime, fetchFn)
+  assert.equal(usage.supported, true)
+  assert.equal(usage.plan, 'Antigravity Pro')
+  assert.equal(usage.windows?.length, 1)
+  assert.equal(usage.windows?.[0]?.scope, 'Gemini Models')
+  assert.equal(usage.windows?.[0]?.usedPercent, 10)
+  assert.equal(usage.windows?.[0]?.kind, 'session')
 })

@@ -7,7 +7,7 @@ export function antigravityReasoning(model: string): LlmResolvedModelInfo['reaso
   const ids = model.startsWith('claude-') ? ['high']
     : model.startsWith('gpt-oss-') ? ['medium']
       : model.startsWith('gemini-3.1-pro') || model === 'gemini-pro-agent' ? ['low', 'high']
-        : /^gemini-(?:2\.5|3)/.test(model) ? ['low', 'medium', 'high'] : []
+        : /^gemini-(?:2\.5|[34])/.test(model) ? ['low', 'medium', 'high'] : []
   const fixedEffort = /^gemini-.*-(low|medium|high)$/.exec(model)?.[1]
   const efforts = fixedEffort !== undefined && ids.includes(fixedEffort) ? [fixedEffort] : ids
   return efforts.length === 0 ? undefined : {
@@ -19,10 +19,17 @@ export function antigravityReasoning(model: string): LlmResolvedModelInfo['reaso
 export function antigravityThinking(model: string, effort: string | undefined, maxTokens?: number): Record<string, unknown> | undefined {
   if (effort === undefined) return undefined
   const supported = antigravityReasoning(model)
-  if (supported === undefined || effort !== 'off' && !supported.efforts.some(entry => entry.id === effort)) {
+  if (supported === undefined) {
     throw new LlmError(`Antigravity model ${model} does not support reasoning effort ${effort}`, 'UNSUPPORTED_REASONING_EFFORT')
   }
   if (effort === 'off') return { includeThoughts: false, thinkingBudget: 0 }
+  if (!supported.efforts.some(entry => entry.id === effort)) {
+    if (supported.efforts.length === 1) {
+      effort = supported.efforts[0].id
+    } else {
+      throw new LlmError(`Antigravity model ${model} does not support reasoning effort ${effort}`, 'UNSUPPORTED_REASONING_EFFORT')
+    }
+  }
   // Reference: pi-antigravity src/models/models.ts at 697858c (v1internal wire).
   let budget: number
   if (model.startsWith('claude-')) budget = 1024
