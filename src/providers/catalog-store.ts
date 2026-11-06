@@ -102,6 +102,19 @@ function sanitizeModel(value: unknown): DiscoveredModel | undefined {
   if (inputModalities !== undefined
     && (!Array.isArray(inputModalities) || inputModalities.length === 0
       || inputModalities.some(modality => modality !== 'text' && modality !== 'image'))) return undefined
+  let antigravity: DiscoveredModel['antigravity']
+  if (raw.antigravity !== undefined) {
+    if (typeof raw.antigravity !== 'object' || raw.antigravity === null || Array.isArray(raw.antigravity)) return undefined
+    const profile = raw.antigravity as Record<string, unknown>
+    if (typeof profile.visible !== 'boolean'
+      || (profile.thinkingLevel !== undefined && (typeof profile.thinkingLevel !== 'string' || !['LOW', 'MEDIUM', 'HIGH'].includes(profile.thinkingLevel)))
+      || (profile.thinkingBudget !== undefined && (typeof profile.thinkingBudget !== 'number' || !Number.isSafeInteger(profile.thinkingBudget) || profile.thinkingBudget < -1))) return undefined
+    antigravity = {
+      visible: profile.visible,
+      ...profile.thinkingLevel === undefined ? {} : { thinkingLevel: profile.thinkingLevel as 'LOW' | 'MEDIUM' | 'HIGH' },
+      ...profile.thinkingBudget === undefined ? {} : { thinkingBudget: profile.thinkingBudget as number },
+    }
+  }
   return {
     id: raw.id,
     name: raw.name,
@@ -112,6 +125,7 @@ function sanitizeModel(value: unknown): DiscoveredModel | undefined {
     ...raw.priority === undefined ? {} : { priority: raw.priority as number },
     ...reasoning === undefined ? {} : { reasoning },
     ...thinkingType === undefined ? {} : { thinkingType: thinkingType as 'enabled' | 'adaptive' },
+    ...antigravity === undefined ? {} : { antigravity },
     ...fastTier === undefined ? {} : { fastTier },
     ...copilotWire === undefined ? {} : { copilotWire: copilotWire as 'chat-completions' | 'responses' },
     ...copilotResponses === undefined ? {} : { copilotResponses },

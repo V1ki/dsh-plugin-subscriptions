@@ -29,6 +29,7 @@ interface AntigravityBlockReplay {
 interface AntigravityReplayResponse {
   kind: 'antigravity'
   version: 1
+  wireModel?: string
 }
 
 /** Minimal Gemini part shape used by v1internal. */
@@ -82,7 +83,7 @@ function toolResultValue(block: ResolvedToolResultBlock): Record<string, unknown
 }
 
 /** Safely read per-block replay metadata emitted by this adapter. */
-function replayBlocks(message: TranslatableMessage, model?: string): readonly AntigravityBlockReplay[] {
+function replayBlocks(message: TranslatableMessage, model?: string, wireModel = model): readonly AntigravityBlockReplay[] {
   const source = (message as TranslatableMessage & {
     source?: { kind?: string; replayState?: unknown }
   }).source
@@ -92,6 +93,7 @@ function replayBlocks(message: TranslatableMessage, model?: string): readonly An
   const envelope = source.replayState as { response?: unknown; blocks?: unknown }
   const response = envelope.response as Partial<AntigravityReplayResponse> | undefined
   if (response === null || response?.kind !== 'antigravity' || response.version !== 1 || !Array.isArray(envelope.blocks)) return []
+  if (wireModel !== undefined && (response.wireModel ?? (message.source?.kind === 'model' ? message.source.model : undefined)) !== wireModel) return []
   return envelope.blocks.map((entry): AntigravityBlockReplay => {
     if (typeof entry !== 'object' || entry === null) return {}
     const signature = (entry as Record<string, unknown>).thoughtSignature
@@ -132,7 +134,7 @@ function requiresThoughtSignatures(model?: string): boolean {
  * names are recovered from prior tool calls because DSH correlates results by
  * id while the Gemini wire requires both id and name.
  */
-export function toAntigravityContents(messages: readonly TranslatableMessage[], model?: string): {
+export function toAntigravityContents(messages: readonly TranslatableMessage[], model?: string, wireModel = model): {
   role: 'user' | 'model'
   parts: AntigravityPart[]
 }[] {
@@ -157,7 +159,7 @@ export function toAntigravityContents(messages: readonly TranslatableMessage[], 
       continue
     }
     const role = message.role === 'assistant' ? 'model' as const : 'user' as const
-    const metadata = replayBlocks(message, model)
+    const metadata = replayBlocks(message, model, wireModel)
     const parts: AntigravityPart[] = []
     let sawFunctionCall = false
     for (let index = 0; index < message.content.length; index++) {
@@ -234,9 +236,19 @@ export function toAntigravityRequest(
   messages: readonly TranslatableMessage[],
   projectId: string,
   forStreaming = false,
+  wireModel = options.model,
+  profile?: { thinkingLevel?: 'LOW' | 'MEDIUM' | 'HIGH'; thinkingBudget?: number },
 ): AntigravityRequest {
   const tools = toAntigravityTools(options.tools ?? [], options.model)
-  const thinkingConfig = antigravityThinking(options.model, options.reasoningEffort, options.maxTokens)
+  const thinkingConfig = profile?.thinkingLevel !== undefined || profile?.thinkingBudget !== undefined
+    ? { includeThoughts: true,
+      ...profile.thinkingLevel === undefined ? {} : { thinkingLevel: profile.thinkingLevel },
+      ...profile.thinkingBudget === undefined ? {} : { thinkingBudget: profile.thinkingBudget },
+    }
+    : antigravityThinking(options.model, options.reasoningEffort, options.maxTokens)
+  if (profile?.thinkingBudget !== undefined && profile.thinkingBudget > 0 && options.maxTokens !== undefined && options.maxTokens <= profile.thinkingBudget) {
+    throw new LlmError(`Antigravity maxTokens must exceed the thinking budget (${profile.thinkingBudget}) for ${wireModel}`, 'INVALID_REQUEST')
+  }
   let maxOutputTokens = options.maxTokens
   // Claude models on the streaming path reject maxOutputTokens >= 65535
   if (forStreaming && maxOutputTokens !== undefined && /^claude-/.test(options.model) && maxOutputTokens >= 65535) {
@@ -256,11 +268,11 @@ export function toAntigravityRequest(
   return {
     project: projectId,
     requestId: `agent/${String(Date.now())}/${randomUUID()}/4`,
-    model: options.model,
+    model: wireModel,
     userAgent: 'antigravity',
     requestType: 'agent',
     request: {
-      contents: toAntigravityContents(messages, options.model),
+      contents: toAntigravityContents(messages, options.model, wireModel),
       sessionId,
       ...system === undefined || system.length === 0 ? {} : { systemInstruction: { parts: [{ text: system }] } },
       ...tools.length === 0 ? {} : {

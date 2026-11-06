@@ -10,6 +10,14 @@
 
 订阅显示名也用于原生模型选择器的服务商分组标题；清空显示名并保存后，分组恢复为服务商默认名称。
 
+## Antigravity 模型与推理强度选择
+
+将同一模型的 Low / Medium / High 变体合并为一个条目，复用 Codex 的原生模型与推理强度选择控件。存在时，`agentModelSorts` 决定可选模型及顺序，只合并其中明确的 Low / Medium / High 变体。`tieredModelIds` 中的 `pro` / `flashLite` 是分类键，不会创建模型或扩展列表。请求保留目录中的 `thinkingLevel` / `thinkingBudget`，旧的具体模型 ID 仍可用于历史会话。
+
+未设置有效偏好时，默认按 High、Medium、Low 的顺序选择可用强度。账号池沿用各成员能力交集。安装后请刷新模型目录；旧目录缺少官方列表元数据时只能按兼容规则过滤，真实账号的选择器与用量显示已有截图验证；所有模型及强度的实际请求仍需进一步验证。参见 [验证说明](docs/issue180-testing.md)。
+
+Antigravity 用量优先读取 `retrieveUserQuotaSummary`，按 Gemini、Claude/GPT 和 Gemini 4 Argon 显示共享限额，展示剩余百分比、每周/5 小时窗口及重置倒计时。摘要不可用时仅回退到可选模型的原始限额，不推断不存在的共享窗口。
+
 ## 演示
 
 设置 → **订阅**:每个 provider 的登录/退出,无需 API key。Claude 有 Claude Code 会话时导入凭据,否则和 Codex、Grok 一样走 OAuth(以下设置截图使用演示账号与目录数据):
@@ -68,7 +76,7 @@
 
 只有已登录的 provider 才会出现在会话模型选择器里;登录/退出后列表自动刷新。支持视觉的模型会声明 `['text', 'image']` 输入模态,图片内容会被翻译成各 provider 的 wire 格式。
 
-已登录的卡片还会显示**订阅用量**——按限额窗口(5 小时会话窗、每周窗,以及计划包含的按模型每周窗)展示已用百分比、进度条和重置时间,并带刷新按钮。Codex 用量来自 `chatgpt.com/backend-api/wham/usage`(同时报告计划类型),Claude 用量来自 `api.anthropic.com/api/oauth/usage`,Grok 用量来自 Grok Build CLI 代理的 `cli-chat-proxy.grok.com/v1/billing`(即 CLI `/usage` 面板的数据源,报告共享每周额度和订阅档位)。Antigravity 会在上游字段存在时从 `loadCodeAssist` 与 `fetchAvailableModels` 显示订阅档位、积分及按模型限额。Copilot 没有用量接口,其卡片不显示用量区块。
+已登录的卡片还会显示**订阅用量**——按限额窗口(5 小时会话窗、每周窗,以及计划包含的按模型每周窗)展示已用百分比、进度条和重置时间,并带刷新按钮。Codex 用量来自 `chatgpt.com/backend-api/wham/usage`(同时报告计划类型),Claude 用量来自 `api.anthropic.com/api/oauth/usage`,Grok 用量来自 Grok Build CLI 代理的 `cli-chat-proxy.grok.com/v1/billing`(即 CLI `/usage` 面板的数据源,报告共享每周额度和订阅档位)。Antigravity 从 `retrieveUserQuotaSummary` 显示共享限额，按 Gemini、Claude/GPT 与 Gemini 4 Argon 展示剩余百分比和重置时间；`loadCodeAssist` 提供订阅档位与积分。摘要不可用时仅回退到可选模型的原始限额。Copilot 没有用量接口,其卡片不显示用量区块。
 
 随 provider 启用自动注册的工具:
 

@@ -199,3 +199,14 @@ test('model reader observes switches within the same provider and handles missin
   assert.equal(await createCurrentModelReader(() => undefined, 'session')(), undefined)
   assert.equal(await createCurrentModelReader(() => ({ directoryFor: () => ({ load: async () => ({ current: null }) }) }), 'session')(), undefined)
 })
+
+test('Antigravity badge previews variant quota scopes for the grouped current model', () => {
+  const windows: UsageWindow[] = [
+    { kind: 'other', scope: 'claude-opus-5-5-medium', usedPercent: 70 },
+    { kind: 'other', scope: 'gemini-4-argon-high', usedPercent: 20 },
+    { kind: 'weekly', scope: 'gemini-4-argon-low', usedPercent: 40 },
+  ]
+  const preview = previewWindows(windows, 'gemini-4-argon', 'antigravity')
+  assert.deepEqual(preview.shown, windows.slice(1))
+  assert.deepEqual(preview.hidden, [windows[0]])
+})

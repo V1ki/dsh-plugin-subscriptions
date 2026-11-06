@@ -7,9 +7,9 @@ export function antigravityReasoning(model: string): LlmResolvedModelInfo['reaso
   const ids = model.startsWith('claude-') ? ['high']
     : model.startsWith('gpt-oss-') ? ['medium']
       : model.startsWith('gemini-3.1-pro') || model === 'gemini-pro-agent' ? ['low', 'high']
-        : /^gemini-(?:2\.5|3)/.test(model) ? ['low', 'medium', 'high'] : []
-  const fixedEffort = /^gemini-.*-(low|medium|high)$/.exec(model)?.[1]
-  const efforts = fixedEffort !== undefined && ids.includes(fixedEffort) ? [fixedEffort] : ids
+        : /^gemini-(?:2\.5|[34])/.test(model) ? ['low', 'medium', 'high'] : []
+  const fixedEffort = /^(?:gemini|claude|gpt-oss)-.*-(low|medium|high)$/.exec(model)?.[1]
+  const efforts = fixedEffort !== undefined ? [fixedEffort] : ids
   return efforts.length === 0 ? undefined : {
     efforts: efforts.map(id => ({ id: ReasoningEffortId(id), name: id[0].toUpperCase() + id.slice(1) })),
   }

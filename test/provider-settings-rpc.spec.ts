@@ -171,3 +171,38 @@ test('Antigravity registers the real multi-account adapter with provider setting
     await rm(home, { recursive: true, force: true })
   }
 })
+
+test('Antigravity cached roster remains available immediately after clearing and selecting all grouped models', async () => {
+  const { catalogStore } = await import('../src/providers/catalog-store.js')
+  const { antigravityCatalogCache } = await import('./fixtures/antigravity-catalog-cache.js')
+  const home = await mkdtemp(join(tmpdir(), 'antigravity-grouped-settings-'))
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  const ctx = new Context()
+  const llm = new LlmRuntime(ctx)
+  const adapters = new Map<string, AccountAwareAdapter>()
+  const register = llm.registerAdapter.bind(llm)
+  llm.registerAdapter = (routes: string[], adapter: AccountAwareAdapter) => { adapters.set(routes[0], adapter); return register(routes, adapter) }
+  const connection = createFakeConnection()
+  ctx.provide('connection', connection.connection)
+  let runtime: ReturnType<typeof ctx.plugin> | undefined
+  try {
+    await saveAccountSession('antigravity', 'fixture', { accessToken: 'test-token', refreshToken: 'test-refresh', expiresAt: Date.now() + 3600000, projectId: 'test-project' })
+    await catalogStore('antigravity').save({ at: Date.now(), models: antigravityCatalogCache })
+    runtime = ctx.plugin(plugin, { providers: ['antigravity'], pool: { enabled: false }, antigravity: { onboard: false } })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    const call = (endpoint: string, payload: unknown) => connection.handler(endpoint, payload, new AbortController().signal)
+    const result = await call('providerSettings', { provider: 'antigravity' })
+    assert.ok(result.ok)
+    const ids = (result.value as { models: { id: string }[] }).models.map(model => model.id)
+    assert.deepEqual(ids, ['gemini-4-argon', 'gemini-3.8-flash', 'claude-opus-5-5', 'claude-sonnet-5-5', 'gpt-oss-120b'])
+    assert.ok((await call('setProviderSettings', { provider: 'antigravity', settings: { visibleModels: [] } })).ok)
+    assert.deepEqual(await adapters.get('antigravity')!.listModels('antigravity'), [])
+    assert.ok((await call('setProviderSettings', { provider: 'antigravity', settings: { visibleModels: ids } })).ok)
+    assert.deepEqual((await adapters.get('antigravity')!.listModels('antigravity')).map(model => model.id), ids)
+  } finally {
+    await runtime?.dispose()
+    if (previous === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previous
+    await rm(home, { recursive: true, force: true })
+  }
+})
