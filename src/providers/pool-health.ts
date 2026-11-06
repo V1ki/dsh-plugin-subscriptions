@@ -87,6 +87,8 @@ export function classifyPoolFailure(error: unknown, provider: ProviderId): PoolF
     case 'MISSING_CREDENTIAL':
       return { action: 'switch', cooldownMs: AUTH_COOLDOWN_MS, reason: error.code, scope: 'account' }
     case 'SERVER':
+      // Codex Responses may disclose a member-local overload wait inside an SSE error.
+      return { action: 'switch', cooldownMs: (provider === 'codex' ? retryAfterMs(error) : undefined) ?? TRANSIENT_COOLDOWN_MS, reason: error.code, scope: 'member' }
     case 'TIMEOUT':
       return { action: 'switch', cooldownMs: TRANSIENT_COOLDOWN_MS, reason: error.code, scope: 'member' }
     case 'EMPTY_RESPONSE':
