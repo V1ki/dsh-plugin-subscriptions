@@ -3,6 +3,7 @@ import { mkdir, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { PROVIDER_IDS, type ProviderId } from './auth/store.js'
+import { parseJsonText } from './json-text.js'
 
 export const PROVIDER_TOOLS = {
   codex: ['image_generate', 'web_search'],
@@ -160,7 +161,7 @@ export class ProviderSettingsStore {
   constructor(path = dshHomePath('plugins', 'subscriptions', 'provider-settings.json')) {
     this.path = path
     try {
-      const raw = JSON.parse(readFileSync(path, 'utf8')) as Document
+      const raw = parseJsonText(readFileSync(path, 'utf8')) as Document
       if (!raw.providers || !Array.isArray(raw.toolHistory)) throw new Error('invalid settings document')
       for (const provider of PROVIDER_IDS) {
         if (Object.hasOwn(raw.providers, provider)) this.current.providers[provider] = validatePreferences(provider, raw.providers[provider])

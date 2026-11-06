@@ -18,6 +18,7 @@ import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { getDefaultAutoSelectFamilyAttemptTimeout, setDefaultAutoSelectFamilyAttemptTimeout } from 'node:net'
 import { dirname } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
+import { parseJsonText } from './json-text.js'
 
 /**
  * undici's own fetch, typed to the DOM fetch signature: its bundled types are
@@ -281,7 +282,7 @@ async function loadConfigFile(path: string): Promise<ProxyConfig> {
   }
   let parsed: unknown
   try {
-    parsed = JSON.parse(text)
+    parsed = parseJsonText(text)
   } catch {
     throw new Error(`subscriptions proxy config at ${path} is not valid JSON; fix or delete the file`)
   }

@@ -18,6 +18,7 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { ProviderId } from '../auth/store.js'
 import type { CatalogPersistence, CatalogSnapshot, DiscoveredModel } from './common.js'
+import { parseJsonText } from '../json-text.js'
 
 /**
  * Absolute path of the catalog store file.
@@ -151,7 +152,9 @@ async function readCatalogFile(path: string): Promise<CatalogFile> {
     return {}
   }
   try {
-    const parsed: unknown = JSON.parse(text)
+    // Tolerate a leading BOM, or a hand-edited cache would silently read as
+    // empty and the model dropdown would fall back to the static list.
+    const parsed: unknown = parseJsonText(text)
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
     return parsed as CatalogFile
   } catch {
