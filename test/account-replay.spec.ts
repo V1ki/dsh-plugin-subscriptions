@@ -26,7 +26,7 @@ for (const mode of ['independent', 'pool'] as const) test(`${mode} routes retain
     async *streamAccount(options: GenerateOptions, account: string): AsyncIterable<StreamChunk> {
       wire = toAntigravityContents(options.messages, options.model)
       const translator = new AntigravityStreamTranslator()
-      yield* translator.push({ response: { candidates: [{ content: { parts: [
+      yield* await translator.push({ response: { candidates: [{ content: { parts: [
         { thought: true, text: 'signed reasoning', thoughtSignature: `signature-${account}` }, { text: 'OK' },
       ] }, finishReason: 'STOP' }] } })
     }
