@@ -550,6 +550,12 @@ export interface DiscoveredModel {
   inputModalities?: ('text' | 'image')[]
   /** Claude-specific: which extended-thinking wire shape this model accepts. */
   thinkingType?: 'enabled' | 'adaptive'
+  /** Antigravity's selectable roster and fixed SKU thinking settings. */
+  antigravity?: {
+    visible: boolean
+    thinkingLevel?: 'LOW' | 'MEDIUM' | 'HIGH'
+    thinkingBudget?: number
+  }
   /** Codex-specific: the catalog advertises a fast (priority) service tier. */
   fastTier?: boolean
   /** Copilot-specific: which upstream protocol the model's endpoints speak. */

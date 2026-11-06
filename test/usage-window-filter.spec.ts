@@ -44,3 +44,16 @@ test('filtered-empty usage has distinct bilingual copy from missing upstream quo
     assert.notEqual(locale.usageNoVisibleModels, locale.usageEmpty)
   }
 })
+
+test('Antigravity grouped selections retain concrete effort quota windows without cross-model matches', () => {
+  const variants: UsageWindow[] = [
+    { kind: 'other', scope: 'gemini-4-argon-low', usedPercent: 10 },
+    { kind: 'weekly', scope: 'gemini-4-argon-high', usedPercent: 20 },
+    { kind: 'other', scope: 'claude-opus-5-5-medium', usedPercent: 30 },
+    { kind: 'other', scope: 'gemini-3.8-flash-high', usedPercent: 40 },
+  ]
+  assert.deepEqual(visibleUsageWindows('antigravity', variants, ['gemini-4-argon']), variants.slice(0, 2))
+  assert.deepEqual(visibleUsageWindows('antigravity', variants, ['claude-opus-5-5']), [variants[2]])
+  assert.deepEqual(visibleUsageWindows('antigravity', variants, ['gemini-4']), [])
+  assert.deepEqual(visibleUsageWindows('antigravity', variants, []), [])
+})

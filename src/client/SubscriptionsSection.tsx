@@ -16,6 +16,8 @@ import type { CSSProperties } from 'react'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import { en } from './locales.js'
 import { resetActionBlock } from './reset-action.js'
+import { AntigravityQuotaSummary } from './AntigravityQuotaSummary.js'
+import { antigravityQuotaScope } from '../antigravity-model-id.js'
 import { visibleUsageWindows } from './usage-window-filter.js'
 import { ProviderAccountManager } from './ProviderAccountManager.js'
 import { providerSettingsCss } from './provider-settings-styles.js'
@@ -939,7 +941,9 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                       {usage?.windows !== undefined && usage.windows.length > 0 && shownWindows.length === 0 && (
                         <p style={styles.statusLine}>{t('usageNoVisibleModels')}</p>
                       )}
-                      {shownWindows.map((window, index) => {
+                      {id === 'antigravity' && shownWindows.some(window => antigravityQuotaScope(window.scope))
+                        ? <AntigravityQuotaSummary windows={shownWindows} t={t} />
+                        : shownWindows.map((window, index) => {
                         const percent = Math.min(100, Math.max(0, window.usedPercent))
                         return (
                           <div key={index} style={styles.usageRow}>

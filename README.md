@@ -10,6 +10,12 @@ Open **Settings → Subscriptions → Manage** to set a subscription display nam
 
 Subscription display names also label provider groups in the native model picker. Saving a cleared name restores the provider's default group title.
 
+## Antigravity model and effort selection
+
+Antigravity now advertises one picker entry per effort group, using the same native model/effort controls as Codex. When supplied, `agentModelSorts` alone determines the selectable roster/order; only explicit Low/Medium/High variants present there are grouped. `tieredModelIds` category keys such as `pro` and `flashLite` are not model identities and do not expand the picker. Catalog `thinkingLevel` and `thinkingBudget` settings are preserved on the wire. Explicit Low/Medium/High suffixes in known model families provide a compatibility fallback for older catalogs; unrelated models are not merged by display name.
+
+Group defaults prefer High, then Medium, then Low when no valid saved preference exists. Existing concrete model IDs remain callable. Account pools retain their existing conservative intersection of members' efforts. Refresh the model list after installing so older caches acquire roster metadata. Without roster metadata, legacy/internal filtering is best effort; exact parity with the official client requires checking the live account. See [verification notes](docs/issue180-testing.md).
+
 ## Demo
 
 Settings → **Subscriptions**: per-provider login/logout, no API keys. Claude imports credentials from Claude Code when available and otherwise uses OAuth, as Codex and Grok always do (settings screenshots use demo accounts and catalog data):
@@ -68,7 +74,7 @@ The `video_generate` tool plays the generated clip inline:
 
 Only logged-in providers appear in the session model picker; the lists above refresh on login/logout. Vision-capable models declare `['text', 'image']` input modalities, and image content is translated to each provider's wire format.
 
-Logged-in cards also show **subscription usage** — per rate-limit window (5-hour session, weekly, and per-model weekly where the plan has one) with the used percentage, a progress bar, and the reset time, plus a Refresh button. Codex usage comes from `chatgpt.com/backend-api/wham/usage` (also reports the plan), Claude usage from `api.anthropic.com/api/oauth/usage`, and Grok usage from the Grok Build CLI proxy's `cli-chat-proxy.grok.com/v1/billing` (the source of the CLI's `/usage` panel; reports the shared weekly pool and the subscription tier). Antigravity reports plan, credits, and per-model quotas from `loadCodeAssist` and `fetchAvailableModels` when those fields are present. Copilot exposes no usage endpoint, so its card shows no usage section.
+Logged-in cards also show **subscription usage** — per rate-limit window (5-hour session, weekly, and per-model weekly where the plan has one) with the used percentage, a progress bar, and the reset time, plus a Refresh button. Codex usage comes from `chatgpt.com/backend-api/wham/usage` (also reports the plan), Claude usage from `api.anthropic.com/api/oauth/usage`, and Grok usage from the Grok Build CLI proxy's `cli-chat-proxy.grok.com/v1/billing` (the source of the CLI's `/usage` panel; reports the shared weekly pool and the subscription tier). Antigravity reads shared quota groups from `retrieveUserQuotaSummary`: Gemini Models, Claude and GPT models, and Gemini 4 Argon when available. Its Settings card shows remaining allowance, weekly/5h windows, and reset countdowns. `loadCodeAssist` supplies plan/credits; if the summary is unavailable, `fetchAvailableModels` supplies only selectable-model quotas without inventing shared windows. Copilot exposes no usage endpoint, so its card shows no usage section.
 
 Also included, registered when the matching provider is enabled:
 

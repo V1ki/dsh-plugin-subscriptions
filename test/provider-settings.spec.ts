@@ -65,6 +65,27 @@ test('provider selections survive refresh-independent reloads and concurrent pro
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
 
+test('legacy Antigravity visibility keeps grouped picker entries without rewriting preferences', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'antigravity-visibility-'))
+  try {
+    const store = new ProviderSettingsStore(join(dir, 'settings.json'))
+    const selected = ['gemini-4-argon-medium', 'claude-opus-5-5-high']
+    await store.set('antigravity', { visibleModels: selected })
+    const before = await readFile(store.path, 'utf8')
+    const reload = new ProviderSettingsStore(store.path)
+    assert.equal(reload.visible('antigravity', 'gemini-4-argon'), true)
+    assert.equal(reload.visible('antigravity', 'claude-opus-5-5'), true)
+    assert.equal(reload.visible('antigravity', 'claude-sonnet-5-5'), false)
+    assert.equal(reload.visible('antigravity', 'gemini-4-argon-high'), false)
+    assert.deepEqual(reload.get('antigravity').visibleModels, selected)
+    assert.equal(await readFile(store.path, 'utf8'), before)
+    await reload.set('antigravity', { visibleModels: [] })
+    assert.equal(reload.visible('antigravity', 'gemini-4-argon'), false)
+    await reload.set('codex', { visibleModels: ['gemini-4-argon-medium'] })
+    assert.equal(reload.visible('codex', 'gemini-4-argon'), false)
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
 test('tool policies retain old-session settings across changes and restarts', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'provider-tools-'))
   try {
