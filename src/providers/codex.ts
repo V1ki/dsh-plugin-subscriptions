@@ -108,6 +108,8 @@ const CODEX_EFFORTS = [
   { id: ReasoningEffortId('medium'), name: 'Medium' },
   { id: ReasoningEffortId('high'), name: 'High' },
   { id: ReasoningEffortId('xhigh'), name: 'Extra High' },
+  { id: ReasoningEffortId('max'), name: 'Max' },
+  { id: ReasoningEffortId('ultra'), name: 'Ultra' },
 ] as const
 const CODEX_DEFAULT_EFFORT = ReasoningEffortId('high')
 /** Every gpt-5.x codex model accepts image input. */
@@ -537,10 +539,10 @@ export async function fetchCodexModels(
     // codex-rs ModelVisibility: only "list" is picker-visible; hide/none are
     // dropped, and an absent or unknown value is included (in doubt, include).
     if (entry.visibility === 'hide' || entry.visibility === 'none') continue
-    // "ultra" is a Codex-client mode (max reasoning + automatic sub-agent
-    // delegation), not a wire value: the Responses API rejects it with HTTP 400.
+    // Parse all reasoning levels from the API catalog without filtering.
+    // GPT-5.6 Sol supports 6 levels: Low, Medium, High, Extra High, Max, and Ultra.
     const efforts = (entry.supported_reasoning_levels ?? [])
-      .filter(level => typeof level.effort === 'string' && level.effort.length > 0 && level.effort !== 'ultra')
+      .filter(level => typeof level.effort === 'string' && level.effort.length > 0)
       .map(level => ({
         id: ReasoningEffortId(level.effort as string),
         name: effortDisplayName(level.effort as string),
@@ -712,14 +714,11 @@ export function reconcileResponsesToolCalls(input: ResponsesRequestInput['input'
 }
 
 /**
- * The `reasoning.effort` wire value for a selected effort. Codex's "ultra" is
- * a client-side selection (max reasoning plus proactive sub-agent delegation)
- * that the Codex CLI itself lowers to `max` at the Responses API boundary;
- * the backend answers HTTP 400 to a literal `ultra`. Discovery no longer
- * lists it, but an effort saved before that change may still arrive here.
+ * The `reasoning.effort` wire value for a selected effort.
+ * GPT-5.6 Sol now supports ultra as a native API value, so we pass it through directly.
  */
 export function codexWireEffort(effort: string): string {
-  return effort === 'ultra' ? 'max' : effort
+  return effort
 }
 
 /**
