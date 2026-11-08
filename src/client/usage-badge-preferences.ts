@@ -40,3 +40,44 @@ export function subscribeUsageBadgeMode(notify: () => void): () => void {
 export function useUsageBadgeMode(): UsageBadgeMode {
   return useSyncExternalStore(subscribeUsageBadgeMode, readUsageBadgeMode, () => 'recent')
 }
+
+/** Independent of badge visibility; defaults preserve existing used semantics. */
+export type QuotaDisplayMode = 'used' | 'remaining'
+const QUOTA_KEY = 'dsh.subscriptions.quotaDisplayMode'
+const QUOTA_EVENT = 'dsh:subscriptions:quota-display-mode'
+
+/** Read the browser preference; blocked storage retains the default display. */
+export function readQuotaDisplayMode(): QuotaDisplayMode {
+  if (typeof window === 'undefined') return 'used'
+  try {
+    return window.localStorage.getItem(QUOTA_KEY) === 'remaining' ? 'remaining' : 'used'
+  } catch (error) {
+    if (!(error instanceof DOMException) || error.name !== 'SecurityError') throw error
+    return 'used'
+  }
+}
+
+/** Save first, then notify; the settings control reports a rejected write. */
+export function setQuotaDisplayMode(mode: QuotaDisplayMode): void {
+  if (mode !== 'used' && mode !== 'remaining') throw new TypeError('Invalid subscription usage display mode')
+  window.localStorage.setItem(QUOTA_KEY, mode)
+  window.dispatchEvent(new Event(QUOTA_EVENT))
+}
+
+/** Same-tab writes need a custom event; other tabs use the storage event. */
+export function subscribeQuotaDisplayMode(notify: () => void): () => void {
+  const onStorage = (event: StorageEvent): void => {
+    if (event.key === QUOTA_KEY || event.key === null) notify()
+  }
+  window.addEventListener(QUOTA_EVENT, notify)
+  window.addEventListener('storage', onStorage)
+  return () => {
+    window.removeEventListener(QUOTA_EVENT, notify)
+    window.removeEventListener('storage', onStorage)
+  }
+}
+
+/** Shared React snapshot used by the settings control and every mounted badge. */
+export function useQuotaDisplayMode(): QuotaDisplayMode {
+  return useSyncExternalStore(subscribeQuotaDisplayMode, readQuotaDisplayMode, () => 'used')
+}

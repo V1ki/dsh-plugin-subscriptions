@@ -304,3 +304,41 @@ test('shared Antigravity Gemini quotas also constrain Argon and retain explicit 
   assert.equal((await tracker.quotaFor({ ...member, model: 'gpt-oss-120b' })).available, false)
   assert.equal((await tracker.quotaFor({ ...member, model: 'gemini-4-argon' })).available, false)
 })
+
+test('display snapshots preserve timestamps across failure/expiry and leave routing snapshots untouched', async () => {
+  let failed = false
+  const raw: ProviderUsage = { supported: true, windows: [{ kind: 'weekly', usedPercent: 100 }] }
+  const { tracker, calls } = trackerOf(async () => {
+    if (failed) throw new OAuthEndpointError('synthetic private error', 429, undefined, 10)
+    return raw
+  }, 10)
+  const first = await tracker.displaySnapshotFor(MEMBER.provider, MEMBER.account)
+  assert.equal(first.stale, false)
+  assert.ok(first.fetchedAt! > 0)
+  assert.equal(first.staleAt, first.fetchedAt! + 10)
+  assert.equal((await tracker.quotaFor(MEMBER)).exhausted, true)
+  assert.equal(await tracker.snapshotFor(MEMBER.provider, MEMBER.account), raw)
+  failed = true
+  tracker.expire(MEMBER.provider, MEMBER.account)
+  const second = await tracker.displaySnapshotFor(MEMBER.provider, MEMBER.account)
+  assert.equal(second.fetchedAt, first.fetchedAt)
+  assert.equal(second.stale, true)
+  assert.equal(second.refreshFailed, true)
+  assert.ok(second.retryAt! >= second.fetchedAt!)
+  assert.equal('error' in second, false)
+  assert.equal((await tracker.quotaFor(MEMBER)).exhausted, true)
+  assert.deepEqual(await tracker.displaySnapshotFor(MEMBER.provider, MEMBER.account, true), second)
+  assert.equal(calls.count, 2)
+  await new Promise(resolve => setTimeout(resolve, 20))
+  const third = await tracker.displaySnapshotFor(MEMBER.provider, MEMBER.account)
+  assert.equal(third.fetchedAt, first.fetchedAt)
+  assert.equal(third.stale, true)
+  await new Promise(resolve => setTimeout(resolve, 20))
+  failed = false
+  const recovered = await tracker.displaySnapshotFor(MEMBER.provider, MEMBER.account)
+  assert.equal(recovered.stale, false)
+  assert.equal(recovered.refreshFailed, false)
+  assert.equal(recovered.retryAt, undefined)
+  assert.ok(recovered.fetchedAt! > first.fetchedAt!)
+  assert.deepEqual(raw, { supported: true, windows: [{ kind: 'weekly', usedPercent: 100 }] })
+})

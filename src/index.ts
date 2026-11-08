@@ -444,8 +444,11 @@ export class SubscriptionsAuthController implements AuthController {
     if (force) this.onUsageForced?.(provider, account)
     const fetcher = this.usageFetchers[provider]
     if (fetcher === undefined) return Promise.resolve({ supported: false })
-    if (this.poolUsage === undefined) return fetcher(account, signal)
-    return this.poolUsage.snapshotFor(provider, account, force)
+    if (this.poolUsage === undefined) return fetcher(account, signal).then(snapshot => {
+      const fetchedAt = Date.now()
+      return { ...snapshot, fetchedAt, staleAt: fetchedAt + 5 * 60_000 }
+    })
+    return this.poolUsage.displaySnapshotFor(provider, account, force)
   }
 
   async readImage(ref: ImageAttachmentRef, signal: AbortSignal): Promise<ImageBytesResult> {
