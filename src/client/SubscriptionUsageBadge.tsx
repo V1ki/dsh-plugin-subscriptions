@@ -20,7 +20,7 @@
  * user-visible string goes through the locale `t` of the
  * 'settings.subscriptions' namespace.
  */
-import { quotaPercent, quotaText, quotaIsStale, UsageFreshness, useQuotaClock } from './quota-display.js'
+import { quotaPercent, quotaText, quotaIsStale, quotaUnavailableText, UsageFreshness, useQuotaClock } from './quota-display.js'
 import { readUsageCache, subscribeUsage, failUsage } from './usage-cache.js'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ComponentType, CSSProperties } from 'react'
@@ -85,6 +85,7 @@ export interface AccountUsageDisplay {
   isDefault: boolean
   windows: UsageWindow[]
   usage?: ProviderUsage
+  loadFailed?: boolean
 }
 
 /** Every signed-in account, including those with unknown quota. */
@@ -190,7 +191,7 @@ export function compactSegment(d: ProviderUsageDisplay, model?: string, t: Trans
   const source = t(account.isDefault ? 'quotaDefaultAccount' : 'quotaListedAccount')
   const freshness = account.usage && quotaIsStale(account.usage) ? ` · ${t('quotaStale')}` : ''
   const prefix = `${d.name} · ${source}`
-  if (windows.length === 0) return `${prefix} · ${t('quotaUnknown')}${freshness}`
+  if (windows.length === 0) return `${prefix} · ${quotaUnavailableText(account.usage, account.loadFailed === true, t) ?? t('usageNoVisibleModels')}`
   if (d.provider === 'antigravity') {
     const matching = model === undefined ? [] : windows.filter(w => w.scope === model)
     if (matching.length === 0) {
@@ -293,6 +294,7 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
   // cooldown) so a row doesn't flicker away — it only disappears once the
   // account logs out. A successful unsupported response replaces old windows.
   const lastKnownRef = useRef(new Map<string, ProviderUsage>())
+  const failedAccountsRef = useRef(new Set<string>())
   const namesRevision = useRef(0)
   const recentNames = useRef(new Map<SubscriptionProvider, { revision: number; name: string }>())
 
@@ -323,9 +325,11 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
       const keyOf = (provider: SubscriptionProvider, account: AccountStatus): string => `${provider}:${account.key}`
 
       const lastKnown = lastKnownRef.current
+      const failedAccounts = failedAccountsRef.current
       // Drop last-known state for anything no longer logged in — that is a
       // real signal, unlike a fetch failure.
       const live = new Set(roster.map(({ provider, account }) => keyOf(provider, account)))
+      for (const key of failedAccounts) if (!live.has(key)) failedAccounts.delete(key)
       for (const key of lastKnown.keys()) {
         if (!live.has(key)) lastKnown.delete(key)
       }
@@ -348,8 +352,11 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
       for (const [index, result] of results.entries()) {
         const { provider, account } = roster[index]!
         const key = keyOf(provider, account)
-        if (result.status === 'fulfilled') lastKnown.set(key, result.value.usage)
-        else {
+        if (result.status === 'fulfilled') {
+          lastKnown.set(key, result.value.usage)
+          failedAccounts.delete(key)
+        } else {
+          if (!cacheOnly) failedAccounts.add(key)
           const previous = lastKnown.get(key)
           if (previous) lastKnown.set(key, { ...previous, stale: true, refreshFailed: true })
         }
@@ -363,6 +370,7 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
         const plan = usage?.plan ?? account.plan
         const row: AccountUsageDisplay = {
           key: account.key,
+          loadFailed: failedAccounts.has(key),
           ...usage === undefined ? {} : { usage },
           isDefault: account.isDefault,
           ...account.account === undefined ? {} : { account: account.account },
@@ -556,8 +564,8 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
                       <AccountMeta account={account} translate={translate} />
                     </div>
                   )}
-                  {account.usage && <UsageFreshness usage={account.usage} t={translate} />}
-                  {account.windows.length === 0 && !account.usage?.windows?.length ? <p style={styles.providerMeta}>{translate('quotaUnknown')}</p> : <AccountWindows
+                  <UsageFreshness usage={account.usage} failed={account.loadFailed === true} t={translate} />
+                  {!!account.usage?.windows?.length && <AccountWindows
                     key={`${d.provider}:${badgeSelection?.model ?? ''}`}
                     windows={account.windows}
                     model={d.provider === badgeSelection?.provider ? badgeSelection.model : undefined}

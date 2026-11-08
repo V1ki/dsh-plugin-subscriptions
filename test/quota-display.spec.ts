@@ -55,3 +55,46 @@ test('shared usage reads and notifications do not issue RPCs; failures retain me
   assert.equal(calls, 4)
   unsubscribe()
 })
+
+test('freshness messages distinguish unsupported, empty, failed and legacy data in both locales', async () => {
+  const { usageFreshnessText } = await import('../src/client/quota-display.js')
+  const windows = [{ kind: 'weekly' as const, usedPercent: 28 }]
+  for (const dictionary of [en, zh]) {
+    const t = (key: keyof typeof en, params?: Record<string, unknown>) => dictionary[key].replace(/\{(\w+)\}/g, (_, name) => String(params?.[name] ?? ''))
+    assert.equal(usageFreshnessText({ supported: false }, false, t), t('quotaUnsupported'))
+    assert.equal(usageFreshnessText({ supported: true, windows: [] }, false, t), t('usageEmpty'))
+    assert.equal(usageFreshnessText(undefined, true, t), t('quotaFailedNoData'))
+    const legacy = { supported: true, windows, receivedAt: 1000 }
+    assert.equal(usageFreshnessText(legacy, false, t), t('quotaReceivedAt', { date: new Date(1000).toLocaleString() }))
+    assert.equal(usageFreshnessText({ ...legacy, fetchedAt: 200 }, false, t), t('quotaFetchedAt', { date: new Date(200).toLocaleString() }))
+    for (const invalid of [null, NaN, Infinity, -1]) {
+      assert.equal(usageFreshnessText({ ...legacy, fetchedAt: invalid as number }, false, t), usageFreshnessText(legacy, false, t))
+    }
+    assert.ok(usageFreshnessText({ ...legacy, staleAt: 1 }, false, t, 2000).includes(t('quotaStale')), 'known expiry is used even without fetchedAt')
+    assert.ok(usageFreshnessText(legacy, true, t).includes(t('quotaRefreshFailed')))
+    assert.equal(usageFreshnessText({ supported: true, windows }, false, t), t('quotaUpdateTimeMissing'))
+  }
+})
+
+test('receipt times cannot masquerade as quota fetch times; cache remains account and connection scoped', async () => {
+  const raw = { supported: true, windows: [{ kind: 'weekly', usedPercent: 28 }] }
+  let reject = false
+  const rpc = { call: async () => {
+    if (reject) throw new Error('offline')
+    return { ok: true, value: raw }
+  } } as unknown as ConnectionHandle['rpc']
+  const request = { provider: 'codex', account: 'a' }
+  const response = await callSubscriptionsAuth<import('../src/client/SubscriptionsSection.js').ProviderUsage>(rpc, 'usage', { ...request, force: true })
+  assert.ok(response.receivedAt! > 0)
+  assert.equal(response.fetchedAt, undefined)
+  assert.equal(response.staleAt, undefined)
+  assert.equal('receivedAt' in raw, false)
+  assert.equal(readUsageCache(rpc, 'codex:a'), response)
+  assert.equal(readUsageCache(rpc, 'codex:b'), undefined)
+  const otherConnection = { ...rpc }
+  assert.equal(readUsageCache(otherConnection, 'codex:a'), undefined)
+  reject = true
+  await assert.rejects(callSubscriptionsAuth(rpc, 'usage', request), /offline/)
+  assert.equal(readUsageCache(rpc, 'codex:a')?.receivedAt, response.receivedAt)
+  assert.equal(readUsageCache(rpc, 'codex:a')?.refreshFailed, true)
+})

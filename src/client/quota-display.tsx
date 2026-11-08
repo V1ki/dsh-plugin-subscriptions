@@ -19,7 +19,7 @@ export function quotaText(used: unknown, mode: QuotaDisplayMode, t: Translate): 
 
 export function quotaIsStale(usage: ProviderUsage, now = Date.now()): boolean {
   return usage.stale === true || usage.refreshFailed === true
-    || (usage.staleAt !== undefined && now >= usage.staleAt)
+    || (validTimestamp(usage.staleAt) && now >= usage.staleAt)
 }
 
 /** Ticks only the local presentation clock; never fetches usage. */
@@ -32,12 +32,37 @@ export function useQuotaClock(): number {
   return now
 }
 
-export function UsageFreshness({ usage, t }: { usage: ProviderUsage; t: Translate }) {
+/** Availability is separate from the age of an existing quota snapshot. */
+export function quotaUnavailableText(usage: ProviderUsage | undefined, failed: boolean, t: Translate): string | undefined {
+  if (usage?.supported === false) return t('quotaUnsupported')
+  if (usage?.windows?.length) return undefined
+  if (failed || usage?.refreshFailed) return t('quotaFailedNoData')
+  return t('usageEmpty')
+}
+
+function validTimestamp(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    && !Number.isNaN(new Date(value).getTime())
+}
+
+/** Receipt time is diagnostic only: a successful RPC can still return an old cache. */
+export function usageFreshnessText(usage: ProviderUsage | undefined, failed: boolean, t: Translate, now = Date.now()): string {
+  const unavailable = quotaUnavailableText(usage, failed, t)
+  if (unavailable !== undefined) return unavailable
+  const snapshot = usage!
+  const time = validTimestamp(snapshot.fetchedAt)
+    ? t('quotaFetchedAt', { date: new Date(snapshot.fetchedAt).toLocaleString() })
+    : validTimestamp(snapshot.receivedAt)
+      ? t('quotaReceivedAt', { date: new Date(snapshot.receivedAt).toLocaleString() })
+      : t('quotaUpdateTimeMissing')
+  return [
+    failed || snapshot.refreshFailed ? t('quotaRefreshFailed') : quotaIsStale(snapshot, now) ? t('quotaStale') : undefined,
+    time,
+    validTimestamp(snapshot.retryAt) ? t('quotaRetryAt', { date: new Date(snapshot.retryAt).toLocaleString() }) : undefined,
+  ].filter(Boolean).join(' · ')
+}
+
+export function UsageFreshness({ usage, failed = false, t }: { usage: ProviderUsage | undefined; failed?: boolean; t: Translate }) {
   const now = useQuotaClock()
-  const parts = [
-    usage.refreshFailed ? t('quotaRefreshFailed') : quotaIsStale(usage, now) ? t('quotaStale') : undefined,
-    usage.fetchedAt === undefined ? t('quotaFreshnessUnknown') : t('quotaFetchedAt', { date: new Date(usage.fetchedAt).toLocaleString() }),
-    usage.retryAt === undefined ? undefined : t('quotaRetryAt', { date: new Date(usage.retryAt).toLocaleString() }),
-  ].filter(Boolean)
-  return <p style={{ margin: '4px 0', fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }}>{parts.join(' · ')}</p>
+  return <p style={{ margin: '4px 0', fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }}>{usageFreshnessText(usage, failed, t, now)}</p>
 }

@@ -85,6 +85,8 @@ export interface UsageWindow {
 
 /** `usage` endpoint value: the node half owns this shape. */
 export interface ProviderUsage {
+  /** Browser receipt time, NOT proof of an upstream quota refresh. Memory-only. */
+  receivedAt?: number
   /** Display-only telemetry; does not affect routing or cooldown decisions. */
   fetchedAt?: number
   staleAt?: number
@@ -915,9 +917,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
               const nextReset = sortedCredits.find(c => c.expiresAt === undefined || c.expiresAt > Date.now())
               const resetBlock = usage ? resetActionBlock(usage) : 'resetUseRefresh'
               const resetDisabled = resetBusy || resetBlock !== undefined
-              // Providers without a usage endpoint answer supported:false — no block.
-              const showUsage = usage?.supported !== false
-                && (usage !== undefined || usageError !== undefined || usageLoading[usageKey] === true)
+              const showUsage = usage !== undefined || usageError !== undefined || usageLoading[usageKey] === true
               return (
                 <div key={account.key} style={styles.accountRow}>
                   <div style={styles.accountHeader}>
@@ -955,14 +955,14 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                         {usage?.plan !== undefined && (
                           <span style={styles.usagePlan}>{t('usagePlan', { plan: usage.plan })}</span>
                         )}
-                        <button
+                        {usage?.supported !== false && <button
                           type="button"
                           style={styles.usageRefresh}
                           disabled={usageLoading[usageKey] === true}
                           onClick={() => { void loadUsage(id, account.key, true) }}
                         >
                           {t('usageRefresh')}
-                        </button>
+                        </button>}
                       </div>
                       {usage && <UsageFreshness usage={usage} t={t} />}
                       {usage === undefined && usageError === undefined && (
@@ -970,9 +970,6 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                       )}
                       {usageError !== undefined && (
                         <p style={styles.errorLine}>{t('usageError', { message: usageError })}</p>
-                      )}
-                      {usage?.supported && !usage.windows?.length && (
-                        <p style={styles.statusLine}>{t('usageEmpty')}</p>
                       )}
                       {usage?.windows !== undefined && usage.windows.length > 0 && shownWindows.length === 0 && (
                         <p style={styles.statusLine}>{t('usageNoVisibleModels')}</p>
