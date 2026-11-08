@@ -39,11 +39,17 @@ export async function callSubscriptionsAuth<T>(rpc: ConnectionHandle['rpc'], end
     if (usageKey) failUsage(rpc, usageKey)
     throw new SubscriptionsAuthError(result.error.message)
   }
-  if (usageKey) publishUsage(rpc, usageKey, result.value as ProviderUsage)
+  let value = result.value
+  if (usageKey) {
+    // The server may return cached usage even for force=true. Keep receipt
+    // time separate; never manufacture fetchedAt or reset server freshness.
+    value = { ...value as ProviderUsage, receivedAt: Date.now() }
+    publishUsage(rpc, usageKey, value as ProviderUsage)
+  }
   if (endpoint === 'status') {
     const status = result.value as { providers: Record<string, ProviderStatus> }
     retainUsageAccounts(rpc, new Set(Object.entries(status.providers).flatMap(([provider, state]) =>
       state.accounts.map(account => `${provider}:${account.key}`))))
   }
-  return result.value as T
+  return value as T
 }
