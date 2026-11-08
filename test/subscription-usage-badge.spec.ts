@@ -53,6 +53,8 @@ test('Codex exhaustion notice renders localized credits and reset guidance only 
     assert.ok(render().includes(dictionary.usageBadgeAllCodexExhausted))
     d.accounts[1]!.windows[0]!.usedPercent = 99.99
     assert.equal(render(), '', 'do not treat rounded 100% as exhaustion')
+    d.accounts[1]!.windows[0]!.usedPercent = Infinity
+    assert.equal(render(), '', 'non-finite telemetry is unknown, not exhaustion')
     d.accounts[1]!.windows = []
     assert.equal(render(), '', 'unknown usage is not known exhaustion')
     d.accounts[1]!.windows = [{ kind: 'session', usedPercent: 105 }]
@@ -64,16 +66,16 @@ test('Codex exhaustion notice renders localized credits and reset guidance only 
 
 test('Antigravity compact readout selects exact current model, not the entire catalog', () => {
   const d = display('antigravity', [...windows, { kind: 'weekly', scope: 'gemini-model-59', usedPercent: 81 }])
-  assert.equal(compactSegment(d, 'gemini-model-59'), 'Antigravity Window 59% · Weekly 81%')
-  assert.equal(compactSegment(d), 'Antigravity 60 model quotas')
-  assert.equal(compactSegment(d, 'missing'), 'Antigravity Current model quota unavailable')
-  assert.ok(compactSegment(d, 'gemini-model-1').length < 60)
+  assert.equal(compactSegment(d, 'gemini-model-59'), 'Antigravity · Default account Window 59% used · Weekly 81% used')
+  assert.equal(compactSegment(d), 'Antigravity · Default account 60 model quotas')
+  assert.equal(compactSegment(d, 'missing'), 'Antigravity · Default account Current model quota unavailable')
+  assert.ok(compactSegment(d, 'gemini-model-1').length < 90)
 })
 
-test('compact summary uses default account and preserves bounded non-Antigravity windows', () => {
+test('compact summary counts signed-in accounts without aggregating their percentages', () => {
   const d = display('codex', [{ kind: 'session', usedPercent: 13 }, { kind: 'weekly', usedPercent: 25 }])
   d.accounts.unshift({ key: 'other', isDefault: false, windows: [{ kind: 'session', usedPercent: 99 }] })
-  assert.equal(compactSegment(d), 'Codex 5h 13% · Wk 25%')
+  assert.equal(compactSegment(d), 'Codex · 2 signed-in accounts')
   assert.ok(compactSegment(display('codex')).endsWith('+58'))
 })
 
@@ -198,4 +200,18 @@ test('model reader observes switches within the same provider and handles missin
   assert.deepEqual(await read(), { provider: 'antigravity', model: 'two' })
   assert.equal(await createCurrentModelReader(() => undefined, 'session')(), undefined)
   assert.equal(await createCurrentModelReader(() => ({ directoryFor: () => ({ load: async () => ({ current: null }) }) }), 'session')(), undefined)
+})
+
+
+test('single-account summaries identify fallback source, mode, stale data and unknown values', () => {
+  const d = display('claude', [{ kind: 'weekly', scope: 'Opus', usedPercent: 28 }])
+  d.accounts[0]!.isDefault = false
+  d.accounts[0]!.usage = { supported: true, stale: true, fetchedAt: 1 }
+  assert.match(compactSegment(d, undefined, undefined, 'remaining'), /Listed account.*72% remaining.*stale/)
+  d.accounts[0]!.windows[0]!.usedPercent = NaN
+  assert.match(compactSegment(d, undefined, undefined, 'remaining'), /Unknown quota/)
+  assert.doesNotMatch(compactSegment(d, undefined, undefined, 'remaining'), /100%/)
+  d.accounts.push({ key: 'unknown', isDefault: false, windows: [] })
+  assert.match(compactSegment(d), /2 signed-in accounts/)
+  assert.doesNotMatch(compactSegment(d), /%/)
 })

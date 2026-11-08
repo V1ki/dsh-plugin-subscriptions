@@ -45,6 +45,7 @@ export interface MemberQuota {
 /** A successful snapshot, cached until `ttlMs` (or the entry's own `cooldownMs`) elapses. */
 interface SnapshotEntry {
   snapshot: ProviderUsage
+  fetchedAt?: number
   error?: undefined
   at: number
   cooldownMs?: undefined
@@ -71,6 +72,7 @@ interface FailureEntry {
   cooldownMs: number
   /** The last successful snapshot before this failure, when one exists. */
   lastSnapshot?: ProviderUsage
+  lastSnapshotAt?: number
 }
 
 type CacheEntry = SnapshotEntry | FailureEntry
@@ -184,6 +186,21 @@ export class PoolUsageTracker {
     }
   }
 
+  /** Decorate a copy for UI consumers; raw snapshots and routing stay unchanged. */
+  async displaySnapshotFor(provider: ProviderId, account: string, force = false): Promise<ProviderUsage> {
+    const snapshot = await this.snapshotFor(provider, account, force)
+    const entry = this.entries.get(`${provider}/${account}`)
+    if (!entry) return snapshot
+    const fetchedAt = entry.snapshot !== undefined ? (entry.fetchedAt ?? entry.at) : entry.lastSnapshotAt
+    return {
+      ...snapshot,
+      ...(fetchedAt === undefined || !Number.isFinite(fetchedAt) ? {} : { fetchedAt, staleAt: fetchedAt + this.ttlMs }),
+      stale: entry.snapshot === undefined || Date.now() - entry.at >= this.ttlMs,
+      refreshFailed: entry.snapshot === undefined,
+      ...(entry.snapshot === undefined ? { retryAt: entry.at + entry.cooldownMs } : {}),
+    }
+  }
+
   /** Recheck after an inference quota failure without erasing another model lane's exhaustion. */
   expire(provider: ProviderId, account: string): void {
     const key = `${provider}/${account}`
@@ -221,9 +238,11 @@ export class PoolUsageTracker {
       // consecutive failure, even though nothing newer ever replaced it.
       const prior = this.entries.get(key)
       const lastSnapshot = prior?.snapshot ?? prior?.lastSnapshot
+      const lastSnapshotAt = prior?.snapshot !== undefined ? (prior.fetchedAt ?? prior.at) : prior?.lastSnapshotAt
       pending = fetcher().then(
         (snapshot) => {
-          this.entries.set(key, { snapshot, at: Date.now() })
+          const fetchedAt = Date.now()
+          this.entries.set(key, { snapshot, at: fetchedAt, fetchedAt })
           return snapshot
         },
         (error: unknown) => {
@@ -233,6 +252,7 @@ export class PoolUsageTracker {
               at: Date.now(),
               cooldownMs: cooldownFor(error, this.ttlMs),
               ...lastSnapshot === undefined ? {} : { lastSnapshot },
+              ...lastSnapshotAt === undefined ? {} : { lastSnapshotAt },
             })
           }
           throw error

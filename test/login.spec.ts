@@ -328,8 +328,13 @@ test('login(codex): status stays busy through the token exchange so the Settings
       assert.equal(during.accounts.length, 0)
 
       releaseExchange!({ accessToken: 'at', refreshToken: 'rt', expiresAt: Date.now() + 3600_000, accountId: 'acct-1', emailAddress: 'me@example.com' } as StoredSession)
-      await new Promise(resolve => setTimeout(resolve, 50))
-      const after = await controller.status('codex')
+      // Persistence may take longer than 50 ms under the parallel test runner.
+      const deadline = Date.now() + 2000
+      let after = await controller.status('codex')
+      while (after.busy && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 5))
+        after = await controller.status('codex')
+      }
       assert.equal(after.busy, false, 'settled once the session is stored')
       assert.equal(after.accounts.length, 1)
       assert.equal(after.accounts[0]?.account, 'me@example.com')
