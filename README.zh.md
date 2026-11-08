@@ -230,6 +230,12 @@ Codex 的 **速度** 控件与 `/fast` 按底层模型（与其独立账号入�
 （subagent）的请求没有插件可见的标记，因此与主对话一样遵循该设置。修改后需重启 DSH 生效，且只影响
 Claude；Codex、Grok、Copilot 与 Antigravity 使用各自的缓存机制。
 
+Claude 的扩展思考按 Claude Code 的方式回放：每个 `thinking` 块的签名（以及每个 `redacted_thinking` 的载荷）
+随助手消息保存，并在之后发往同一账号、同一模型的请求中按原位置发回。在工具循环里，模型因此能接着之前的
+推理继续，而不必在每次拿到工具结果后重新推导。签名只对签发它的模型有效，所以来自其他模型、provider 或
+池成员的历史仍像以前一样不带思考发送；旧版本保存的推理没有签名，同样会被跳过。缓存断点不会落在思考块上
+（Anthropic 会拒绝）。
+
 `wire`（仅 copilot 条目）把模型固定到 `chat-completions` 或 `responses`。不加该字段手工条目照常
 工作——它存在的原因是:实时目录不认识的手工模型否则会默认走 `/chat/completions`，而
 responses-only 系列（gpt-5.5/5.6 等）会拒绝该端点。固定为 `chat-completions` 也会退出上文所述

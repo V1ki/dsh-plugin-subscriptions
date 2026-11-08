@@ -621,7 +621,9 @@ export function claudeRequestBody(
   cacheTtl?: PromptCacheTtl,
 ): Record<string, unknown> {
   const ttl = options.purpose === undefined ? cacheTtl : undefined
-  const anthropicMessages = toAnthropicMessages(messages)
+  // Signed thinking goes back only to the route and model that produced it;
+  // the account pool has already narrowed replay to the same account.
+  const anthropicMessages = toAnthropicMessages(messages, { provider: options.provider, model: options.model })
   markMessageCache(anthropicMessages, ttl)
   return {
     model: options.model,

@@ -237,6 +237,14 @@ minutes to preserve their existing auxiliary-request behavior. Requests from sub
 along with the main conversation. It takes effect after restarting DSH and affects Claude only; Codex, Grok,
 Copilot and Antigravity use their own caching.
 
+Claude's extended thinking is replayed the way Claude Code replays it: each `thinking` block's signature (and each
+`redacted_thinking` payload) is kept with the assistant message and sent back, in its original position, on later
+requests to the same account and model. In a tool loop that lets the model continue from its earlier reasoning
+instead of re-deriving it after every tool result. Signatures are only valid for the model that issued them, so
+history from another model, provider or pool member is sent without its thinking, as before; reasoning stored by
+earlier releases carries no signature and is skipped the same way. Cache breakpoints never land on a thinking
+block, which Anthropic rejects.
+
 `wire` (copilot entries only) pins a model to `chat-completions` or `responses`. Manual
 entries keep working without it — the field exists because a configured model the live
 catalog does not know would otherwise default to `/chat/completions`, which
