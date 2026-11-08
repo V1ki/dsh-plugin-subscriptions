@@ -472,6 +472,30 @@ test('toAnthropicMessages: merge, tool_use input parsing, tool_result', () => {
   assert.deepEqual(malformed[0].content[0], { type: 'tool_use', id: 'c', name: 'n', input: {} })
 })
 
+test('toAnthropicMessages: tool-call ids from other providers are sanitized consistently', () => {
+  // Switching to Claude mid-session replays ids minted by another provider;
+  // Anthropic only accepts ^[a-zA-Z0-9_-]+$ for tool_use.id / tool_use_id.
+  const messages = toAnthropicMessages([
+    message('user', [{ type: 'text', text: 'go' }]),
+    message('assistant', [toolCall('call.1:a|b', 'bash', '{}'), toolCall('toolu_01-ok', 'bash', '{}')]),
+    message('user', [toolResult('call.1:a|b', 'one'), toolResult('toolu_01-ok', 'two')]),
+  ])
+  const ids = [
+    ...messages[1].content.map(block => block.id),
+    ...messages[2].content.map(block => block.tool_use_id),
+  ]
+  assert.deepEqual(ids, ['call_1_a_b', 'toolu_01-ok', 'call_1_a_b', 'toolu_01-ok'])
+  for (const id of ids) assert.match(String(id), /^[a-zA-Z0-9_-]+$/)
+
+  // A dedicated tool-role message goes through the same mapping.
+  const toolRole = toAnthropicMessages([
+    message('assistant', [toolCall('fc.9', 'bash', '{}')]),
+    { ...message('tool', [{ type: 'text', text: 'ok' }]), toolCallId: 'fc.9' } as unknown as Message,
+  ])
+  assert.equal(toolRole[0].content[0].id, 'fc_9')
+  assert.equal(toolRole[1].content[0].tool_use_id, 'fc_9')
+})
+
 test('toAnthropicMessages: a replayed tool call in a user message rides as text', () => {
   // A settled background subagent's closing message is spliced into the parent
   // conversation as a user-role notice, carrying the subagent's own blocks —
