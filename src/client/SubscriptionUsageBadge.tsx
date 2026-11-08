@@ -12,15 +12,16 @@
  * poll (the server shares its cache across UI surfaces); the current model
  * comes from ui-model-selection's `modelDirectories` service on a quicker
  * poll, since the host pushes nothing on a model switch. Renders nothing when
- * no provider has a logged-in account that reports usage.
+ * the selected provider has no logged-in accounts. Unknown quotas stay explicit.
  *
- * The collapsed pill reads only the default account — the same account
- * direct (non-pool) routes serve — so it stays one short segment even for a
- * provider with several accounts connected; the dialog shows them all.
+ * The collapsed pill summarizes signed-in accounts, never an aggregate pool
+ * percentage. A single account readout identifies its default/listed source.
  * Every color resolves through a `--dsw-*` design token and every
  * user-visible string goes through the locale `t` of the
  * 'settings.subscriptions' namespace.
  */
+import { quotaPercent, quotaText, quotaIsStale, UsageFreshness, useQuotaClock } from './quota-display.js'
+import { readUsageCache, subscribeUsage, failUsage } from './usage-cache.js'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ComponentType, CSSProperties } from 'react'
 import { subscriptionChromeCss } from './provider-settings-styles.js'
@@ -35,7 +36,7 @@ import type { ModelDirectoriesLike } from './SpeedSelect.js'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
 import { hostIcon } from './host-icons.js'
-import { useUsageBadgeMode } from './usage-badge-preferences.js'
+import { useUsageBadgeMode, useQuotaDisplayMode, type QuotaDisplayMode } from './usage-badge-preferences.js'
 import { visibleUsageWindows } from './usage-window-filter.js'
 import { DISPLAY_NAME_CHANGED, type DisplayNameChange } from './display-name-events.js'
 
@@ -80,12 +81,13 @@ export interface AccountUsageDisplay {
   /** Display handle (email / login), when the provider reports one. */
   account?: string
   plan?: string
-  /** The account direct routes serve; the collapsed pill reads this one. */
+  /** Configured default, not evidence of which account served a request. */
   isDefault: boolean
   windows: UsageWindow[]
+  usage?: ProviderUsage
 }
 
-/** One provider's usage snapshot: every logged-in account that reports windows. */
+/** Every signed-in account, including those with unknown quota. */
 export interface ProviderUsageDisplay {
   provider: SubscriptionProvider
   name: string
@@ -100,7 +102,7 @@ export function CodexExhaustionNotice({ display, translate }: {
 }) {
   if (display.provider !== 'codex' || display.accounts.length === 0
     || !display.accounts.every(account => account.windows.some(window =>
-      window.scope === undefined && window.usedPercent >= 100))) return null
+      window.scope === undefined && Number.isFinite(window.usedPercent) && window.usedPercent >= 100))) return null
   return <p role="status">{translate('usageBadgeAllCodexExhausted')}</p>
 }
 
@@ -160,11 +162,6 @@ export function windowLabel(w: UsageWindow): string {
   return `${Math.max(1, minutes)}m`
 }
 
-/** Clamp and round a window's used share for display. */
-function usedPercent(w: UsageWindow): number {
-  return Math.round(Math.min(100, Math.max(0, w.usedPercent)))
-}
-
 /** Keep model quotas separate: matching percentages do not imply a shared pool. */
 export function prioritizeWindows(windows: readonly UsageWindow[], model?: string): UsageWindow[] {
   return model === undefined ? [...windows] : [
@@ -185,21 +182,28 @@ export function previewWindows(windows: readonly UsageWindow[], model?: string, 
 }
 
 /** Bounded readout; Antigravity quotas belong to individual models, not the account. */
-export function compactSegment(d: ProviderUsageDisplay, model?: string, t: Translate = fallbackTranslate): string {
-  const windows = pillAccountOf(d).windows
+export function compactSegment(d: ProviderUsageDisplay, model?: string, t: Translate = fallbackTranslate, mode: QuotaDisplayMode = 'used'): string {
+  if (d.accounts.length > 1) return `${d.name} · ${t('quotaSignedIn', { count: d.accounts.length })}`
+  const account = pillAccountOf(d)
+  if (!account) return `${d.name} · ${t('quotaUnknown')}`
+  const windows = account.windows
+  const source = t(account.isDefault ? 'quotaDefaultAccount' : 'quotaListedAccount')
+  const freshness = account.usage && quotaIsStale(account.usage) ? ` · ${t('quotaStale')}` : ''
+  const prefix = `${d.name} · ${source}`
+  if (windows.length === 0) return `${prefix} · ${t('quotaUnknown')}${freshness}`
   if (d.provider === 'antigravity') {
     const matching = model === undefined ? [] : windows.filter(w => w.scope === model)
     if (matching.length === 0) {
-      return `${d.name} ${t(model === undefined ? 'usageBadgeModelCount' : 'usageBadgeModelUnavailable', {
+      return `${prefix} ${t(model === undefined ? 'usageBadgeModelCount' : 'usageBadgeModelUnavailable', {
         count: new Set(windows.map(w => w.scope).filter(Boolean)).size,
-      })}`
+      })}${freshness}`
     }
-    const parts = matching.slice(0, 2).map(w => `${w.kind === 'weekly' ? t('usageWeekly') : t('usageWindow')} ${usedPercent(w)}%`)
-    return `${d.name} ${parts.join(' · ')}`
+    const parts = matching.slice(0, 2).map(w => `${w.kind === 'weekly' ? t('usageWeekly') : t('usageWindow')} ${quotaText(w.usedPercent, mode, t)}`)
+    return `${prefix} ${parts.join(' · ')}${freshness}`
   }
-  const parts = windows.slice(0, 2).map(w => `${windowLabel(w)} ${usedPercent(w)}%`)
+  const parts = windows.slice(0, 2).map(w => `${w.resetsAt !== undefined && w.resetsAt <= Date.now() ? t('quotaExpiredWindow') : windowLabel(w)} ${quotaText(w.usedPercent, mode, t)}`)
   if (windows.length > 2) parts.push(`+${windows.length - 2}`)
-  return `${d.name} ${parts.join(' · ')}`
+  return `${prefix} ${parts.join(' · ')}${freshness}`
 }
 
 type ModelSelection = { provider: string; model: string }
@@ -231,15 +235,12 @@ export function expandedDisplays(
 }
 
 /**
- * A provider's logged-in accounts, the effective default first. When no
- * account is flagged default the first listed stands in, matching what
- * direct routes fall back to.
+ * A provider's logged-in accounts, configured default first. Do not invent a
+ * default flag when the server does not report one.
  */
 function accountsOf(status: ProviderStatus | undefined): AccountStatus[] {
   if (status === undefined || status.accounts.length === 0) return []
-  const fallback = status.accounts.find(a => a.isDefault) ?? status.accounts[0]!
-  return status.accounts
-    .map(a => (a === fallback ? { ...a, isDefault: true } : a))
+  return [...status.accounts]
     .sort((a, b) => Number(b.isDefault) - Number(a.isDefault))
 }
 
@@ -261,8 +262,7 @@ function usageWindowLabel(t: Translate, window: UsageWindow): string {
 /**
  * The composer subscription-usage badge: a pill reading e.g.
  * `Codex 6d 1h 25%` for the current model's provider, opening a dialog with
- * every provider's accounts and their windows. Returns null when no data is
- * available.
+ * every provider's accounts and their windows, including unavailable telemetry.
  */
 export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsageBadgeProps) {
   const translate: Translate = t ?? fallbackTranslate
@@ -270,11 +270,14 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
   const [selection, setSelection] = useState<ModelSelection | undefined>(undefined)
   const [lastSubscription, setLastSubscription] = useState<ModelSelection | undefined>(undefined)
   const displayMode = useUsageBadgeMode()
+  const quotaMode = useQuotaDisplayMode()
+  useQuotaClock()
   const current = selection?.provider
   const badgeSelection = retainSubscriptionSelection(lastSubscription, selection)
   const [open, setOpen] = useState(false)
   const [hover, setHover] = useState(false)
   const inflightRef = useRef(false)
+  const cacheSyncRequested = useRef(false)
   const mountedRef = useRef(true)
   const rootRef = useRef<HTMLSpanElement | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
@@ -285,23 +288,29 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
   // re-render; the model poll mounts once and reads through this ref.
   const currentRef = useRef(currentModel)
   currentRef.current = currentModel
-  // Last-known-good windows per account (keyed `provider:accountKey`), kept
+  // Last-known usage and freshness per account (keyed `provider:accountKey`), kept
   // across a failed poll (e.g. a 429 during the server's own negative-cache
   // cooldown) so a row doesn't flicker away — it only disappears once the
-  // account actually logs out or a fetch succeeds but reports the window as
-  // unsupported.
-  const lastKnownRef = useRef(new Map<string, UsageWindow[]>())
+  // account logs out. A successful unsupported response replaces old windows.
+  const lastKnownRef = useRef(new Map<string, ProviderUsage>())
   const namesRevision = useRef(0)
   const recentNames = useRef(new Map<SubscriptionProvider, { revision: number; name: string }>())
 
-  const refresh = useCallback(async (): Promise<void> => {
-    if (rpc === undefined || inflightRef.current) return
+  const statusRef = useRef<{ providers: Record<SubscriptionProvider, ProviderStatus> }>()
+  const refresh = useCallback(async (cacheOnly = false): Promise<void> => {
+    if (rpc === undefined) return
+    if (inflightRef.current) {
+      if (cacheOnly) cacheSyncRequested.current = true
+      return
+    }
     inflightRef.current = true
     const revision = namesRevision.current
     try {
-      const statusResp = await callSubscriptionsAuth<{
+      const statusResp = cacheOnly ? statusRef.current : await callSubscriptionsAuth<{
         providers: Record<SubscriptionProvider, ProviderStatus>
       }>(rpc, 'status', {})
+      if (!statusResp) return
+      statusRef.current = statusResp
       if (!mountedRef.current) return
 
       // Every logged-in account of every provider, in a stable order (the
@@ -328,33 +337,33 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
 
       const results = await Promise.allSettled(
         roster.map(async ({ provider, account }) => {
-          const usage = await callSubscriptionsAuth<ProviderUsage>(rpc, 'usage', { provider, account: account.key })
+          const usage = cacheOnly ? readUsageCache(rpc, keyOf(provider, account))
+            : await callSubscriptionsAuth<ProviderUsage>(rpc, 'usage', { provider, account: account.key })
+          if (!usage) throw new Error('No cached quota')
           return { provider, account, usage }
         }),
       )
       if (!mountedRef.current) return
 
-      const plans = new Map<string, string>()
-      for (const r of results) {
-        if (r.status !== 'fulfilled') continue // keep whatever is cached for this account
-        const { provider, account, usage } = r.value
+      for (const [index, result] of results.entries()) {
+        const { provider, account } = roster[index]!
         const key = keyOf(provider, account)
-        if (usage.plan !== undefined) plans.set(key, usage.plan)
-        if (!usage.supported || !usage.windows || usage.windows.length === 0) {
-          lastKnown.delete(key)
-          continue
+        if (result.status === 'fulfilled') lastKnown.set(key, result.value.usage)
+        else {
+          const previous = lastKnown.get(key)
+          if (previous) lastKnown.set(key, { ...previous, stale: true, refreshFailed: true })
         }
-        lastKnown.set(key, usage.windows)
       }
 
       const byProvider = new Map<SubscriptionProvider, ProviderUsageDisplay>()
       for (const { provider, account } of roster) {
         const key = keyOf(provider, account)
-        const windows = lastKnown.get(key)
-        if (windows === undefined) continue
-        const plan = plans.get(key) ?? account.plan
+        const usage = lastKnown.get(key)
+        const windows = usage?.windows ?? []
+        const plan = usage?.plan ?? account.plan
         const row: AccountUsageDisplay = {
           key: account.key,
+          ...usage === undefined ? {} : { usage },
           isDefault: account.isDefault,
           ...account.account === undefined ? {} : { account: account.account },
           ...plan === undefined ? {} : { plan },
@@ -372,11 +381,29 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
         return saved && saved.revision > revision ? { ...row, name: saved.name } : row
       }))
     } catch {
-      // A failed poll must not crash the badge; keep last known state.
+      for (const key of lastKnownRef.current.keys()) failUsage(rpc, key)
+      // A failed status read retains values but must not present them as fresh.
+      if (mountedRef.current) setDisplays(previous => previous.map(display => ({ ...display,
+        accounts: display.accounts.map(account => ({ ...account,
+          ...(account.usage ? { usage: { ...account.usage, stale: true, refreshFailed: true } } : {}),
+        })),
+      })))
     } finally {
       inflightRef.current = false
+      if (cacheSyncRequested.current && mountedRef.current) {
+        cacheSyncRequested.current = false
+        queueMicrotask(() => { void refresh(true) })
+      }
     }
   }, [rpc])
+
+  useEffect(() => {
+    if (!rpc || displayMode === 'hidden') return
+    const sync = () => { void refresh(true) }
+    const unsubscribe = subscribeUsage(rpc, sync)
+    window.addEventListener('focus', sync)
+    return () => { unsubscribe(); window.removeEventListener('focus', sync) }
+  }, [rpc, displayMode, refresh])
 
   useEffect(() => {
     const update = (event: Event) => {
@@ -466,7 +493,7 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
   const collapsed = collapsedDisplays(displays, badgeSelection?.provider)
   if (displayMode === 'hidden' || collapsed.length === 0) return seat
 
-  const label = compactSegment(collapsed[0]!, badgeSelection?.model, translate)
+  const label = compactSegment(collapsed[0]!, badgeSelection?.model, translate, quotaMode)
   // The dialog opens from the badge, so it follows the provider and model the
   // badge shows (a retained subscription when the current model is not one).
   const expanded = expandedDisplays(displays, badgeSelection?.provider)
@@ -520,6 +547,7 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
                 </span>
                 {d.accounts.length === 1 && <AccountMeta account={d.accounts[0]!} translate={translate} />}
               </div>
+              <p style={{ ...styles.providerMeta, whiteSpace: 'normal', overflow: 'visible' }}>{translate('quotaAccountsHint')}</p>
               <CodexExhaustionNotice display={d} translate={translate} />
               {d.accounts.map((account, accountIndex) => (
                 <div key={account.key} style={accountIndex === 0 ? undefined : styles.accountBlock}>
@@ -528,13 +556,14 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
                       <AccountMeta account={account} translate={translate} />
                     </div>
                   )}
-                  <AccountWindows
+                  {account.usage && <UsageFreshness usage={account.usage} t={translate} />}
+                  {account.windows.length === 0 && !account.usage?.windows?.length ? <p style={styles.providerMeta}>{translate('quotaUnknown')}</p> : <AccountWindows
                     key={`${d.provider}:${badgeSelection?.model ?? ''}`}
                     windows={account.windows}
                     model={d.provider === badgeSelection?.provider ? badgeSelection.model : undefined}
                     provider={d.provider}
                     translate={translate}
-                  />
+                  />}
                 </div>
               ))}
             </section>
@@ -569,15 +598,15 @@ function statsScopeOf(seat: HTMLElement): HTMLElement | null {
 
 /**
  * One account's handle and plan: `★ ys@example.com · 计划：pro`. The star
- * marks the default account (the one direct routes serve and the collapsed
- * pill reads), the same glyph Settings → 订阅 uses.
+ * marks the configured default, not the serving account. Settings uses the
+ * same glyph.
  */
 function AccountMeta({ account, translate }: { account: AccountUsageDisplay; translate: Translate }) {
-  const parts = [account.account, account.plan === undefined ? undefined : translate('usagePlan', { plan: account.plan })]
+  const parts = [account.account ?? account.key, account.plan === undefined ? undefined : translate('usagePlan', { plan: account.plan })]
     .filter((part): part is string => part !== undefined && part !== '')
   return (
     <span style={styles.providerMeta} title={account.account}>
-      {account.isDefault && <span style={styles.defaultStar} aria-label="default">★ </span>}
+      {account.isDefault && <span style={styles.defaultStar} aria-label={translate('quotaDefaultAccount')} title={translate('quotaDefaultAccount')}>★ </span>}
       {parts.join(' · ')}
     </span>
   )
@@ -592,7 +621,7 @@ export function AccountWindows({ windows, model, provider, translate }: {
   const rows = (items: readonly UsageWindow[]) => (
     <dl style={styles.details}>
       {items.map((w, i) => (
-        <WindowRow key={i} label={`${usageWindowLabel(translate, w)}${model !== undefined && w.scope === model ? ` · ${translate('usageBadgeCurrent')}` : ''}`} window={w} />
+        <WindowRow key={i} label={`${usageWindowLabel(translate, w)}${model !== undefined && w.scope === model ? ` · ${translate('usageBadgeCurrent')}` : ''}`} window={w} translate={translate} />
       ))}
     </dl>
   )
@@ -606,17 +635,18 @@ export function AccountWindows({ windows, model, provider, translate }: {
 }
 
 /** One `dt`/`dd` pair: window name → `25% · 6d 1h`, with the bar underneath. */
-function WindowRow({ label, window: w }: { label: string; window: UsageWindow }) {
-  const percent = usedPercent(w)
+function WindowRow({ label, window: w, translate }: { label: string; window: UsageWindow; translate: Translate }) {
+  const mode = useQuotaDisplayMode()
+  const percent = quotaPercent(w.usedPercent, mode)
   return (
     <>
       <dt style={styles.dt}>{label}</dt>
-      <dd style={styles.dd}>
-        {percent}%
-        {w.resetsAt !== undefined && <span style={styles.reset}> · {windowLabel(w)}</span>}
+      <dd style={{ ...styles.dd, color: usageBarColor(w.usedPercent) }}>
+        {quotaText(w.usedPercent, mode, translate)}
+        {w.resetsAt !== undefined && <span style={styles.reset}> · {w.resetsAt <= Date.now() ? translate('quotaExpiredWindow') : windowLabel(w)}</span>}
       </dd>
       <div style={styles.bar} aria-hidden>
-        <div style={{ ...styles.barFill, width: `${percent}%`, background: usageBarColor(percent) }} />
+        <div style={{ ...styles.barFill, width: `${percent ?? 0}%`, background: usageBarColor(w.usedPercent) }} />
       </div>
     </>
   )
@@ -681,14 +711,14 @@ const styles: Record<string, CSSProperties> = {
   accountRow: { display: 'flex', marginBottom: 4 },
   details: {
     color: 'var(--dsw-alias-label-tertiary)', display: 'grid',
-    gridTemplateColumns: 'minmax(0, 1fr) max-content', gap: '4px 16px', margin: 0,
+    gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '4px 16px', margin: 0,
   },
   moreWindows: { marginTop: 8 },
   moreSummary: { cursor: 'pointer', color: 'var(--dsw-alias-label-secondary)', marginBottom: 8 },
   dt: { minWidth: 0, margin: 0, overflowWrap: 'anywhere' },
   dd: {
     minWidth: 0, margin: 0, color: 'var(--dsw-alias-label-secondary)',
-    fontVariantNumeric: 'tabular-nums', textAlign: 'right',
+    fontVariantNumeric: 'tabular-nums', textAlign: 'right', overflowWrap: 'anywhere',
   },
   reset: { color: 'var(--dsw-alias-label-tertiary)' },
   bar: {

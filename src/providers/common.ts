@@ -514,6 +514,13 @@ export interface ResetCredit {
 
 /** Subscription usage of one provider, as served by the `usage` RPC endpoint. */
 export interface ProviderUsage {
+  /** Display-only telemetry; does not affect routing or cooldown decisions. */
+  fetchedAt?: number
+  staleAt?: number
+  stale?: boolean
+  refreshFailed?: boolean
+  retryAt?: number
+
   /** False when the provider has no usage endpoint (grok); windows are absent then. */
   supported: boolean
   /** Usage windows in display order. */
