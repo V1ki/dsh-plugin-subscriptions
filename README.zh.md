@@ -231,10 +231,19 @@ Codex 的 **速度** 控件与 `/fast` 按底层模型（与其独立账号入�
 Claude；Codex、Grok、Copilot 与 Antigravity 使用各自的缓存机制。
 
 Claude 的扩展思考按 Claude Code 的方式回放：每个 `thinking` 块的签名（以及每个 `redacted_thinking` 的载荷）
-随助手消息保存，并在之后发往同一账号、同一模型的请求中按原位置发回。在工具循环里，模型因此能接着之前的
-推理继续，而不必在每次拿到工具结果后重新推导。签名只对签发它的模型有效，所以来自其他模型、provider 或
-池成员的历史仍像以前一样不带思考发送；旧版本保存的推理没有签名，同样会被跳过。缓存断点不会落在思考块上
-（Anthropic 会拒绝）。
+与收到的思考文本一起随助手消息保存，之后原样按原位置发回。在工具循环里，模型因此能接着之前的推理继续，
+而不必在每次拿到工具结果后重新推导。
+
+本插件保守地只把思考回放给产生它的同一 provider、账号和模型。部分模型支持跨模型回放思考，本插件不启用。
+来自其他模型、provider 或池成员的历史仍像以前一样不带思考发送，旧版本保存的推理也是如此。
+
+Anthropic 会把每个思考块绑定到它之前的全部内容（`system` 提示、`tools` 集合和更早的消息）以及它前一个思考块，
+见 [preserved thinking](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking#prefix-check)。
+插件随每个回复记录这一绑定，只在绑定仍成立时发回思考块：DSH 改动请求中较早的部分（重写系统提示或工具列表、
+裁剪工具结果、压缩摘要）时，依赖它的思考会被略去，其余历史照常发送。作为兜底，发往 Claude 5.1 及以后模型的
+请求还会要求 API 在发现无效块时丢弃而不是拒绝（`block_binding: { prefix_mismatch_behavior: "drop_block" }`，
+配合 `thinking-binding-controls-2026-08-01` beta）；如果 API 仍拒绝某个回放的块，该轮会不带回放思考重试一次。
+缓存断点不会落在思考块上（Anthropic 会拒绝）。
 
 `wire`（仅 copilot 条目）把模型固定到 `chat-completions` 或 `responses`。不加该字段手工条目照常
 工作——它存在的原因是:实时目录不认识的手工模型否则会默认走 `/chat/completions`，而
