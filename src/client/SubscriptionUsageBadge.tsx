@@ -202,12 +202,10 @@ export function compactSegment(d: ProviderUsageDisplay, model?: string, t: Trans
       })}${freshness}`
     }
     const parts = matching.slice(0, 2).map(w => {
-      const label = w.kind === 'weekly' ? t('usageWeekly')
+      const label = w.resetsAt !== undefined && w.resetsAt <= Date.now() ? t('quotaExpiredWindow')
+        : w.kind === 'weekly' ? t('usageWeekly')
         : w.kind === 'session' ? t('usageFiveHourLimit') : t('usageWindow')
-      const remaining = quotaPercent(w.usedPercent, 'remaining')
-      const percent = antigravityQuotaScope(w.scope) && remaining !== undefined
-        ? t('usageRemaining', { percent: remaining }) : quotaText(w.usedPercent, mode, t)
-      return `${label} ${percent}`
+      return `${label} ${quotaText(w.usedPercent, mode, t)}`
     })
     return `${prefix} ${parts.join(' · ')}${freshness}`
   }
@@ -580,6 +578,7 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
                     model={d.provider === badgeSelection?.provider ? badgeSelection.model : undefined}
                     provider={d.provider}
                     translate={translate}
+                    mode={quotaMode}
                   />}
                 </div>
               ))}
@@ -630,18 +629,18 @@ function AccountMeta({ account, translate }: { account: AccountUsageDisplay; tra
 }
 
 /** Preview each account independently; remaining visible quotas stay accessible. */
-export function AccountWindows({ windows, model, provider, translate }: {
-  windows: readonly UsageWindow[]; model: string | undefined; provider?: SubscriptionProvider; translate: Translate
+export function AccountWindows({ windows, model, provider, translate, mode }: {
+  windows: readonly UsageWindow[]; model: string | undefined; provider?: SubscriptionProvider; translate: Translate; mode?: QuotaDisplayMode | undefined
 }) {
   if (windows.length === 0) return <p style={styles.providerMeta}>{translate('usageNoVisibleModels')}</p>
   if (provider === 'antigravity' && windows.some(window => antigravityQuotaScope(window.scope))) {
-    return <AntigravityQuotaSummary windows={windows} t={translate} />
+    return <AntigravityQuotaSummary windows={windows} t={translate} mode={mode} />
   }
   const { shown, hidden } = previewWindows(windows, model, provider)
   const rows = (items: readonly UsageWindow[]) => (
     <dl style={styles.details}>
       {items.map((w, i) => (
-        <WindowRow key={i} label={`${usageWindowLabel(translate, w)}${model !== undefined && (provider === 'antigravity' ? antigravityQuotaApplies(w.scope, model) : w.scope === model) ? ` · ${translate('usageBadgeCurrent')}` : ''}`} window={w} translate={translate} />
+        <WindowRow key={i} label={`${usageWindowLabel(translate, w)}${model !== undefined && (provider === 'antigravity' ? antigravityQuotaApplies(w.scope, model) : w.scope === model) ? ` · ${translate('usageBadgeCurrent')}` : ''}`} window={w} translate={translate} mode={mode} />
       ))}
     </dl>
   )
@@ -655,14 +654,15 @@ export function AccountWindows({ windows, model, provider, translate }: {
 }
 
 /** One `dt`/`dd` pair: window name → `25% · 6d 1h`, with the bar underneath. */
-function WindowRow({ label, window: w, translate }: { label: string; window: UsageWindow; translate: Translate }) {
-  const mode = useQuotaDisplayMode()
-  const percent = quotaPercent(w.usedPercent, mode)
+function WindowRow({ label, window: w, translate, mode }: { label: string; window: UsageWindow; translate: Translate; mode?: QuotaDisplayMode | undefined }) {
+  const selectedMode = useQuotaDisplayMode()
+  const quotaMode = mode ?? selectedMode
+  const percent = quotaPercent(w.usedPercent, quotaMode)
   return (
     <>
       <dt style={styles.dt}>{label}</dt>
       <dd style={{ ...styles.dd, color: usageBarColor(w.usedPercent) }}>
-        {quotaText(w.usedPercent, mode, translate)}
+        {quotaText(w.usedPercent, quotaMode, translate)}
         {w.resetsAt !== undefined && <span style={styles.reset}> · {w.resetsAt <= Date.now() ? translate('quotaExpiredWindow') : windowLabel(w)}</span>}
       </dd>
       <div style={styles.bar} aria-hidden>

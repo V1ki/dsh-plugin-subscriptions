@@ -977,7 +977,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                         <p style={styles.statusLine}>{t('usageNoVisibleModels')}</p>
                       )}
                       {id === 'antigravity' && shownWindows.some(window => antigravityQuotaScope(window.scope))
-                        ? <AntigravityQuotaSummary windows={shownWindows} t={t} />
+                        ? <AntigravityQuotaSummary windows={shownWindows} t={t} mode={quotaMode} />
                         : shownWindows.map((window, index) => {
                         const percent = quotaPercent(window.usedPercent, quotaMode)
                         return (

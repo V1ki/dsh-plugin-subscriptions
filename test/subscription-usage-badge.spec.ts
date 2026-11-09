@@ -64,7 +64,7 @@ test('Codex exhaustion notice renders localized credits and reset guidance only 
   })), '')
 })
 
-test('native shared account panel shows four remaining quotas despite an Argon-only whitelist', () => {
+test('native shared account panel follows used/remaining quota display mode despite an Argon-only whitelist', () => {
   const shared: UsageWindow[] = [
     { kind: 'weekly', scope: 'Gemini Models', usedPercent: 27 },
     { kind: 'session', scope: 'Gemini Models', usedPercent: 7 },
@@ -76,14 +76,21 @@ test('native shared account panel shows four remaining quotas despite an Argon-o
   for (const dictionary of [en, zh]) {
     const translate = (key: keyof typeof en, params?: Record<string, unknown>) =>
       dictionary[key].replace(/\{(\w+)\}/g, (_, name: string) => String(params?.[name] ?? ''))
-    const html = renderToStaticMarkup(createElement(AccountWindows, {
+    const usedHtml = renderToStaticMarkup(createElement(AccountWindows, {
       windows: filtered, model: 'gemini-4-argon', provider: 'antigravity', translate,
     }))
-    assert.equal((html.match(/role="progressbar"/g) ?? []).length, 4)
-    for (const percent of [73, 93, 23, 100]) assert.ok(html.includes(translate('usageRemaining', { percent })))
-    assert.ok(!html.includes('gemini-4-argon-') && !html.includes('<details'))
+    assert.equal((usedHtml.match(/role="progressbar"/g) ?? []).length, 4)
+    for (const percent of [27, 7, 77, 0]) assert.ok(usedHtml.includes(translate('quotaUsedPercent', { percent })))
+    assert.ok(!usedHtml.includes('gemini-4-argon-') && !usedHtml.includes('<details'))
     assert.equal(compactSegment(display('antigravity', shared), 'gemini-4-argon', translate),
-      `Antigravity · ${translate('quotaDefaultAccount')} ${translate('usageWeekly')} ${translate('usageRemaining', { percent: 73 })} · ${translate('usageFiveHourLimit')} ${translate('usageRemaining', { percent: 93 })}`)
+      `Antigravity · ${translate('quotaDefaultAccount')} ${translate('usageWeekly')} ${translate('quotaUsedPercent', { percent: 27 })} · ${translate('usageFiveHourLimit')} ${translate('quotaUsedPercent', { percent: 7 })}`)
+
+    const remainingHtml = renderToStaticMarkup(createElement(AccountWindows, {
+      windows: filtered, model: 'gemini-4-argon', provider: 'antigravity', translate, mode: 'remaining',
+    }))
+    for (const percent of [73, 93, 23, 100]) assert.ok(remainingHtml.includes(translate('quotaRemainingPercent', { percent })))
+    assert.equal(compactSegment(display('antigravity', shared), 'gemini-4-argon', translate, 'remaining'),
+      `Antigravity · ${translate('quotaDefaultAccount')} ${translate('usageWeekly')} ${translate('quotaRemainingPercent', { percent: 73 })} · ${translate('usageFiveHourLimit')} ${translate('quotaRemainingPercent', { percent: 93 })}`)
   }
 })
 
