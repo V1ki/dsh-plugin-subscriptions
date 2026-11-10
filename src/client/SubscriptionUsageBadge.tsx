@@ -7,6 +7,9 @@
  * account of every provider, with long window lists collapsed into previews,
  * the current provider first and the default account (starred) first within
  * a provider. Model-scoped Antigravity usage follows the current model.
+ * Every click also asks for fresh quota past the server's shared cache (see
+ * `usage-refresh.ts` for the join/interval policy); while that runs the pill
+ * shows a spinner, and a failed round keeps the last values with a warning.
  *
  * Usage rides the `subscriptions-auth` `status` + `usage` endpoints on a slow
  * poll (the server shares its cache across UI surfaces); the current model
@@ -31,6 +34,8 @@ import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 import { useAnchoredPosition, useDismissOnOutsidePointer } from '@deepseek-ai/dsh-client-ui-primitives'
 import { callSubscriptionsAuth, usageBarColor } from './SubscriptionsSection.js'
+import { messageOf } from './subscriptions-rpc.js'
+import { UsageRefreshGate, usageRefreshFailure } from './usage-refresh.js'
 import type { AccountStatus, ProviderStatus, ProviderUsage, SubscriptionProvider, UsageWindow } from './SubscriptionsSection.js'
 import type { ModelDirectoriesLike } from './SpeedSelect.js'
 import { en } from './locales.js'
@@ -48,6 +53,12 @@ export function usageBadgeIcon(icons: {
   return hostIcon(icons, 'DataOutline')
 }
 const UsageBadgeIcon = usageBadgeIcon(primitives)
+/** Pill glyphs while a refresh runs and after one fails (both on every supported host). */
+const RefreshingIcon = hostIcon(primitives, 'LoadingOutline')
+const RefreshFailedIcon = hostIcon(primitives, 'WarningOutline')
+
+/** The pill's refresh feedback, exposed as `data-refresh-state` for styling and tests. */
+export type UsageRefreshState = 'idle' | 'refreshing' | 'error'
 
 /** How often the badge re-reads usage; the server also shares its own cache/negative-cache across UI surfaces. */
 const USAGE_POLL_INTERVAL_MS = 15 * 60_000
@@ -277,7 +288,11 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
   const badgeSelection = retainSubscriptionSelection(lastSubscription, selection)
   const [open, setOpen] = useState(false)
   const [hover, setHover] = useState(false)
-  const inflightRef = useRef(false)
+  const [refreshing, setRefreshing] = useState(false)
+  // Message of the last failed network round; cleared by the next successful one.
+  const [refreshError, setRefreshError] = useState<string | undefined>(undefined)
+  // Settles when the running round (network or local cache sync) finishes.
+  const inflightRef = useRef<Promise<void> | undefined>(undefined)
   const cacheSyncRequested = useRef(false)
   const mountedRef = useRef(true)
   const rootRef = useRef<HTMLSpanElement | null>(null)
@@ -299,21 +314,30 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
   const recentNames = useRef(new Map<SubscriptionProvider, { revision: number; name: string }>())
 
   const statusRef = useRef<{ providers: Record<SubscriptionProvider, ProviderStatus> }>()
-  const refresh = useCallback(async (cacheOnly = false): Promise<void> => {
-    if (rpc === undefined) return
-    if (inflightRef.current) {
-      if (cacheOnly) cacheSyncRequested.current = true
-      return
+  // One round. `cacheOnly` re-renders from the client usage cache (no RPC);
+  // otherwise it re-reads status and every account's usage, and `force` (a
+  // click) bypasses the server's fresh shared cache, which the forced fetch
+  // then replaces for every other view. Resolves with a network round's
+  // failure message, or undefined.
+  const refresh = useCallback(async (cacheOnly = false, force = false): Promise<string | undefined> => {
+    if (rpc === undefined) return undefined
+    if (inflightRef.current && cacheOnly) {
+      cacheSyncRequested.current = true
+      return undefined
     }
-    inflightRef.current = true
+    // Network rounds are serialized by the gate, so anything still in flight
+    // here is a local cache sync: wait for it instead of dropping a click.
+    while (inflightRef.current) await inflightRef.current
+    let settle!: () => void
+    inflightRef.current = new Promise<void>((resolve) => { settle = resolve })
     const revision = namesRevision.current
     try {
       const statusResp = cacheOnly ? statusRef.current : await callSubscriptionsAuth<{
         providers: Record<SubscriptionProvider, ProviderStatus>
       }>(rpc, 'status', {})
-      if (!statusResp) return
+      if (!statusResp) return undefined
       statusRef.current = statusResp
-      if (!mountedRef.current) return
+      if (!mountedRef.current) return undefined
 
       // Every logged-in account of every provider, in a stable order (the
       // `status` provider order, default account first) so rows don't jump
@@ -336,18 +360,20 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
 
       if (roster.length === 0) {
         setDisplays([])
-        return
+        return undefined
       }
 
       const results = await Promise.allSettled(
         roster.map(async ({ provider, account }) => {
           const usage = cacheOnly ? readUsageCache(rpc, keyOf(provider, account))
-            : await callSubscriptionsAuth<ProviderUsage>(rpc, 'usage', { provider, account: account.key })
+            : await callSubscriptionsAuth<ProviderUsage>(rpc, 'usage', {
+              provider, account: account.key, ...force ? { force: true } : {},
+            })
           if (!usage) throw new Error('No cached quota')
           return { provider, account, usage }
         }),
       )
-      if (!mountedRef.current) return
+      if (!mountedRef.current) return undefined
 
       for (const [index, result] of results.entries()) {
         const { provider, account } = roster[index]!
@@ -388,7 +414,8 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
         const saved = recentNames.current.get(row.provider)
         return saved && saved.revision > revision ? { ...row, name: saved.name } : row
       }))
-    } catch {
+      return cacheOnly ? undefined : usageRefreshFailure(results)
+    } catch (error) {
       for (const key of lastKnownRef.current.keys()) failUsage(rpc, key)
       // A failed status read retains values but must not present them as fresh.
       if (mountedRef.current) setDisplays(previous => previous.map(display => ({ ...display,
@@ -396,8 +423,10 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
           ...(account.usage ? { usage: { ...account.usage, stale: true, refreshFailed: true } } : {}),
         })),
       })))
+      return messageOf(error)
     } finally {
-      inflightRef.current = false
+      inflightRef.current = undefined
+      settle()
       if (cacheSyncRequested.current && mountedRef.current) {
         cacheSyncRequested.current = false
         queueMicrotask(() => { void refresh(true) })
@@ -412,6 +441,22 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
     window.addEventListener('focus', sync)
     return () => { unsubscribe(); window.removeEventListener('focus', sync) }
   }, [rpc, displayMode, refresh])
+
+  // Network rounds (polls and clicks) go through one gate that outlives
+  // re-renders; it reads the latest `refresh` through a ref.
+  const refreshRef = useRef(refresh)
+  refreshRef.current = refresh
+  const gateRef = useRef<UsageRefreshGate | undefined>(undefined)
+  gateRef.current ??= new UsageRefreshGate(async (force) => {
+    setRefreshing(true)
+    try {
+      const failure = await refreshRef.current(false, force)
+      if (mountedRef.current) setRefreshError(failure)
+    } finally {
+      if (mountedRef.current) setRefreshing(false)
+    }
+  })
+  const gate = gateRef.current
 
   useEffect(() => {
     const update = (event: Event) => {
@@ -430,12 +475,13 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
   }, [])
 
   // Hidden renders nothing, so it polls nothing; showing it again refreshes at once.
+  // `refresh` is a dependency so a new `rpc` re-polls at once, as before.
   useEffect(() => {
     if (displayMode === 'hidden') return
-    void refresh()
-    const timer = setInterval(() => { void refresh() }, USAGE_POLL_INTERVAL_MS)
+    void gate.request(false)
+    const timer = setInterval(() => { void gate.request(false) }, USAGE_POLL_INTERVAL_MS)
     return () => { clearInterval(timer) }
-  }, [refresh, displayMode])
+  }, [gate, refresh, displayMode])
 
   useEffect(() => {
     if (currentRef.current === undefined) return
@@ -506,11 +552,17 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
   // badge shows (a retained subscription when the current model is not one).
   const expanded = expandedDisplays(displays, badgeSelection?.provider)
   const title = translate('usageBadgeTitle')
+  const refreshState: UsageRefreshState = refreshing ? 'refreshing' : refreshError === undefined ? 'idle' : 'error'
+  const refreshNote = refreshState === 'refreshing'
+    ? translate('usageBadgeRefreshing')
+    : refreshState === 'error' ? translate('usageBadgeRefreshFailed', { message: refreshError }) : undefined
+  const PillIcon = refreshState === 'refreshing' ? RefreshingIcon : refreshState === 'error' ? RefreshFailedIcon : UsageBadgeIcon
 
+  // Every click (opening or closing) asks for fresh quota; the gate joins a
+  // round in flight and limits how often a click may bypass the server cache.
   const toggle = (): void => {
-    const next = !open
-    setOpen(next)
-    if (next) void refresh()
+    setOpen(!open)
+    void gate.request(true)
   }
 
   const pill = (
@@ -522,13 +574,15 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
         style={{ ...styles.pill, ...(hover || open ? styles.pillActive : {}) }}
         aria-haspopup="dialog"
         aria-expanded={open}
-        aria-label={`${title} · ${label}`}
-        title={title}
+        aria-busy={refreshing || undefined}
+        aria-label={[title, label, refreshNote].filter(Boolean).join(' · ')}
+        title={[title, refreshNote].filter(Boolean).join(' · ')}
+        data-refresh-state={refreshState}
         onMouseEnter={() => { setHover(true) }}
         onMouseLeave={() => { setHover(false) }}
         onClick={toggle}
       >
-        <UsageBadgeIcon />
+        <span className="dsh-subscription-usage-pill-icon" style={refreshState === 'error' ? styles.iconError : styles.icon}><PillIcon /></span>
         <span style={styles.label}>{label}</span>
       </button>
       {open && createPortal(
@@ -544,8 +598,10 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
               <UsageBadgeIcon />
               {title}
             </span>
+            {refreshState === 'refreshing' && <span style={styles.titleStatus}>{refreshNote}</span>}
           </div>
           <div style={styles.titleRule} aria-hidden />
+          {refreshState === 'error' && <div role="status" style={styles.refreshError}>{refreshNote}</div>}
           {expanded.map((d, index) => (
             <section key={d.provider} style={index === 0 ? undefined : styles.section}>
               <div style={styles.providerRow}>
@@ -684,6 +740,8 @@ const styles: Record<string, CSSProperties> = {
     color: 'var(--dsw-alias-label-secondary)',
   },
   label: { textOverflow: 'ellipsis', minWidth: 0, overflow: 'hidden' },
+  icon: { display: 'inline-flex', flexShrink: 0 },
+  iconError: { display: 'inline-flex', flexShrink: 0, color: 'var(--dsw-alias-state-error-primary)' },
   // Mirrors the host stat-dialog panel.
   panel: {
     position: 'fixed', zIndex: 1100, boxSizing: 'border-box',
@@ -700,6 +758,8 @@ const styles: Record<string, CSSProperties> = {
   },
   titleLabel: { alignItems: 'center', gap: 6, minWidth: 0, display: 'inline-flex' },
   titleRule: { borderTop: '0.5px solid var(--dsw-alias-border-l2)', marginBottom: 10 },
+  titleStatus: { color: 'var(--dsw-alias-label-tertiary)', fontWeight: 400, whiteSpace: 'nowrap' },
+  refreshError: { color: 'var(--dsw-alias-state-error-primary)', marginBottom: 10, overflowWrap: 'anywhere' },
   section: { marginTop: 12, paddingTop: 10, borderTop: '0.5px solid var(--dsw-alias-border-l2)' },
   providerRow: {
     display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 16, marginBottom: 6,

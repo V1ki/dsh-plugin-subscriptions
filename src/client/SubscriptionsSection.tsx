@@ -25,7 +25,7 @@ import { providerSettingsCss } from './provider-settings-styles.js'
 import { UsageBadgeDisplaySetting } from './UsageBadgeDisplaySetting.js'
 import type { SubscriptionsKey } from './locales.js'
 
-import { callSubscriptionsAuth, SubscriptionsAuthError } from './subscriptions-rpc.js'
+import { callSubscriptionsAuth, messageOf, SubscriptionsAuthError } from './subscriptions-rpc.js'
 export { callSubscriptionsAuth } from './subscriptions-rpc.js'
 
 /** Poll cadence while a provider login attempt is busy. */
@@ -165,11 +165,6 @@ const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [
   { id: 'copilot', name: 'GitHub Copilot' },
   { id: 'antigravity', name: 'Google Antigravity' },
 ]
-
-/** Human text of an action failure, SubscriptionsAuthError or not. */
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
 
 /** Copy a keyed map without the entries whose key is not in `live`. */
 function dropStale<T>(map: Record<string, T>, live: ReadonlySet<string>): Record<string, T> {

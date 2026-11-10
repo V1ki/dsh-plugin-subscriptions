@@ -13,6 +13,7 @@ import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import type { SubscriptionsRpcHandler as ConnectionRpcHandler } from '../src/auth/rpc.js'
 import { createFakeConnection } from './fake-connection.js'
+import type { RpcResult } from '../src/compat.js'
 
 process.env.DSH_HOME ??= mkdtempSync(join(tmpdir(), 'router-usage-test-'))
 
@@ -433,6 +434,123 @@ test('usage(): pool cache and RPC preserve reset credits and optional errors', a
   assert.deepEqual((await controller.usage('codex', 'a1', signal)).resetCredits, snapshot.resetCredits)
   snapshot = { supported: true, windows: [], resetCreditsError: 'HTTP 403' }
   assert.equal((await controller.usage('codex', 'a1', signal, true)).resetCreditsError, 'HTTP 403')
+})
+
+// ---------------------------------------------------------------------------
+// Status-bar click refresh (R6): the badge's forced `usage` RPC goes through
+// the controller into the SHARED pool usage cache. These drive the real
+// `usage` route (registerAuthRpc + fake connection) so the wire payload
+// `{ provider, account, force: true }` is part of what is pinned.
+// ---------------------------------------------------------------------------
+
+const { registerAuthRpc } = await import('../src/auth/rpc.js')
+
+/** Two snapshots of the same account, before and after the quota moved. */
+const BEFORE_CLICK: ProviderUsage = { supported: true, windows: [{ kind: 'session', usedPercent: 10 }] }
+const AFTER_CLICK: ProviderUsage = { supported: true, windows: [{ kind: 'session', usedPercent: 97 }] }
+
+/**
+ * The snapshot CONTENT of a usage RPC result. Responses also carry display
+ * metadata (`fetchedAt`, `staleAt`, `stale`, `refreshFailed`, `retryAt`) that
+ * depends on timing, so R6 compares only what the provider reported.
+ */
+function content(result: RpcResult<unknown>): unknown {
+  if (!result.ok) return result
+  const { supported, windows, plan } = result.value as ProviderUsage
+  return { ok: true, supported, windows, plan }
+}
+
+/** The display metadata a usage RPC result carries alongside the snapshot. */
+function freshness(result: RpcResult<unknown>): { stale: boolean | undefined; refreshFailed: boolean | undefined } {
+  assert.ok(result.ok)
+  const { stale, refreshFailed } = result.value as { stale?: boolean; refreshFailed?: boolean }
+  return { stale, refreshFailed }
+}
+
+/**
+ * A shared pool usage cache behind a counting fetcher, wired into the real
+ * `usage` RPC route. `answer` decides what the provider returns next.
+ */
+async function sharedUsageRoute(answer: () => Promise<ProviderUsage>) {
+  const calls = { count: 0 }
+  const tracker = new PoolUsageTracker((provider, account) =>
+    provider === 'claude' && account === 'a1' ? () => { calls.count += 1; return answer() } : undefined)
+  const controller = new SubscriptionsAuthController(
+    new OAuthFlowManager(), new DeviceFlowManager(), () => {}, () => undefined,
+    { claude: unreachableFetcher }, undefined, tracker,
+  )
+  const ctx = new Context()
+  const fake = createFakeConnection()
+  ctx.provide('connection', fake.connection)
+  registerAuthRpc(ctx, controller, {
+    speed: () => Promise.reject(new Error('unused')),
+    setSpeed: () => Promise.reject(new Error('unused')),
+  })
+  await new Promise(resolve => setTimeout(resolve, 50))
+  assert.ok(fake.registered(), 'the subscriptions-auth routes were registered')
+  const usage = (payload: Record<string, unknown>) =>
+    fake.handler('usage', { provider: 'claude', account: 'a1', ...payload }, new AbortController().signal)
+  return { calls, tracker, usage }
+}
+
+test('UC: a forced usage RPC (status-bar click) replaces the shared cache entry; later plain reads by other views reuse it without a provider call', async () => {
+  let snapshot = BEFORE_CLICK
+  const route = await sharedUsageRoute(() => Promise.resolve(snapshot))
+  assert.deepEqual(content(await route.usage({})), content({ ok: true, value: BEFORE_CLICK }), 'initial background poll')
+  assert.equal(route.calls.count, 1)
+
+  snapshot = AFTER_CLICK // the quota moved on the provider side
+  assert.deepEqual(content(await route.usage({})), content({ ok: true, value: BEFORE_CLICK }), 'a plain read inside the TTL is served from the cache')
+  assert.equal(route.calls.count, 1)
+
+  const clicked = await route.usage({ force: true })
+  assert.deepEqual(content(clicked), content({ ok: true, value: AFTER_CLICK }), 'the click bypasses the fresh cache')
+  assert.deepEqual(freshness(clicked), { stale: false, refreshFailed: false }, 'the forced answer is fresh')
+  assert.equal(route.calls.count, 2)
+
+  // Another badge / the Settings page: a plain RPC read gets the new snapshot.
+  assert.deepEqual(content(await route.usage({})), content({ ok: true, value: AFTER_CLICK }))
+  // Pool routing reads the same entry (97% ≥ the full threshold → out of rotation).
+  const quota = await route.tracker.quotaFor({ provider: 'claude', account: 'a1', model: 'claude-test' })
+  assert.equal(quota.available, false, 'routing sees the snapshot the click fetched')
+  assert.equal(route.calls.count, 2, 'no further provider call after the forced fetch')
+})
+
+test('EP: a usage RPC with force:false behaves like a plain read (fresh cache served, no provider call)', async () => {
+  const route = await sharedUsageRoute(() => Promise.resolve(BEFORE_CLICK))
+  await route.usage({})
+  assert.deepEqual(content(await route.usage({ force: false })), content({ ok: true, value: BEFORE_CLICK }))
+  assert.equal(route.calls.count, 1)
+})
+
+test('ST: a forced usage RPC during a live 429 cooldown makes no provider call and answers the last known snapshot', async () => {
+  let rateLimited = false
+  const route = await sharedUsageRoute(() => rateLimited
+    ? Promise.reject(new OAuthEndpointError('claude usage token endpoint error (HTTP 429)', 429, undefined, 60_000))
+    : Promise.resolve(BEFORE_CLICK))
+  assert.deepEqual(content(await route.usage({})), content({ ok: true, value: BEFORE_CLICK }))
+  rateLimited = true
+  // First click: the forced fetch is attempted, hits the 429 and enters cooldown;
+  // the badge still gets the last known values.
+  const limited = await route.usage({ force: true })
+  assert.deepEqual(content(limited), content({ ok: true, value: BEFORE_CLICK }))
+  assert.equal(freshness(limited).refreshFailed, true, 'the last known snapshot is marked as a failed refresh')
+  assert.equal(route.calls.count, 2)
+  // Further clicks (forced) and other views (plain) during the cooldown.
+  assert.deepEqual(content(await route.usage({ force: true })), content({ ok: true, value: BEFORE_CLICK }))
+  assert.deepEqual(content(await route.usage({})), content({ ok: true, value: BEFORE_CLICK }))
+  assert.equal(route.calls.count, 2, 'force never punches through the live cooldown')
+})
+
+test('ST: a forced usage RPC during a live cooldown with no prior snapshot answers the cooldown error without a provider call', async () => {
+  const route = await sharedUsageRoute(() =>
+    Promise.reject(new OAuthEndpointError('claude usage token endpoint error (HTTP 429)', 429, undefined, 60_000)))
+  const first = await route.usage({ force: true })
+  assert.equal(first.ok, false)
+  if (!first.ok) assert.match(first.error.message, /HTTP 429/, 'the badge gets an error message to show')
+  const second = await route.usage({ force: true })
+  assert.equal(second.ok, false)
+  assert.equal(route.calls.count, 1)
 })
 
 test('usage(): with no pool tracker (pool disabled), every call hits the raw fetcher directly', async () => {
