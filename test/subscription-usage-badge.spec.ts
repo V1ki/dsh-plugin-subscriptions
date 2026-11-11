@@ -51,6 +51,12 @@ test('Codex exhaustion notice renders localized credits and reset guidance only 
     const render = () => renderToStaticMarkup(createElement(CodexExhaustionNotice, { display: d, translate }))
     assert.match(render(), /role="status"/)
     assert.ok(render().includes(dictionary.usageBadgeAllCodexExhausted))
+    d.accounts[0]!.usage = { supported: true, credits: { hasCredits: true, unlimited: false, balance: '12.5' } }
+    assert.ok(render().includes(dictionary.usageBadgeCodexCreditsFallback))
+    assert.ok(!render().includes(dictionary.usageBadgeAllCodexExhausted))
+    d.accounts[0]!.usage = { supported: true, credits: { hasCredits: true, unlimited: false, balance: '0' } }
+    assert.ok(render().includes(dictionary.usageBadgeAllCodexExhausted))
+    delete d.accounts[0]!.usage
     d.accounts[1]!.windows[0]!.usedPercent = 99.99
     assert.equal(render(), '', 'do not treat rounded 100% as exhaustion')
     d.accounts[1]!.windows[0]!.usedPercent = Infinity

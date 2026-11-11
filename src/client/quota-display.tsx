@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { ProviderUsage } from './SubscriptionsSection.js'
+import type { CreditBalance, ProviderUsage } from './SubscriptionsSection.js'
 import type { SubscriptionsKey } from './locales.js'
 import type { QuotaDisplayMode } from './usage-badge-preferences.js'
 
@@ -10,6 +10,26 @@ export function quotaPercent(used: unknown, mode: QuotaDisplayMode): number | un
   if (typeof used !== 'number' || !Number.isFinite(used)) return undefined
   const percent = Math.min(100, Math.max(0, used))
   return Math.round(mode === 'remaining' ? 100 - percent : percent)
+}
+
+/** Group a reported credit balance without inventing a currency conversion. */
+export function formatCreditBalance(value: string): string {
+  const amount = Number(value)
+  if (!Number.isFinite(amount)) return value
+  const negative = amount < 0
+  const [whole, fraction] = Math.abs(amount).toFixed(2).split('.')
+  const grouped = whole!.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+  const text = fraction === '00' ? grouped : `${grouped}.${fraction!.replace(/0$/, '')}`
+  return negative ? `-${text}` : text
+}
+
+/** Display line for a disclosed Codex credit balance; undefined when absent. */
+export function creditBalanceText(credits: CreditBalance | undefined, t: Translate): string | undefined {
+  if (credits === undefined) return undefined
+  if (credits.overageLimitReached === true) return t('creditsOverage')
+  if (credits.unlimited) return t('creditsUnlimited')
+  if (credits.balance !== undefined) return t('creditsBalance', { balance: formatCreditBalance(credits.balance) })
+  return credits.hasCredits ? t('creditsAvailableUnknown') : undefined
 }
 
 export function quotaText(used: unknown, mode: QuotaDisplayMode, t: Translate): string {

@@ -345,11 +345,14 @@ export class PoolAdapter extends LlmAdapter {
   }
 
   /**
-   * Health and known quota exhaustion filter BOTH strategies: >=100% must
-   * never silently spend paid credits. `quota_aware` ranks healthy members
-   * by urgency, then tries near-full (95–<100%) members by urgency too.
-   * Members without telemetry score zero. Stickiness cannot retain an
-   * exhausted member; within the preferred class it uses `switchMargin`.
+   * Health and known quota exhaustion filter BOTH strategies. An applicable
+   * window at >=100% is skipped unless Codex reports remaining credits; those
+   * accounts stay eligible but rank after every account that still has
+   * included quota. `quota_aware` ranks healthy members by urgency, then
+   * tries near-full (95–<100%) members by urgency too. Members without
+   * telemetry score zero. Stickiness cannot retain an exhausted member, or
+   * a credit-funded member while included quota remains; within the preferred
+   * class it uses `switchMargin`.
    */
   private async select(
     poolId: string,
@@ -365,20 +368,24 @@ export class PoolAdapter extends LlmAdapter {
     )
     const eligible = usable.filter(member => !quotas.get(member)?.exhausted)
     if (eligible.length === 0) {
-      const message = `pool "${poolId}": all currently usable accounts have exhausted subscription quota (>=100% in an applicable window).`
-        + ' Request stopped to avoid spending paid credits. Wait for a quota reset, or refresh this account’s usage in Settings > Subscriptions after using a reset card.'
-        + ' 订阅额度已耗尽，已停止请求以避免消耗付费 credits；使用重置卡后，请在设置 → 订阅中刷新对应账号的用量。'
+      const message = `pool "${poolId}": all currently usable accounts have exhausted subscription quota (>=100% in an applicable window) and have no remaining Codex credits.`
+        + ' Request stopped. Wait for a quota reset, add credits, or refresh this account’s usage in Settings > Subscriptions after using a reset card.'
+        + ' 订阅额度已耗尽且没有剩余 Codex credits，已停止请求。补充 credits 或使用重置卡后，请在设置 → 订阅中刷新对应账号的用量。'
       this.options.onWarn(message)
       throw new LlmError(message, QUOTA_EXCEEDED_CODE)
     }
+    const included = eligible.filter(member => quotas.get(member)?.creditFunded !== true)
+    const creditFunded = eligible.filter(member => quotas.get(member)?.creditFunded === true)
     const stickyMember = sessionId === undefined
       ? undefined
       : eligible.find(member =>
         memberKey(member.provider, member.account, member.model) === this.sticky.get(stickyKey(poolId, sessionId)))
+    const stickySpendsCredits = stickyMember !== undefined && quotas.get(stickyMember)?.creditFunded === true && included.length > 0
     if (this.options.strategy === 'priority') {
-      return stickyMember === undefined
-        ? eligible
-        : [stickyMember, ...eligible.filter(member => member !== stickyMember)]
+      const ordered = [...included, ...creditFunded]
+      return stickyMember === undefined || stickySpendsCredits
+        ? ordered
+        : [stickyMember, ...ordered.filter(member => member !== stickyMember)]
     }
     const scored = eligible.filter(member => quotas.get(member)?.available === true)
     const quotaFull = eligible.filter(member => quotas.get(member)?.available === false)
@@ -395,6 +402,10 @@ export class PoolAdapter extends LlmAdapter {
         scored.splice(scored.indexOf(stickyMember), 1)
         scored.unshift(stickyMember)
       }
+    } else if (scored.length === 0 && stickyMember !== undefined && quotaFull.includes(stickyMember)) {
+      // Included quota is gone; keep the credit-funded session on its account.
+      quotaFull.splice(quotaFull.indexOf(stickyMember), 1)
+      quotaFull.unshift(stickyMember)
     }
     return [...scored, ...quotaFull]
   }

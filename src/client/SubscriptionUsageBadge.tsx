@@ -22,7 +22,7 @@
  */
 import { antigravityQuotaApplies, antigravityQuotaScope } from '../antigravity-model-id.js'
 import { AntigravityQuotaSummary } from './AntigravityQuotaSummary.js'
-import { quotaPercent, quotaText, quotaIsStale, quotaUnavailableText, UsageFreshness, useQuotaClock } from './quota-display.js'
+import { creditBalanceText, quotaPercent, quotaText, quotaIsStale, quotaUnavailableText, UsageFreshness, useQuotaClock } from './quota-display.js'
 import { readUsageCache, subscribeUsage, failUsage } from './usage-cache.js'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ComponentType, CSSProperties } from 'react'
@@ -99,14 +99,33 @@ export interface ProviderUsageDisplay {
 }
 
 /** Display-only warning; does not infer model eligibility or uncached accounts. */
+function accountWindowExhausted(account: AccountUsageDisplay): boolean {
+  return account.windows.some(window =>
+    window.scope === undefined && Number.isFinite(window.usedPercent) && window.usedPercent >= 100)
+}
+
+/** True when the displayed snapshot still has spendable Codex credits. */
+export function accountHasSpendableCredits(account: AccountUsageDisplay): boolean {
+  const credits = account.usage?.credits
+  if (credits === undefined || credits.overageLimitReached === true) return false
+  if (credits.unlimited) return true
+  if (credits.balance !== undefined) {
+    const balance = Number(credits.balance)
+    return Number.isFinite(balance) && balance > 0
+  }
+  return credits.hasCredits
+}
+
 export function CodexExhaustionNotice({ display, translate }: {
   display: ProviderUsageDisplay
   translate: (key: SubscriptionsKey) => string
 }) {
   if (display.provider !== 'codex' || display.accounts.length === 0
-    || !display.accounts.every(account => account.windows.some(window =>
-      window.scope === undefined && Number.isFinite(window.usedPercent) && window.usedPercent >= 100))) return null
-  return <p role="status">{translate('usageBadgeAllCodexExhausted')}</p>
+    || !display.accounts.every(accountWindowExhausted)) return null
+  const key = display.accounts.some(accountHasSpendableCredits)
+    ? 'usageBadgeCodexCreditsFallback'
+    : 'usageBadgeAllCodexExhausted'
+  return <p role="status">{translate(key)}</p>
 }
 
 /** The account the collapsed pill reads: the default one, else the first listed. */
@@ -211,7 +230,8 @@ export function compactSegment(d: ProviderUsageDisplay, model?: string, t: Trans
   }
   const parts = windows.slice(0, 2).map(w => `${w.resetsAt !== undefined && w.resetsAt <= Date.now() ? t('quotaExpiredWindow') : windowLabel(w)} ${quotaText(w.usedPercent, mode, t)}`)
   if (windows.length > 2) parts.push(`+${windows.length - 2}`)
-  return `${prefix} ${parts.join(' · ')}${freshness}`
+  const credits = d.provider === 'codex' ? creditBalanceText(account.usage?.credits, t) : undefined
+  return `${prefix} ${parts.join(' · ')}${credits === undefined ? '' : ` · ${credits}`}${freshness}`
 }
 
 type ModelSelection = { provider: string; model: string }
@@ -572,6 +592,9 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
                     </div>
                   )}
                   <UsageFreshness usage={account.usage} failed={account.loadFailed === true} t={translate} />
+                  {d.provider === 'codex' && creditBalanceText(account.usage?.credits, translate) !== undefined && (
+                    <p style={styles.providerMeta}>{creditBalanceText(account.usage?.credits, translate)}</p>
+                  )}
                   {!!account.usage?.windows?.length && <AccountWindows
                     key={`${d.provider}:${badgeSelection?.model ?? ''}`}
                     windows={account.windows}

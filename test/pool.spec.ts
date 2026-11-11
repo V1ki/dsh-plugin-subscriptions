@@ -529,12 +529,34 @@ for (const strategy of ['priority', 'quota_aware', 'quota_normalized'] as const)
       assert.ok(error instanceof LlmError)
       assert.equal(error.code, 'QUOTA')
       assert.match(error.message, /all currently usable accounts.*exhausted subscription quota/)
-      assert.match(error.message, /paid credits/)
+      assert.match(error.message, /no remaining Codex credits/)
       assert.match(error.message, /Settings > Subscriptions/)
       return true
     })
     assert.deepEqual(codex.accounts, [])
     assert.ok(warnings.some(message => message.includes('exhausted subscription quota')))
+  })
+
+  test(`${strategy}: remaining credits keep a fully used account available after included quota`, async () => {
+    const codex = new FakeAdapter((_options, account) => serveOk(account))
+    const funded = { ...windowUsage(100, 60_000), credits: { hasCredits: true, unlimited: false, balance: '13677.11' } }
+    const { pool } = makePool({ codex }, { strategy, usage: usageFetchers({
+      'codex/a1': funded,
+      'codex/a2': windowUsage(100, 120_000),
+    }) })
+    await collect(pool.stream(OPTIONS))
+    assert.deepEqual(codex.accounts, ['a1'])
+  })
+
+  test(`${strategy}: included quota is spent before a credit-funded account`, async () => {
+    const codex = new FakeAdapter((_options, account) => serveOk(account))
+    const funded = { ...windowUsage(100, 60_000), credits: { hasCredits: true, unlimited: false, balance: '9' } }
+    const { pool } = makePool({ codex }, { strategy, usage: usageFetchers({
+      'codex/a1': funded,
+      'codex/a2': windowUsage(50, 86_400_000),
+    }) })
+    await collect(pool.stream(OPTIONS))
+    assert.deepEqual(codex.accounts, ['a2'])
   })
 
   test(`${strategy}: sticky account loses eligibility once exhausted and returns after reset`, async () => {

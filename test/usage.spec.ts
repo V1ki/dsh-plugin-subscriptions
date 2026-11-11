@@ -64,6 +64,26 @@ function fakeFetch(payload: unknown, status = 200): {
   return { fetchFn, requests }
 }
 
+test('fetchCodexUsage maps purchased credits separately from reset cards', async () => {
+  const { fetchFn } = fakeFetch({
+    plan_type: 'pro',
+    rate_limit: { primary_window: { used_percent: 100, limit_window_seconds: 604800, reset_at: 1_794_553_515 } },
+    credits: { has_credits: true, unlimited: false, balance: '13677.1121360000', overage_limit_reached: false },
+  })
+  const usage = await fetchCodexUsage(codexSession, fetchFn)
+  assert.deepEqual(usage.credits, { hasCredits: true, unlimited: false, balance: '13677.1121360000' })
+  assert.equal(usage.windows?.[0]?.usedPercent, 100)
+})
+
+test('fetchCodexUsage keeps a missing or unusable credits object undisclosed', async () => {
+  const { fetchFn } = fakeFetch({ plan_type: 'plus', credits: { balance: 'not-a-number' } })
+  assert.equal((await fetchCodexUsage(codexSession, fetchFn)).credits, undefined)
+  const { fetchFn: absent } = fakeFetch({ plan_type: 'plus' })
+  assert.equal((await fetchCodexUsage(codexSession, absent)).credits, undefined)
+  const { fetchFn: unlimited } = fakeFetch({ credits: { unlimited: true } })
+  assert.deepEqual((await fetchCodexUsage(codexSession, unlimited)).credits, { hasCredits: true, unlimited: true })
+})
+
 test('fetchCodexUsage maps windows, plan, and reset timestamps', async () => {
   const { fetchFn, requests } = fakeFetch({
     plan_type: 'plus',
@@ -431,8 +451,15 @@ test('usage(): pool cache and RPC preserve reset credits and optional errors', a
   const signal = new AbortController().signal
   assert.deepEqual((await controller.usage('codex', 'a1', signal)).resetCredits, snapshot.resetCredits)
   assert.deepEqual((await controller.usage('codex', 'a1', signal)).resetCredits, snapshot.resetCredits)
-  snapshot = { supported: true, windows: [], resetCreditsError: 'HTTP 403' }
-  assert.equal((await controller.usage('codex', 'a1', signal, true)).resetCreditsError, 'HTTP 403')
+  snapshot = {
+    supported: true,
+    windows: [],
+    resetCreditsError: 'HTTP 403',
+    credits: { hasCredits: true, unlimited: false, balance: '12.5' },
+  }
+  const refreshed = await controller.usage('codex', 'a1', signal, true)
+  assert.equal(refreshed.resetCreditsError, 'HTTP 403')
+  assert.deepEqual(refreshed.credits, snapshot.credits)
 })
 
 test('usage(): with no pool tracker (pool disabled), every call hits the raw fetcher directly', async () => {

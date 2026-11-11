@@ -16,6 +16,7 @@ import { normalizedWindowUrgency, PoolUsageTracker } from '../src/providers/pool
 import type { ProviderId } from '../src/auth/store.js'
 
 const MEMBER = { provider: 'claude' as const, account: 'a1', model: 'claude-opus-5' }
+const CODEX_MEMBER = { provider: 'codex' as const, account: 'a1', model: 'gpt-5.4' }
 
 const OK_USAGE: ProviderUsage = { supported: true, windows: [{ kind: 'session', usedPercent: 10 }] }
 
@@ -27,7 +28,7 @@ function trackerOf(
   const calls = { count: 0 }
   const tracker = new PoolUsageTracker(
     (provider: ProviderId, account: string) =>
-      provider === MEMBER.provider && account === MEMBER.account
+      (provider === MEMBER.provider || provider === CODEX_MEMBER.provider) && account === MEMBER.account
         ? () => { calls.count += 1; return fetcher() }
         : undefined,
     ttlMs,
@@ -162,6 +163,51 @@ test('snapshotFor: the stale snapshot is carried across consecutive failure cool
   answer = FRESH_USAGE
   assert.deepEqual(await tracker.snapshotFor('claude', 'a1'), FRESH_USAGE)
   assert.equal(calls.count, 4)
+})
+
+test('quotaFor: remaining Codex credits keep an exhausted window selectable', async () => {
+  const funded = { hasCredits: true, unlimited: false, balance: '13677.11' }
+  const { tracker } = trackerOf(async () => ({ supported: true, windows: [{ kind: 'weekly', usedPercent: 100 }], credits: funded }))
+  const quota = await tracker.quotaFor(CODEX_MEMBER)
+  assert.equal(quota.exhausted, undefined)
+  assert.equal(quota.creditFunded, true)
+  assert.equal(quota.available, false)
+  assert.equal(quota.urgency, 0)
+  assert.equal((await tracker.quotaFor(MEMBER)).exhausted, true, 'the same balance does not fund a non-Codex account')
+})
+
+test('quotaFor: a positive balance funds an exhausted window even if hasCredits is false', async () => {
+  const { tracker } = trackerOf(async () => ({
+    supported: true,
+    windows: [{ kind: 'weekly', usedPercent: 100 }],
+    credits: { hasCredits: false, unlimited: false, balance: '10' },
+  }))
+  assert.equal((await tracker.quotaFor(CODEX_MEMBER)).creditFunded, true)
+})
+
+test('quotaFor: a zero balance, overage block, or missing balance flag does not fund an exhausted window', async () => {
+  for (const credits of [
+    { hasCredits: true, unlimited: false, balance: '0' },
+    { hasCredits: true, unlimited: false, overageLimitReached: true },
+    { hasCredits: false, unlimited: false },
+  ]) {
+    const { tracker } = trackerOf(async () => ({ supported: true, windows: [{ kind: 'weekly', usedPercent: 100 }], credits }))
+    assert.equal((await tracker.quotaFor(CODEX_MEMBER)).exhausted, true, JSON.stringify(credits))
+  }
+})
+
+test('quotaFor: a confirmed credit balance survives a usage-endpoint failure', async () => {
+  let fail = false
+  const { tracker } = trackerOf(async () => {
+    if (fail) throw new Error('offline')
+    return { supported: true, windows: [{ kind: 'weekly', usedPercent: 100 }], credits: { hasCredits: true, unlimited: true } }
+  }, 0)
+  await tracker.quotaFor(CODEX_MEMBER)
+  fail = true
+  const failed = await tracker.quotaFor(CODEX_MEMBER)
+  assert.equal(failed.creditFunded, true)
+  assert.equal(failed.exhausted, undefined)
+  assert.equal(failed.available, false)
 })
 
 for (const used of [94.99, 95, 99.99, 100, 105]) {

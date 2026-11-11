@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { quotaPercent, quotaText, quotaIsStale } from '../src/client/quota-display.js'
+import { creditBalanceText, formatCreditBalance, quotaPercent, quotaText, quotaIsStale } from '../src/client/quota-display.js'
 import { en, zh } from '../src/client/locales.js'
 import { callSubscriptionsAuth } from '../src/client/subscriptions-rpc.js'
 import { readUsageCache, subscribeUsage } from '../src/client/usage-cache.js'
@@ -15,6 +15,19 @@ test('used/remaining handles bounds and unknown telemetry without inventing allo
     assert.equal(quotaPercent(value, 'used'), undefined)
     assert.equal(quotaPercent(value, 'remaining'), undefined)
     for (const dictionary of [en, zh]) assert.equal(quotaText(value, 'remaining', key => dictionary[key]), dictionary.quotaUnknown)
+  }
+})
+
+test('credit balance formatting stays separate from reset cards and both locales', () => {
+  assert.equal(formatCreditBalance('13677.112136'), '13,677.11')
+  assert.equal(formatCreditBalance('12.00'), '12')
+  assert.equal(formatCreditBalance('not-a-number'), 'not-a-number')
+  for (const dictionary of [en, zh]) {
+    const t = (key: keyof typeof en, params?: Record<string, unknown>) => dictionary[key].replace(/\{(\w+)\}/g, (_, name) => String(params?.[name] ?? ''))
+    assert.equal(creditBalanceText(undefined, t), undefined)
+    assert.equal(creditBalanceText({ hasCredits: true, unlimited: false, balance: '12.5' }, t), t('creditsBalance', { balance: '12.5' }))
+    assert.equal(creditBalanceText({ hasCredits: true, unlimited: true }, t), t('creditsUnlimited'))
+    assert.equal(creditBalanceText({ hasCredits: true, unlimited: false, overageLimitReached: true }, t), t('creditsOverage'))
   }
 })
 

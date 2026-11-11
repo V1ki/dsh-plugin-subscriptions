@@ -46,6 +46,7 @@ import type {
   DiscoveredModel,
   FetchFn,
   ModelEntry,
+  CreditBalance,
   ProviderUsage,
   UsageWindow,
 } from './common.js'
@@ -392,6 +393,45 @@ function codexWindowKind(window: CodexUsageWindow, fallback: UsageWindow['kind']
   return 'other'
 }
 
+/** One `credits` object of the wham/usage payload (subset). */
+interface CodexCreditBalance {
+  has_credits?: unknown
+  unlimited?: unknown
+  balance?: unknown
+  overage_limit_reached?: unknown
+}
+
+/** Keep a finite decimal balance; drop blanks and non-numeric values. */
+function codexCreditBalanceString(value: unknown): string | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  return trimmed.length > 0 && Number.isFinite(Number(trimmed)) ? trimmed : undefined
+}
+
+/**
+ * Map the purchased-credit object from `wham/usage`. Undefined when the
+ * backend omitted it, so a missing field is not reported as a zero balance.
+ */
+export function codexCreditBalance(value: unknown): CreditBalance | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const credits = value as CodexCreditBalance
+  const balance = codexCreditBalanceString(credits.balance)
+  const unlimited = credits.unlimited === true
+  const hasCredits = typeof credits.has_credits === 'boolean'
+    ? credits.has_credits
+    : unlimited || (balance !== undefined && Number(balance) > 0)
+  if (typeof credits.has_credits !== 'boolean' && !unlimited && balance === undefined && credits.overage_limit_reached !== true) {
+    return undefined
+  }
+  return {
+    hasCredits,
+    unlimited,
+    ...balance === undefined ? {} : { balance },
+    ...credits.overage_limit_reached === true ? { overageLimitReached: true } : {},
+  }
+}
+
 /** Map one wham/usage window into a {@link UsageWindow}; undefined when unusable. */
 function codexUsageWindow(value: unknown, fallbackKind: UsageWindow['kind']): UsageWindow | undefined {
   if (typeof value !== 'object' || value === null) return undefined
@@ -444,18 +484,21 @@ export async function fetchCodexUsage(
   const payload = await response.json() as {
     plan_type?: string
     rate_limit?: { primary_window?: unknown; secondary_window?: unknown }
+    credits?: unknown
   }
   const windows: UsageWindow[] = []
   const primary = codexUsageWindow(payload.rate_limit?.primary_window, 'session')
   const secondary = codexUsageWindow(payload.rate_limit?.secondary_window, 'weekly')
   if (primary !== undefined) windows.push(primary)
   if (secondary !== undefined) windows.push(secondary)
+  const credits = codexCreditBalance(payload.credits)
   return {
     supported: true,
     windows,
     ...typeof payload.plan_type === 'string' && payload.plan_type.length > 0
       ? { plan: payload.plan_type }
       : {},
+    ...credits === undefined ? {} : { credits },
   }
 }
 
