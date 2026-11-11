@@ -202,10 +202,12 @@ export interface AuthController {
    * @param signal - caller cancellation from the RPC transport.
    * @param force - bypass a fresh cached snapshot for an honest re-check
    *   (the manual Refresh button); a live failure cooldown still applies.
+   * @param resetPoolHealth - clear inference cooldowns on force (defaults to
+   *   true for existing Settings callers); quota-only badge refreshes pass false.
    * @returns `{ supported: false }` when the provider has no usage endpoint.
    * @throws when logged out or the usage lookup fails.
    */
-  usage(provider: ProviderId, account: string, signal: AbortSignal, force?: boolean): Promise<ProviderUsage>
+  usage(provider: ProviderId, account: string, signal: AbortSignal, force?: boolean, resetPoolHealth?: boolean): Promise<ProviderUsage>
   /**
    * Read one image attachment's bytes for inline display.
    * @param ref - the full durable reference (`readImage` verifies against it).
@@ -435,6 +437,14 @@ function readForce(payload: unknown): boolean {
   return force
 }
 
+/** Optional opt-out of the legacy forced-refresh inference health reset. */
+function readResetPoolHealth(payload: unknown): boolean {
+  const value = (payload as Record<string, unknown>).resetPoolHealth
+  if (value === undefined) return true
+  if (typeof value !== 'boolean') throw new BadRequest('payload.resetPoolHealth must be a boolean when present')
+  return value
+}
+
 /** Validate the session id both speed endpoints carry. */
 function readSessionId(payload: unknown): string {
   if (typeof payload !== 'object' || payload === null) throw new BadRequest('payload must be an object')
@@ -581,7 +591,7 @@ async function dispatch(
     }
     case 'usage': {
       const provider = readProvider(payload)
-      return ok(await controller.usage(provider, readString(payload, 'account'), signal, readForce(payload)))
+      return ok(await controller.usage(provider, readString(payload, 'account'), signal, readForce(payload), readResetPoolHealth(payload)))
     }
     case 'prepareReset':
       if (!controller.prepareReset) throw new BadRequest('Reset redemption unavailable')
