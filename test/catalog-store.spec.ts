@@ -210,3 +210,16 @@ test('account catalog store treats a malformed accounts section as absent', asyn
   assert.deepEqual(Object.keys(file.accounts.codex), ['x'])
   assert.notEqual(file.codex, undefined, 'the provider entry survives the rewrite')
 })
+
+test('Antigravity roster metadata survives disk and rejects malformed variant profiles', async () => {
+  const path = await tempStorePath()
+  const store = catalogStore('antigravity', path)
+  const model = { id: 'gemini-4-argon-low', name: 'Argon Low', antigravity: {
+    visible: true, thinkingLevel: 'LOW' as const, thinkingBudget: 1000,
+  } }
+  await store.save({ at: 1, models: [model] })
+  assert.deepEqual((await store.load())?.models[0], model)
+  for (const antigravity of [null, [], { visible: 'yes' }, { visible: true, thinkingLevel: 'MAX' }, { visible: true, thinkingBudget: -2 }, { visible: true, thinkingBudget: 1.5 }]) {
+    assert.equal(sanitizeSnapshot({ at: 1, models: [{ ...model, antigravity }] }), undefined)
+  }
+})

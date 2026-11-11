@@ -1290,7 +1290,6 @@ export function apply(ctx: Context, config: Config): void {
         if (provider === 'claude') claudeVersion.invalidate()
         adapter.clearAccountCatalog()
         poolAdapter?.invalidate()
-        handles.get(provider)?.replace([provider])
       }
       const models = await fullCatalogs.get(provider)!(provider)
       // Enumerate each account once, with the same bounds used by pool discovery.
@@ -1325,6 +1324,8 @@ export function apply(ctx: Context, config: Config): void {
           } : {}),
         }
       }))
+      // Announce forced refresh only after the replacement catalog is ready.
+      if (force) handles.get(provider)?.replace([provider])
       return {
         provider, settings: preferences.get(provider), models: rows, tools: PROVIDER_TOOLS[provider],
         // The config value the "follow config" choice resolves to, for the Settings page to label it.

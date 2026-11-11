@@ -10,6 +10,7 @@
  * `quota_aware` strategy therefore prefers the highest-urgency member, which
  * over time converges on every window hitting zero right at its reset.
  */
+import { antigravityQuotaApplies } from '../antigravity-model-id.js'
 
 import { isMissingOrInvalidCredential, OAuthEndpointError } from './common.js'
 import type { ProviderUsage, UsageWindow } from './common.js'
@@ -267,7 +268,7 @@ export class PoolUsageTracker {
 
   /** Score one member against a snapshot's windows. */
   private score(member: ConcretePoolMember, entry: SnapshotEntry, normalized = false): MemberQuota {
-    const windows = (entry.snapshot.windows ?? []).filter(window => windowApplies(window, member.model))
+    const windows = (entry.snapshot.windows ?? []).filter(window => windowApplies(window, member.model, member.provider))
     let available = true
     let urgency = 0
     for (const window of windows) {
@@ -301,8 +302,9 @@ function cooldownFor(error: unknown, defaultTtlMs: number): number {
  * model-scoped window (Claude's Opus/Sonnet lanes) applies when its scope
  * names the model family.
  */
-function windowApplies(window: UsageWindow, model: string): boolean {
+function windowApplies(window: UsageWindow, model: string, provider: ProviderId): boolean {
   if (window.scope === undefined) return true
+  if (provider === 'antigravity' && antigravityQuotaApplies(window.scope, model)) return true
   return model.toLowerCase().includes(window.scope.toLowerCase())
 }
 

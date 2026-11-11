@@ -64,6 +64,36 @@ test('Codex exhaustion notice renders localized credits and reset guidance only 
   })), '')
 })
 
+test('native shared account panel follows used/remaining quota display mode despite an Argon-only whitelist', () => {
+  const shared: UsageWindow[] = [
+    { kind: 'weekly', scope: 'Gemini Models', usedPercent: 27 },
+    { kind: 'session', scope: 'Gemini Models', usedPercent: 7 },
+    { kind: 'weekly', scope: 'Claude and GPT models', usedPercent: 77 },
+    { kind: 'session', scope: 'Claude and GPT models', usedPercent: 0 },
+  ]
+  const filtered = visibleUsageWindows('antigravity', shared, ['gemini-4-argon-high'])
+  assert.deepEqual(filtered, shared, 'model visibility does not hide account-wide shared quotas')
+  for (const dictionary of [en, zh]) {
+    const translate = (key: keyof typeof en, params?: Record<string, unknown>) =>
+      dictionary[key].replace(/\{(\w+)\}/g, (_, name: string) => String(params?.[name] ?? ''))
+    const usedHtml = renderToStaticMarkup(createElement(AccountWindows, {
+      windows: filtered, model: 'gemini-4-argon', provider: 'antigravity', translate,
+    }))
+    assert.equal((usedHtml.match(/role="progressbar"/g) ?? []).length, 4)
+    for (const percent of [27, 7, 77, 0]) assert.ok(usedHtml.includes(translate('quotaUsedPercent', { percent })))
+    assert.ok(!usedHtml.includes('gemini-4-argon-') && !usedHtml.includes('<details'))
+    assert.equal(compactSegment(display('antigravity', shared), 'gemini-4-argon', translate),
+      `Antigravity · ${translate('quotaDefaultAccount')} ${translate('usageWeekly')} ${translate('quotaUsedPercent', { percent: 27 })} · ${translate('usageFiveHourLimit')} ${translate('quotaUsedPercent', { percent: 7 })}`)
+
+    const remainingHtml = renderToStaticMarkup(createElement(AccountWindows, {
+      windows: filtered, model: 'gemini-4-argon', provider: 'antigravity', translate, mode: 'remaining',
+    }))
+    for (const percent of [73, 93, 23, 100]) assert.ok(remainingHtml.includes(translate('quotaRemainingPercent', { percent })))
+    assert.equal(compactSegment(display('antigravity', shared), 'gemini-4-argon', translate, 'remaining'),
+      `Antigravity · ${translate('quotaDefaultAccount')} ${translate('usageWeekly')} ${translate('quotaRemainingPercent', { percent: 73 })} · ${translate('usageFiveHourLimit')} ${translate('quotaRemainingPercent', { percent: 93 })}`)
+  }
+})
+
 test('Antigravity compact readout selects exact current model, not the entire catalog', () => {
   const d = display('antigravity', [...windows, { kind: 'weekly', scope: 'gemini-model-59', usedPercent: 81 }])
   assert.equal(compactSegment(d, 'gemini-model-59'), 'Antigravity · Default account Window 59% used · Weekly 81% used')
@@ -202,6 +232,16 @@ test('model reader observes switches within the same provider and handles missin
   assert.equal(await createCurrentModelReader(() => ({ directoryFor: () => ({ load: async () => ({ current: null }) }) }), 'session')(), undefined)
 })
 
+test('Antigravity badge previews variant quota scopes for the grouped current model', () => {
+  const windows: UsageWindow[] = [
+    { kind: 'other', scope: 'claude-opus-5-5-medium', usedPercent: 70 },
+    { kind: 'other', scope: 'gemini-4-argon-high', usedPercent: 20 },
+    { kind: 'weekly', scope: 'gemini-4-argon-low', usedPercent: 40 },
+  ]
+  const preview = previewWindows(windows, 'gemini-4-argon', 'antigravity')
+  assert.deepEqual(preview.shown, windows.slice(1))
+  assert.deepEqual(preview.hidden, [windows[0]])
+})
 
 test('single-account summaries identify fallback source, mode, stale data and unknown values', () => {
   const d = display('claude', [{ kind: 'weekly', scope: 'Opus', usedPercent: 28 }])

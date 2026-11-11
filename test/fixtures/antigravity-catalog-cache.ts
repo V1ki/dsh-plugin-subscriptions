@@ -1,0 +1,30 @@
+/** Model-only roster snapshot; account identifiers and credentials are omitted. */
+import type { DiscoveredModel } from '../../src/providers/common.js'
+export const antigravityCatalogCache: DiscoveredModel[] = [
+  {"id": "gemini-4-argon-medium", "antigravity": {"visible": true, "thinkingLevel": "MEDIUM"}, "priority": 0, "name": "Gemini 4 Argon (Medium)", "contextWindow": 1024000, "maxOutputTokens": 65536, "inputModalities": ["text", "image"]},
+  {"id": "gemini-4-argon-high", "antigravity": {"visible": true, "thinkingLevel": "HIGH"}, "priority": 1, "name": "Gemini 4 Argon (High)", "contextWindow": 1024000, "maxOutputTokens": 65536, "inputModalities": ["text", "image"]},
+  {"id": "gemini-4-argon-low", "antigravity": {"visible": true, "thinkingLevel": "LOW"}, "priority": 2, "name": "Gemini 4 Argon (Low)", "contextWindow": 1024000, "maxOutputTokens": 65536, "inputModalities": ["text", "image"]},
+  {"id": "gemini-3.8-flash-high", "antigravity": {"visible": true, "thinkingLevel": "HIGH"}, "priority": 3, "name": "Gemini 3.8 Flash (High)", "contextWindow": 1024000, "maxOutputTokens": 65536, "inputModalities": ["text", "image"]},
+  {"id": "gemini-3.8-flash-medium", "antigravity": {"visible": true, "thinkingLevel": "MEDIUM"}, "priority": 4, "name": "Gemini 3.8 Flash (Medium)", "contextWindow": 1024000, "maxOutputTokens": 65536, "inputModalities": ["text", "image"]},
+  {"id": "gemini-3.8-flash-low", "antigravity": {"visible": true, "thinkingLevel": "LOW"}, "priority": 5, "name": "Gemini 3.8 Flash (Low)", "contextWindow": 1024000, "maxOutputTokens": 65536, "inputModalities": ["text", "image"]},
+  {"id": "claude-opus-5-5-low", "antigravity": {"visible": true, "thinkingLevel": "LOW"}, "priority": 6, "name": "Claude Opus 5.5 (Low)", "contextWindow": 1024000, "maxOutputTokens": 128000, "inputModalities": ["text", "image"]},
+  {"id": "claude-opus-5-5-medium", "antigravity": {"visible": true, "thinkingLevel": "MEDIUM"}, "priority": 7, "name": "Claude Opus 5.5 (Medium)", "contextWindow": 1024000, "maxOutputTokens": 128000, "inputModalities": ["text", "image"]},
+  {"id": "claude-opus-5-5-high", "antigravity": {"visible": true, "thinkingLevel": "HIGH"}, "priority": 8, "name": "Claude Opus 5.5 (High)", "contextWindow": 1024000, "maxOutputTokens": 128000, "inputModalities": ["text", "image"]},
+  {"id": "claude-sonnet-5-5-low", "antigravity": {"visible": true, "thinkingLevel": "LOW"}, "priority": 9, "name": "Claude Sonnet 5.5 (Low)", "contextWindow": 1024000, "maxOutputTokens": 128000, "inputModalities": ["text", "image"]},
+  {"id": "claude-sonnet-5-5-medium", "antigravity": {"visible": true, "thinkingLevel": "MEDIUM"}, "priority": 10, "name": "Claude Sonnet 5.5 (Medium)", "contextWindow": 1024000, "maxOutputTokens": 128000, "inputModalities": ["text", "image"]},
+  {"id": "claude-sonnet-5-5-high", "antigravity": {"visible": true, "thinkingLevel": "HIGH"}, "priority": 11, "name": "Claude Sonnet 5.5 (High)", "contextWindow": 1024000, "maxOutputTokens": 128000, "inputModalities": ["text", "image"]},
+  {"id": "gpt-oss-120b-medium", "antigravity": {"visible": true, "thinkingBudget": 8192}, "priority": 12, "name": "GPT-OSS 120B (Medium)", "contextWindow": 1024000, "maxOutputTokens": 32768, "inputModalities": ["text", "image"]},
+  {"id": "gemini-2.5-flash-thinking", "antigravity": {"visible": false, "thinkingLevel": "LOW"}, "priority": 13, "name": "Gemini 3.5 Flash Lite", "contextWindow": 1024000, "maxOutputTokens": 65535, "inputModalities": ["text", "image"]},
+  {"id": "gemini-3-flash", "antigravity": {"visible": false, "thinkingLevel": "HIGH"}, "priority": 13, "name": "Gemini 3 Flash", "contextWindow": 1024000, "maxOutputTokens": 65536, "inputModalities": ["text", "image"]},
+  {"id": "tab_jump_flash_lite_preview", "antigravity": {"visible": false}, "priority": 13, "name": "Tab_jump_flash_lite_preview", "contextWindow": 1024000, "maxOutputTokens": 4096, "inputModalities": ["text", "image"]},
+  {"id": "gemini-2.5-flash-lite", "antigravity": {"visible": false, "thinkingLevel": "LOW"}, "priority": 13, "name": "Gemini 3.5 Flash Lite", "contextWindow": 1024000, "maxOutputTokens": 65535, "inputModalities": ["text", "image"]},
+  {"id": "gemini-3.8-flash-tiered", "antigravity": {"visible": false, "thinkingLevel": "HIGH"}, "priority": 13, "name": "Gemini 3.8 Flash Tiered", "contextWindow": 1024000, "maxOutputTokens": 65536, "inputModalities": ["text", "image"]},
+  {"id": "chat_20706", "antigravity": {"visible": false}, "priority": 13, "name": "Chat_20706", "contextWindow": 1024000, "inputModalities": ["text", "image"]},
+  {"id": "gemini-3.1-flash-lite", "antigravity": {"visible": false, "thinkingLevel": "LOW"}, "priority": 13, "name": "Gemini 3.1 Flash Lite", "contextWindow": 1024000, "maxOutputTokens": 65535, "inputModalities": ["text", "image"]},
+  {"id": "gemini-3.5-flash-lite", "antigravity": {"visible": false, "thinkingLevel": "LOW"}, "priority": 13, "name": "Gemini 3.5 Flash Lite", "contextWindow": 1024000, "maxOutputTokens": 65535, "inputModalities": ["text", "image"]},
+  {"id": "chat_23310", "antigravity": {"visible": false}, "priority": 13, "name": "Chat_23310", "contextWindow": 1024000, "inputModalities": ["text", "image"]},
+  {"id": "gemini-2.5-pro", "antigravity": {"visible": false, "thinkingBudget": 1024}, "priority": 13, "name": "Gemini 2.5 Pro", "contextWindow": 1024000, "maxOutputTokens": 65535, "inputModalities": ["text", "image"]},
+  {"id": "gemini-3.1-flash-image", "antigravity": {"visible": false}, "priority": 13, "name": "Gemini 3.1 Flash Image", "contextWindow": 1024000, "maxOutputTokens": 65536, "inputModalities": ["text", "image"]},
+  {"id": "tab_flash_lite_preview", "antigravity": {"visible": false}, "priority": 13, "name": "Tab_flash_lite_preview", "contextWindow": 1024000, "maxOutputTokens": 4096, "inputModalities": ["text", "image"]},
+  {"id": "gemini-2.5-flash", "antigravity": {"visible": false, "thinkingLevel": "LOW"}, "priority": 13, "name": "Gemini 3.5 Flash Lite", "contextWindow": 1024000, "maxOutputTokens": 65535, "inputModalities": ["text", "image"]}
+]

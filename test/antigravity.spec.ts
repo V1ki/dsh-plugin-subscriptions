@@ -171,6 +171,7 @@ test('model discovery and quota display map fetchAvailableModels data', async ()
   const models = await fetchAntigravityModels(session, runtime, fetchFn)
   assert.deepEqual(models, [{
     id: 'gemini-3-flash',
+    antigravity: { visible: true },
     name: 'Gemini 3 Flash',
     contextWindow: 500_000,
     inputModalities: ['text', 'image'],
@@ -325,6 +326,25 @@ test('streamGenerateContent SSE and generateContent URL/forwarding are both supp
   assert.equal(new Headers(calls[0].init?.headers).get('authorization'), 'Bearer access-token')
 })
 
+test('local merge preserves explicit Hub UA for catalog, usage and generation', async () => {
+  const { antigravityQuotaSummary } = await import('./fixtures/antigravity-quota-summary.js')
+  const hubRuntime = { ...runtime, userAgent: 'antigravity/hub/2.29.0' }
+  const calls: RecordedCall[] = []
+  const fetchFn = routed({
+    [`${runtime.baseURL}/v1internal:fetchAvailableModels`]: { models: { 'gemini-4-argon-high': {} } },
+    [`${runtime.baseURL}/v1internal:retrieveUserQuotaSummary`]: antigravityQuotaSummary(),
+    [`${runtime.baseURL}/v1internal:loadCodeAssist`]: {},
+    [`${runtime.baseURL}/v1internal:generateContent`]: { response: {} },
+  }, calls)
+  await fetchAntigravityModels(session, hubRuntime, fetchFn)
+  await fetchAntigravityUsage(session, hubRuntime, fetchFn)
+  await requestAntigravityContent(session, toAntigravityRequest(options([]), [
+    message('user', [{ type: 'text', text: 'hi' }]),
+  ], session.projectId), false, hubRuntime, fetchFn)
+  assert.equal(calls.length, 4)
+  for (const call of calls) assert.equal(new Headers(call.init?.headers).get('user-agent'), hubRuntime.userAgent)
+})
+
 /** Isolated accounts: no disk, OAuth, or real subscription calls. */
 function accountTokens(refresh: (value: AntigravitySession) => Promise<AntigravitySession> = async value => value) {
   const accounts = new Map<string, AntigravitySession>([
@@ -365,7 +385,7 @@ test('Antigravity resolves per-model output defaults and bounds configured defau
     'gpt-oss-120b-medium': 32768,
     'claude-sonnet-4-6': 64000,
     'gemini-3-flash': 65536,
-    'tab_flash_lite_preview': 4096,
+    'gemini-3.1-flash-lite': 4096,
   }
   let fetches = 0
   const fetchFn: FetchFn = async () => {
@@ -885,4 +905,237 @@ test('Gemini 4 reuses a real signature only for the same provider and model', ()
     const call = switched.request.contents.flatMap(content => content.parts).find(part => part.functionCall)
     assert.equal(call?.thoughtSignature, 'skip_thought_signature_validator')
   }
+})
+
+test('Antigravity uses the selectable roster, tier associations and native effort metadata', async () => {
+  const { antigravityCatalog } = await import('./fixtures/antigravity-catalog.js')
+  const { tokens, accounts } = accountTokens()
+  accounts.delete('bob')
+  const adapter = new AntigravityAdapter({ tokens, models: [], discovery: true, streamIdleTimeoutMs: 1000, runtime,
+    fetchFn: async () => Response.json(antigravityCatalog()),
+  })
+  const models = await adapter.listModels('antigravity')
+  assert.deepEqual(models.map(model => model.name), [
+    'Gemini 4 Argon', 'Gemini 3.8 Flash', 'Claude Opus 5.5', 'Claude Sonnet 5.5', 'GPT-OSS 120B',
+  ])
+  for (const model of models.slice(0, 4)) {
+    const info = await adapter.resolveModel('antigravity', model.id)
+    assert.deepEqual(info.reasoning?.efforts.map(effort => effort.id), ['low', 'medium', 'high'])
+    assert.equal(info.reasoning?.defaultEffort, 'high')
+  }
+  assert.deepEqual((await adapter.resolveModel('antigravity', 'gpt-oss-120b')).reasoning?.efforts.map(effort => effort.id), ['medium'])
+})
+
+test('group selections send the actual variant and advertised thinking config in both generation paths', async () => {
+  const { antigravityCatalog } = await import('./fixtures/antigravity-catalog.js')
+  const { ReasoningEffortId } = await import('@deepseek-ai/dsh-llm')
+  const { tokens, accounts } = accountTokens()
+  accounts.delete('bob')
+  const sent: ReturnType<typeof toAntigravityRequest>[] = []
+  const event = { response: { candidates: [{ content: { parts: [{ text: 'ok', thoughtSignature: 'signed' }] }, finishReason: 'STOP' }] } }
+  const adapter = new AntigravityAdapter({ tokens, models: [], discovery: true, streamIdleTimeoutMs: 1000, runtime,
+    defaultEffortOf: () => 'medium',
+    fetchFn: async (url, init) => {
+      if (String(url).endsWith('fetchAvailableModels')) return Response.json(antigravityCatalog())
+      sent.push(JSON.parse(String(init?.body)))
+      return String(url).includes('streamGenerateContent')
+        ? new Response(byteStream(`data: ${JSON.stringify(event)}\n\n`)) : Response.json(event)
+    },
+  })
+  for (const effort of ['low', 'medium', 'high']) {
+    const chunks: StreamChunk[] = []
+    for await (const chunk of adapter.streamAccount({ ...options([]), model: 'claude-opus-5-5', reasoningEffort: ReasoningEffortId(effort) }, 'alice')) chunks.push(chunk)
+    assert.equal(sent.at(-1)?.model, `claude-opus-5-5-${effort}`)
+    assert.deepEqual(sent.at(-1)?.request.generationConfig?.thinkingConfig, { includeThoughts: true, thinkingLevel: effort.toUpperCase() })
+    const finish = chunks.at(-1)
+    assert.equal(finish?.type, 'finish')
+    if (finish?.type === 'finish') assert.equal((finish.replayState?.response as { wireModel: string }).wireModel, `claude-opus-5-5-${effort}`)
+  }
+  await adapter.generate({ ...options([]), model: 'claude-opus-5-5' })
+  assert.equal(sent.at(-1)?.model, 'claude-opus-5-5-medium', 'saved default applies without an explicit choice')
+  await adapter.generate({ ...options([]), model: 'claude-opus-5-5', reasoningEffort: ReasoningEffortId('high') })
+  assert.equal(sent.at(-1)?.model, 'claude-opus-5-5-high', 'explicit choice overrides saved default')
+  const count = sent.length
+  await assert.rejects(adapter.generate({ ...options([]), model: 'claude-opus-5-5', reasoningEffort: ReasoningEffortId('max') }), /does not support/)
+  assert.equal(sent.length, count, 'invalid efforts fail before generation')
+  await adapter.generate({ ...options([]), model: 'claude-opus-5-5-low', reasoningEffort: ReasoningEffortId('low') })
+  assert.equal(sent.at(-1)?.model, 'claude-opus-5-5-low', 'old concrete ids remain callable')
+})
+
+test('grouped catalogs survive restart and do not route missing effort variants across accounts', async () => {
+  const { antigravityCatalog } = await import('./fixtures/antigravity-catalog.js')
+  const { sanitizeSnapshot } = await import('../src/providers/catalog-store.js')
+  const { ReasoningEffortId } = await import('@deepseek-ai/dsh-llm')
+  const { tokens } = accountTokens()
+  const raw = await fetchAntigravityModels(session, runtime, async () => Response.json(antigravityCatalog()))
+  const snapshot = sanitizeSnapshot(JSON.parse(JSON.stringify({ at: Date.now(), models: raw })))!
+  assert.ok(snapshot)
+  let generated = 0
+  const adapter = new AntigravityAdapter({ tokens, models: [], discovery: true, streamIdleTimeoutMs: 1000, runtime,
+    catalogStore: { load: async () => snapshot, save: async () => {}, clear: async () => {} },
+    accountCatalogStore: () => ({ load: async () => ({ ...snapshot, models: snapshot.models.filter(model => !model.id.endsWith('-low')) }), save: async () => {}, clear: async () => {} }),
+    fetchFn: async () => { generated++; throw new Error('network must not be used') },
+  })
+  assert.ok((await adapter.listModels('antigravity')).some(model => model.id === 'claude-opus-5-5'))
+  assert.deepEqual((await adapter.resolveOwnModel('antigravity', 'claude-opus-5-5', 'bob')).reasoning?.efforts.map(effort => effort.id), ['medium', 'high'])
+  const consume = async () => { for await (const _ of adapter.streamAccount({ ...options([]), model: 'claude-opus-5-5', reasoningEffort: ReasoningEffortId('low') }, 'bob')) {} }
+  await assert.rejects(consume(), /does not support/)
+  assert.equal(generated, 0)
+})
+
+test('replay signatures follow the actual variant within a presentation group', () => {
+  const source = {
+    kind: 'model' as const, provider: 'antigravity', model: 'claude-opus-5-5',
+    replayState: { response: { kind: 'antigravity', version: 1, wireModel: 'claude-opus-5-5-low' }, blocks: [{ thoughtSignature: 'low-signature' }] },
+  }
+  const messages = [message('assistant', [{ type: 'reasoning', text: 'private thought' }], source)]
+  const input = { ...options([]), model: 'claude-opus-5-5' }
+  const same = toAntigravityRequest(input, messages, session.projectId, false, 'claude-opus-5-5-low')
+  const changed = toAntigravityRequest(input, messages, session.projectId, false, 'claude-opus-5-5-high')
+  assert.ok(JSON.stringify(same).includes('low-signature'))
+  assert.ok(!JSON.stringify(changed).includes('low-signature'))
+})
+
+test('Antigravity has no fabricated picker fallback when discovery has no verified catalog', async () => {
+  const { tokens } = accountTokens()
+  const adapter = new AntigravityAdapter({ tokens, models: [{ id: 'made-up-model' }], discovery: true, streamIdleTimeoutMs: 1000, runtime,
+    fetchFn: async () => { throw new Error('offline') },
+  })
+  assert.deepEqual(await adapter.listModels('antigravity'), [])
+})
+
+test('refresh removes unavailable efforts without silently substituting a new selection', async () => {
+  const { ReasoningEffortId } = await import('@deepseek-ai/dsh-llm')
+  const { tokens, accounts } = accountTokens()
+  accounts.delete('bob')
+  let removed = false
+  let generated = 0
+  const adapter = new AntigravityAdapter({ tokens, models: [], discovery: true, streamIdleTimeoutMs: 1000, runtime,
+    defaultEffortOf: () => 'low',
+    fetchFn: async url => {
+      if (!String(url).endsWith('fetchAvailableModels')) { generated++; return Response.json({}) }
+      return Response.json({ models: {
+        ...removed ? {} : { 'claude-opus-5-5-low': { displayName: 'Claude Opus 5.5 Low' } },
+        'claude-opus-5-5-high': { displayName: 'Claude Opus 5.5 High' },
+      } })
+    },
+  })
+  assert.deepEqual((await adapter.resolveModel('antigravity', 'claude-opus-5-5')).reasoning?.efforts.map(effort => effort.id), ['low', 'high'])
+  removed = true
+  adapter.clearAccountCatalog()
+  const info = await adapter.resolveModel('antigravity', 'claude-opus-5-5')
+  assert.deepEqual(info.reasoning?.efforts.map(effort => effort.id), ['high'])
+  assert.equal(info.reasoning?.defaultEffort, 'high', 'a stale configured default cannot add an unavailable effort')
+  await assert.rejects(adapter.generate({ ...options([]), model: 'claude-opus-5-5', reasoningEffort: ReasoningEffortId('low') }), /does not support/)
+  assert.equal(generated, 0)
+})
+
+test('failed catalog refresh retains the last verified roster instead of static model entries', async () => {
+  const { tokens, accounts } = accountTokens()
+  accounts.delete('bob')
+  const adapter = new AntigravityAdapter({ tokens, models: [{ id: 'static-only' }], discovery: true, streamIdleTimeoutMs: 1000, runtime,
+    catalogStore: { load: async () => ({ at: 0, models: [{ id: 'claude-opus-5-5-high', name: 'Claude Opus 5.5 High' }] }), save: async () => {}, clear: async () => {} },
+    fetchFn: async () => { throw new Error('offline') },
+  })
+  assert.deepEqual((await adapter.listOwnModels('antigravity', 'alice')).map(model => model.id), ['claude-opus-5-5'])
+})
+
+test('usage prefers shared summary over model-by-model quota enumeration', async () => {
+  const { antigravityQuotaSummary } = await import('./fixtures/antigravity-quota-summary.js')
+  const calls: RecordedCall[] = []
+  const usage = await fetchAntigravityUsage(session, runtime, routed({
+    [`${runtime.baseURL}/v1internal:retrieveUserQuotaSummary`]: antigravityQuotaSummary(),
+    [`${runtime.baseURL}/v1internal:loadCodeAssist`]: { paidTier: { name: 'Google AI Pro' } },
+  }, calls))
+  assert.equal(usage.plan, 'Google AI Pro')
+  assert.equal(usage.windows?.length, 5)
+  assert.ok(!calls.some(call => call.url.includes('fetchAvailableModels')))
+})
+
+test('native two-group summary covers Argon without fetching duplicate effort quotas', async () => {
+  const calls: RecordedCall[] = []
+  const usage = await fetchAntigravityUsage(session, runtime, routed({
+    [`${runtime.baseURL}/v1internal:retrieveUserQuotaSummary`]: { groups: [
+      { displayName: 'Gemini Models', buckets: [
+        { window: 'weekly', remainingFraction: 0.73 }, { window: '5h', remainingFraction: 0.93 },
+      ] },
+      { displayName: 'Claude and GPT models', buckets: [
+        { window: 'weekly', remainingFraction: 0.23 }, { window: '5h', remainingFraction: 1 },
+      ] },
+    ] },
+    [`${runtime.baseURL}/v1internal:loadCodeAssist`]: {},
+  }, calls))
+  assert.equal(usage.windows?.length, 4)
+  assert.ok(!calls.some(call => call.url.includes('fetchAvailableModels')))
+  assert.deepEqual(usage.windows?.map(window => Math.round(window.usedPercent)), [27, 7, 77, 0])
+})
+
+test('partial shared summary supplements only uncovered selectable model quotas', async () => {
+  const { antigravityQuotaSummary } = await import('./fixtures/antigravity-quota-summary.js')
+  const summary = antigravityQuotaSummary()
+  summary.groups = summary.groups.filter(group => group.displayName === 'Claude and GPT models')
+  const calls: RecordedCall[] = []
+  const usage = await fetchAntigravityUsage(session, runtime, routed({
+    [`${runtime.baseURL}/v1internal:retrieveUserQuotaSummary`]: summary,
+    [`${runtime.baseURL}/v1internal:loadCodeAssist`]: {},
+    [`${runtime.baseURL}/v1internal:fetchAvailableModels`]: {
+      agentModelSorts: [{ groups: [{ modelIds: ['gemini-4-argon-high', 'gemini-3.8-flash-high'] }] }],
+      models: {
+        'gemini-4-argon-high': { quotaInfo: { remainingFraction: 0.96, resetTime: '2026-11-06T19:04:45Z' } },
+        'gemini-3.8-flash-high': { quotaInfo: { remainingFraction: 0.96 } },
+        chat_23310: { isInternal: true, quotaInfo: { remainingFraction: 1 } },
+      },
+    },
+  }, calls))
+  const fallback = usage.windows?.filter(window => window.scope === 'gemini-4-argon-high')
+  assert.equal(fallback?.length, 1)
+  assert.equal(fallback?.[0].kind, 'other', 'reset proximity does not prove a 5h or weekly cadence')
+  assert.ok(Math.abs(fallback![0].usedPercent - 4) < 0.001)
+  assert.ok(usage.windows?.some(window => window.scope === 'gemini-3.8-flash-high'))
+  assert.equal(usage.windows?.length, 4)
+  assert.equal(calls.filter(call => call.url.includes('fetchAvailableModels')).length, 1)
+})
+
+test('partial summary survives supplemental quota fetch failure without retrying auth or throttling', async () => {
+  for (const status of [401, 403, 429, 503]) {
+    const calls: RecordedCall[] = []
+    const usage = await fetchAntigravityUsage(session, runtime, routed({
+      [`${runtime.baseURL}/v1internal:retrieveUserQuotaSummary`]: { groups: [{ displayName: 'Gemini Models', buckets: [{ window: 'weekly', remainingFraction: 0.8 }] }] },
+      [`${runtime.baseURL}/v1internal:loadCodeAssist`]: {},
+      [`${runtime.baseURL}/v1internal:fetchAvailableModels`]: new Response('', { status }),
+    }, calls))
+    assert.equal(usage.windows?.length, 1)
+    assert.equal(calls.filter(call => call.url.includes('fetchAvailableModels')).length, 1)
+  }
+})
+
+test('usage summary fallback excludes internal and non-selectable model quota windows', async () => {
+  const usage = await fetchAntigravityUsage(session, runtime, routed({
+    [`${runtime.baseURL}/v1internal:retrieveUserQuotaSummary`]: new Response('', { status: 404 }),
+    [`${runtime.baseURL}/v1internal:loadCodeAssist`]: {},
+    [`${runtime.baseURL}/v1internal:fetchAvailableModels`]: {
+      agentModelSorts: [{ groups: [{ modelIds: ['gemini-4-argon-high'] }] }],
+      models: {
+        'gemini-4-argon-high': { quotaInfo: { remainingFraction: 0.67 } },
+        chat_23310: { isInternal: true, quotaInfo: { remainingFraction: 1 } },
+        'gemini-2.5-pro': { quotaInfo: { remainingFraction: 0.99 } },
+      },
+    },
+  }))
+  assert.deepEqual(usage.windows?.map(window => window.scope), ['gemini-4-argon-high'])
+  assert.equal(usage.windows?.[0].kind, 'other', 'fallback must not claim an unreported 5h or weekly limit')
+})
+
+test('usage cancellation and throttling do not trigger legacy fallback requests', async () => {
+  for (const status of [401, 403, 429]) {
+    const calls: RecordedCall[] = []
+    await assert.rejects(fetchAntigravityUsage(session, runtime, routed({
+      [`${runtime.baseURL}/v1internal:retrieveUserQuotaSummary`]: new Response('', { status }),
+      [`${runtime.baseURL}/v1internal:loadCodeAssist`]: {},
+    }, calls)))
+    assert.ok(!calls.some(call => call.url.includes('fetchAvailableModels')))
+  }
+  const controller = new AbortController()
+  controller.abort()
+  await assert.rejects(fetchAntigravityUsage(session, runtime, async (_url, init) => { init?.signal?.throwIfAborted(); throw new Error('unexpected') }, controller.signal), { name: 'AbortError' })
 })

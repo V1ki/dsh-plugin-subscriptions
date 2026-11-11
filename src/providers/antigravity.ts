@@ -4,7 +4,7 @@
  * the daily-cloudcode-pa v1internal request envelope.
  */
 
-import { errorChain, EMPTY_RESPONSE_CODE, LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
+import { errorChain, EMPTY_RESPONSE_CODE, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
@@ -16,6 +16,9 @@ import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { FlowSpec } from '../auth/oauth-flow.js'
 import type { AntigravitySession, ProviderId } from '../auth/store.js'
 import { resolveImages } from '../translate/resolved.js'
+import { parseAntigravityQuotaSummary } from './antigravity-usage.js'
+import { ANTIGRAVITY_QUOTA_SCOPES, antigravityQuotaApplies } from '../antigravity-model-id.js'
+import { groupAntigravityModels, selectAntigravityVariant, isAntigravityChatModel } from './antigravity-models.js'
 import { antigravityReasoning } from '../translate/antigravity-thinking.js'
 import {
   parseAntigravityResponse,
@@ -56,7 +59,8 @@ export const ANTIGRAVITY_TOKEN_URL = 'https://oauth2.googleapis.com/token'
 export const ANTIGRAVITY_USERINFO_URL = 'https://www.googleapis.com/oauth2/v2/userinfo'
 export const ANTIGRAVITY_DEFAULT_BASE_URL = 'https://daily-cloudcode-pa.googleapis.com'
 export const ANTIGRAVITY_PROD_BASE_URL = 'https://cloudcode-pa.googleapis.com'
-export const ANTIGRAVITY_DEFAULT_USER_AGENT = 'antigravity/1.104.0 dsh-plugin-subscriptions'
+// CLI-family catalog fingerprint used by upstream PR #182 for Argon discovery.
+export const ANTIGRAVITY_DEFAULT_USER_AGENT = `antigravity/cli/1.3.4 (aidev_client; ${process.platform}; ${process.arch})`
 export const ANTIGRAVITY_PREEMPT_MS = 5 * 60_000
 const ANTIGRAVITY_CALLBACK_PATH = '/oauth-callback'
 const ANTIGRAVITY_CONTEXT_WINDOW = 1_024_000
@@ -360,6 +364,11 @@ export function isAntigravityPermanentRefreshError(error: unknown): boolean {
 interface AntigravityWireModel {
   model?: string
   displayName?: string
+  isInternal?: boolean
+  disabled?: boolean
+  selectable?: boolean
+  thinkingLevel?: number
+  thinkingBudget?: number
   description?: string
   inputTokenLimit?: number
   maxInputTokens?: number
@@ -371,6 +380,10 @@ interface AntigravityWireModel {
 
 interface AntigravityModelsResponse {
   models?: Record<string, AntigravityWireModel>
+  agentModelSorts?: { groups?: { modelIds?: string[] }[] }[]
+  tieredModelIds?: Record<string, string[]>
+  tabModelIds?: string[]
+  imageGenerationModelIds?: string[]
 }
 
 /** Correct a stale Gemini version label only when the wire enum and the actual catalog ID agree. */
@@ -405,17 +418,34 @@ export async function fetchAntigravityModels(
   if (typeof payload.models !== 'object' || payload.models === null) {
     throw new Error('Antigravity models endpoint returned no models object')
   }
-  const models = Object.entries(payload.models).map(([id, model]): DiscoveredModel => ({
-    id,
-    name: catalogName(id, model),
-    ...model.description === undefined ? {} : { description: model.description },
-    contextWindow: model.inputTokenLimit ?? model.maxInputTokens ?? ANTIGRAVITY_CONTEXT_WINDOW,
-    ...typeof model.maxOutputTokens === 'number' && Number.isSafeInteger(model.maxOutputTokens) && model.maxOutputTokens > 0
-      ? { maxOutputTokens: model.maxOutputTokens } : {},
-    inputModalities: ['text', 'image'],
-  }))
+  const nonChat = new Set([...payload.tabModelIds ?? [], ...payload.imageGenerationModelIds ?? []])
+  const ordered = (payload.agentModelSorts ?? []).flatMap(sort => (sort.groups ?? []).flatMap(group => group.modelIds ?? []))
+  // tieredModelIds also contains category-only routes (e.g. pro, flashLite).
+  // Only agentModelSorts describes the native selector's inventory.
+  const selectable = ordered.length ? new Set(ordered) : undefined
+  const levels = ['LOW', 'MEDIUM', 'HIGH'] as const
+  const models = Object.entries(payload.models).map(([id, model]): DiscoveredModel => {
+    const position = ordered.indexOf(id)
+    return {
+      id,
+      antigravity: {
+        visible: model.isInternal !== true && model.disabled !== true && model.selectable !== false
+          && !nonChat.has(id) && (selectable === undefined ? isAntigravityChatModel(id) : selectable.has(id)),
+        ...Number.isInteger(model.thinkingLevel) && model.thinkingLevel! >= 1 && model.thinkingLevel! <= 3
+          ? { thinkingLevel: levels[model.thinkingLevel! - 1] } : {},
+        ...Number.isSafeInteger(model.thinkingBudget) && model.thinkingBudget! >= -1 ? { thinkingBudget: model.thinkingBudget! } : {},
+      },
+      ...ordered.length ? { priority: position < 0 ? ordered.length : position } : {},
+      name: catalogName(id, model),
+      ...model.description === undefined ? {} : { description: model.description },
+      contextWindow: model.inputTokenLimit ?? model.maxInputTokens ?? ANTIGRAVITY_CONTEXT_WINDOW,
+      ...typeof model.maxOutputTokens === 'number' && Number.isSafeInteger(model.maxOutputTokens) && model.maxOutputTokens > 0
+        ? { maxOutputTokens: model.maxOutputTokens } : {},
+      inputModalities: ['text', 'image'],
+    }
+  })
   if (models.length === 0) throw new Error('Antigravity models endpoint returned an empty catalog')
-  return models
+  return models.sort((a, b) => (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER))
 }
 
 function resetTime(value: unknown): number | undefined {
@@ -448,19 +478,48 @@ export async function fetchAntigravityUsage(
   signal?: AbortSignal,
 ): Promise<ProviderUsage> {
   const metadata = { ideType: 'ANTIGRAVITY', platform: 'PLATFORM_UNSPECIFIED', pluginType: 'GEMINI' }
-  const [models, account] = await Promise.all([
-    callInternal<AntigravityModelsResponse>(
-      'fetchAvailableModels', { project: session.projectId }, session.accessToken, runtime, fetchFn, signal,
-    ),
+  const readWindows = async (): Promise<UsageWindow[]> => {
+    let shared: UsageWindow[] = []
+    try {
+      const summary = await callInternal<unknown>(
+        'retrieveUserQuotaSummary', { project: session.projectId }, session.accessToken, runtime, fetchFn, signal,
+      )
+      shared = parseAntigravityQuotaSummary(summary)
+      if (ANTIGRAVITY_QUOTA_SCOPES.slice(0, 2).every(scope => shared.some(window => window.scope === scope))) return shared
+    } catch (error) {
+      if (isDiscoveryAborted(error, signal)) throw error
+      // Auth and throttling failures must surface rather than trigger extra requests.
+      if (error instanceof LlmError && ['AUTH', 'RATE_LIMIT'].includes(error.code)) throw error
+    }
+    let models: AntigravityModelsResponse
+    try {
+      models = await callInternal<AntigravityModelsResponse>(
+        'fetchAvailableModels', { project: session.projectId }, session.accessToken, runtime, fetchFn, signal,
+      )
+    } catch (error) {
+      if (isDiscoveryAborted(error, signal) || shared.length === 0) throw error
+      // A missing supplemental lane must not discard valid shared quotas.
+      return shared
+    }
+    const roster = (models.agentModelSorts ?? []).flatMap(sort => (sort.groups ?? []).flatMap(group => group.modelIds ?? []))
+    const selectable = roster.length ? new Set(roster) : undefined
+    const windows: UsageWindow[] = [...shared]
+    for (const [id, model] of Object.entries(models.models ?? {})) {
+      if (model.isInternal || model.disabled || model.selectable === false
+        || !(selectable ? selectable.has(id) : isAntigravityChatModel(id))) continue
+      // Missing groups (notably Argon) retain their explicitly reported model quota.
+      if (shared.some(window => antigravityQuotaApplies(window.scope, id))) continue
+      const ordinary = usageWindow('other', id, model.quotaInfo)
+      const weekly = usageWindow('weekly', id, model.weeklyQuotaInfo ?? model.weeklyQuota)
+      if (ordinary !== undefined) windows.push(ordinary)
+      if (weekly !== undefined) windows.push(weekly)
+    }
+    return windows
+  }
+  const [windows, account] = await Promise.all([
+    readWindows(),
     callInternal<LoadCodeAssistResponse>('loadCodeAssist', { metadata }, session.accessToken, runtime, fetchFn, signal),
   ])
-  const windows: UsageWindow[] = []
-  for (const [modelId, model] of Object.entries(models.models ?? {})) {
-    const ordinary = usageWindow('other', modelId, model.quotaInfo)
-    const weekly = usageWindow('weekly', modelId, model.weeklyQuotaInfo ?? model.weeklyQuota)
-    if (ordinary !== undefined) windows.push(ordinary)
-    if (weekly !== undefined) windows.push(weekly)
-  }
   const plan = account.paidTier?.name ?? account.paidTier?.id
     ?? account.currentTier?.name ?? account.currentTier?.id ?? session.plan
   const credits = account.paidTier?.availableCredits?.[0]?.creditAmount
@@ -619,7 +678,7 @@ export class AntigravityAdapter extends LlmAdapter {
         catalog,
         () => this.fetchCatalog(account, signal),
       ), preferCached)
-      return models.map(model => ({
+      return groupAntigravityModels(models).map(model => ({
         provider,
         id: model.id,
         name: model.name,
@@ -629,8 +688,10 @@ export class AntigravityAdapter extends LlmAdapter {
     } catch (error) {
       if (isDiscoveryAborted(error, signal)) throw error
       if (isMissingOrInvalidCredential(error)) return []
-      this.options.onWarn?.(`Antigravity model discovery failed; using the built-in catalog (${errorChain(error)})`)
-      return this.staticModels(provider)
+      const known = await catalog.resolve(() => Promise.reject(error))
+      if (known !== undefined) return groupAntigravityModels(known).map(model => ({ provider, id: model.id, name: model.name, inputModalities: model.inputModalities ?? ['text', 'image'] }))
+      this.options.onWarn?.(`Antigravity model discovery failed; no verified catalog available (${errorChain(error)})`)
+      return []
     }
   }
 
@@ -640,7 +701,8 @@ export class AntigravityAdapter extends LlmAdapter {
     return discoverAcrossAccounts(accounts, async key => {
       const catalog = await this.catalogFor(key)
       const models = await catalog.resolve(() => this.fetchCatalog(key))
-      return models?.find(entry => entry.id === model)
+      return (models === undefined ? undefined : groupAntigravityModels(models).find(entry => entry.id === model))
+        ?? models?.find(entry => entry.id === model)
     })
   }
 
@@ -656,7 +718,10 @@ export class AntigravityAdapter extends LlmAdapter {
   async resolveOwnModel(provider: string, model: string, account?: string): Promise<LlmResolvedModelInfo> {
     const discovered = await this.discovered(model, account)
     const configured = this.options.models.find(entry => entry.id === model)
-    const reasoning = mergeReasoning(this.options.defaultEffortOf?.(model), antigravityReasoning(model))
+    const fixedLevel = discovered?.antigravity?.thinkingLevel?.toLowerCase()
+    const fixedReasoning = fixedLevel === undefined ? antigravityReasoning(model)
+      : { efforts: [{ id: ReasoningEffortId(fixedLevel), name: fixedLevel[0].toUpperCase() + fixedLevel.slice(1) }] }
+    const reasoning = mergeReasoning(this.options.defaultEffortOf?.(model), discovered?.reasoning ?? fixedReasoning)
     const outputLimit = discovered?.maxOutputTokens
     const preferredMaxTokens = configured?.maxTokens ?? outputLimit ?? ANTIGRAVITY_DEFAULT_MAX_TOKENS
     // Configuration may lower the default, but must not exceed a known server cap.
@@ -687,19 +752,60 @@ export class AntigravityAdapter extends LlmAdapter {
     return this.streamCore(options, account)
   }
 
+  /** Resolve a presentation id against the serving account, keeping legacy concrete ids usable. */
+  private async selectedOptions(options: GenerateOptions, account?: string): Promise<{ options: GenerateOptions; wireModel: string; profile?: DiscoveredModel['antigravity'] }> {
+    if (!this.options.discovery) return { options, wireModel: options.model }
+    const catalog = await this.catalogFor(account)
+    const models = await catalog.resolve(() => this.fetchCatalog(account, options.signal))
+    options.signal?.throwIfAborted()
+    if (models === undefined) throw new LlmError('Antigravity model catalog is unavailable; refresh the subscription model list', 'NO_ADAPTER')
+    const group = groupAntigravityModels(models).find(entry => entry.id === options.model)
+    if (group?.variants === undefined) {
+      // A synthetic group must not be sent to an account where only other models exist.
+      if (!models.some(entry => entry.id === options.model)) {
+        throw new LlmError(`Antigravity model ${options.model} is not available for this account`, 'NO_ADAPTER')
+      }
+      const concrete = models?.find(entry => entry.id === options.model)
+      const fixed = antigravityReasoning(options.model)?.efforts
+      const profile = concrete?.antigravity
+      if (concrete !== undefined && (profile?.thinkingLevel !== undefined || fixed?.length === 1 && /-(low|medium|high)$/.test(options.model))) {
+        const effort = profile?.thinkingLevel?.toLowerCase() ?? fixed![0].id
+        if (options.reasoningEffort !== undefined && options.reasoningEffort !== effort) {
+          throw new LlmError(`Antigravity model ${options.model} does not support reasoning effort ${options.reasoningEffort}`, 'UNSUPPORTED_REASONING_EFFORT')
+        }
+        const { reasoningEffort: _effort, ...generation } = options
+        return { options: generation, wireModel: options.model, ...profile === undefined ? {} : { profile } }
+      }
+      return { options, wireModel: options.model, ...profile === undefined ? {} : { profile } }
+    }
+    const configured = this.options.defaultEffortOf?.(options.model)
+    const validDefault = group.reasoning?.efforts.some(entry => entry.id === configured) ? configured : group.reasoning?.defaultEffort
+    const effort = options.reasoningEffort ?? validDefault
+    const variant = selectAntigravityVariant(group, effort)
+    const { reasoningEffort: _effort, ...generation } = options
+    return {
+      // The variant encodes effort; do not also impose the unrelated legacy thinking budget.
+      options: generation,
+      wireModel: variant.id,
+      ...variant.antigravity === undefined ? {} : { profile: variant.antigravity },
+    }
+  }
+
   private async *streamCore(options: GenerateOptions, account?: string): AsyncIterable<StreamChunk> {
     const watchdog = idleWatchdog(options.signal, this.options.streamIdleTimeoutMs)
     try {
       let session = await this.options.tokens.session(account)
       const messages = await resolveImages(options.messages, this.options.resolveAttachments?.(), watchdog.signal)
-      let payload = toAntigravityRequest(options, messages, session.projectId, true)
+      let selected = await this.selectedOptions({ ...options, signal: watchdog.signal }, account)
+      let payload = toAntigravityRequest(selected.options, messages, session.projectId, true, selected.wireModel, selected.profile)
       let response = await requestAntigravityContent(
         session, payload, true, this.options.runtime, this.options.fetchFn, watchdog.signal,
       )
       if (response.status === 401) {
         this.clearAccountCatalog(account)
         session = await this.options.tokens.session(account, true)
-        payload = toAntigravityRequest(options, messages, session.projectId, true)
+        selected = await this.selectedOptions({ ...options, signal: watchdog.signal }, account)
+        payload = toAntigravityRequest(selected.options, messages, session.projectId, true, selected.wireModel, selected.profile)
         response = await requestAntigravityContent(
           session, payload, true, this.options.runtime, this.options.fetchFn, watchdog.signal,
         )
@@ -708,7 +814,9 @@ export class AntigravityAdapter extends LlmAdapter {
       if (response.body === null) {
         throw new LlmError('Antigravity API returned no response body', EMPTY_RESPONSE_CODE)
       }
-      yield* streamAntigravity(response.body, () => { watchdog.pulse() }, this.options.resolveAttachments?.(), watchdog.signal)
+      for await (const chunk of streamAntigravity(response.body, () => { watchdog.pulse() }, this.options.resolveAttachments?.(), watchdog.signal)) {
+        yield withWireModel(chunk, selected.wireModel)
+      }
     } catch (error) {
       throw mapFetchFailure('Antigravity API', error, watchdog, options.signal)
     } finally {
@@ -720,15 +828,24 @@ export class AntigravityAdapter extends LlmAdapter {
   async generate(options: GenerateOptions): Promise<StreamChunk[]> {
     const session = await this.options.tokens.session()
     const messages = await resolveImages(options.messages, this.options.resolveAttachments?.(), options.signal)
+    const selected = await this.selectedOptions(options)
     const response = await requestAntigravityContent(
       session,
-      toAntigravityRequest(options, messages, session.projectId),
+      toAntigravityRequest(selected.options, messages, session.projectId, false, selected.wireModel, selected.profile),
       false,
       this.options.runtime,
       this.options.fetchFn,
       options.signal,
     )
     if (!response.ok) throw await httpLlmError(response, 'Antigravity API')
-    return parseAntigravityResponse(await response.json() as AntigravityResponseEvent, this.options.resolveAttachments?.(), options.signal)
+    return (await parseAntigravityResponse(await response.json() as AntigravityResponseEvent, this.options.resolveAttachments?.(), options.signal))
+      .map(chunk => withWireModel(chunk, selected.wireModel))
   }
+}
+
+/** Bind replay signatures to the effective variant, not just its presentation group. */
+function withWireModel(chunk: StreamChunk, wireModel: string): StreamChunk {
+  if (chunk.type !== 'finish' || chunk.replayState === undefined) return chunk
+  const state = chunk.replayState as { response?: Record<string, unknown>; blocks?: unknown[] }
+  return { ...chunk, replayState: { ...state, response: { ...state.response, wireModel } } }
 }

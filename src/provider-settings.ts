@@ -4,6 +4,7 @@ import { dirname } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { PROVIDER_IDS, type ProviderId } from './auth/store.js'
 import { parseJsonText } from './json-text.js'
+import { antigravityModelId } from './antigravity-model-id.js'
 
 export const PROVIDER_TOOLS = {
   codex: ['image_generate', 'web_search'],
@@ -181,7 +182,12 @@ export class ProviderSettingsStore {
   }
 
   visible(provider: ProviderId, model: string): boolean {
-    return this.current.providers[provider]?.visibleModels?.includes(model) ?? true
+    const selected = this.current.providers[provider]?.visibleModels
+    if (selected === undefined) return true
+    if (selected.includes(model)) return true
+    // Old selections name concrete variants; the picker now enumerates families.
+    return provider === 'antigravity' && antigravityModelId(model) === model
+      && selected.some(id => antigravityModelId(id) === model)
   }
 
   modelName(provider: ProviderId, model: string, fallback: string): string {
