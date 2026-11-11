@@ -24,6 +24,7 @@ interface Fixture {
   calls: { endpoint: string; payload: Record<string, unknown> }[]
   /** Session-window percent the provider reports next. */
   percent: number
+  refreshFailed?: boolean
   /** When true, `usage` answers only after `release()`. */
   hold: boolean
   /** Answer every held `usage` call. */
@@ -52,7 +53,7 @@ const rpc = { call: async (_channel: string, method: string, payload: Record<str
   if (endpoint === 'usage') {
     if (fixture.hold) await new Promise<void>(resume => { releaseHeld.push(resume) })
     if (fixture.failUsage !== undefined) return { ok: false, error: { code: 'internal', message: fixture.failUsage } }
-    return { ok: true, value: { supported: true, windows: [
+    return { ok: true, value: { supported: true, refreshFailed: fixture.refreshFailed, stale: fixture.refreshFailed, windows: [
       { kind: 'session', usedPercent: fixture.percent },
       { kind: 'weekly', usedPercent: 5 },
     ] } }

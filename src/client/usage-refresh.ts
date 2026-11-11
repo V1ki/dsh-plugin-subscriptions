@@ -90,9 +90,15 @@ export class UsageRefreshGate {
 /**
  * The failure message of one round's per-account usage results.
  * @param results - settled `usage` calls of one round.
- * @returns the first rejection's message, or undefined when all fulfilled.
+ * @returns the first rejection's message, a fallback for failed-refresh
+ *   metadata, or undefined when every account refreshed successfully.
  */
-export function usageRefreshFailure(results: readonly PromiseSettledResult<unknown>[]): string | undefined {
+export function usageRefreshFailure(results: readonly PromiseSettledResult<{ usage: { refreshFailed?: boolean } }>[]): string | undefined {
   const failed = results.find((r): r is PromiseRejectedResult => r.status === 'rejected')
-  return failed === undefined ? undefined : messageOf(failed.reason)
+  if (failed !== undefined) return messageOf(failed.reason)
+  // The server deliberately fulfills with the last snapshot after a failed
+  // recheck (including during cooldown). Keep those values, but warn the user.
+  // It exposes no error message with this fallback; do not invent a cause.
+  return results.some(r => r.status === 'fulfilled' && r.value.usage.refreshFailed === true)
+    ? 'Latest quota unavailable' : undefined
 }

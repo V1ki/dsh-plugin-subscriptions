@@ -225,14 +225,14 @@ test('EP: an ineligible click during a plain refresh joins it and resolves with 
 test('EP: usageRefreshFailure — every account fulfilled (or none listed) is a success', () => {
   assert.equal(usageRefreshFailure([]), undefined)
   assert.equal(usageRefreshFailure([
-    { status: 'fulfilled', value: { supported: true } },
-    { status: 'fulfilled', value: undefined },
+    { status: 'fulfilled', value: { usage: {} } },
+    { status: 'fulfilled', value: { usage: {} } },
   ]), undefined)
 })
 
 test('EP: usageRefreshFailure — an Error rejection yields its message', () => {
   assert.equal(usageRefreshFailure([
-    { status: 'fulfilled', value: 1 },
+    { status: 'fulfilled', value: { usage: {} } },
     { status: 'rejected', reason: new Error('HTTP 429') },
   ]), 'HTTP 429')
 })
@@ -245,7 +245,7 @@ test('EP: usageRefreshFailure — a non-Error rejection yields String(reason)', 
 
 test('EP: usageRefreshFailure — several rejections report the first one in result order', () => {
   assert.equal(usageRefreshFailure([
-    { status: 'fulfilled', value: 1 },
+    { status: 'fulfilled', value: { usage: {} } },
     { status: 'rejected', reason: new Error('first') },
     { status: 'rejected', reason: new Error('second') },
   ]), 'first')
@@ -449,4 +449,15 @@ test('ST: a rejected queued forced round rejects its callers and leaves the gate
   assert.deepEqual(h.forces(), [false, true, false], 'idle again; the interval still counts from the failed forced start')
   await h.finish()
   assert.equal(after.state, 'fulfilled')
+})
+
+test('failed-refresh metadata is an error even with fulfilled last-known quota', () => {
+  const fallback = { status: 'fulfilled' as const, value: { usage: { refreshFailed: true } } }
+  const healthy = { status: 'fulfilled' as const, value: { usage: { refreshFailed: false } } }
+  assert.equal(usageRefreshFailure([healthy, fallback]), 'Latest quota unavailable')
+  assert.equal(usageRefreshFailure([fallback, healthy]), 'Latest quota unavailable')
+  assert.equal(usageRefreshFailure([healthy]), undefined, 'a later successful round clears the warning')
+  assert.equal(usageRefreshFailure([{ status: 'fulfilled', value: { usage: {} } }]), undefined, 'old servers may omit metadata')
+  assert.equal(usageRefreshFailure([fallback, { status: 'rejected', reason: new Error('transport offline') }]),
+    'transport offline', 'prefer an actionable rejection message when available')
 })

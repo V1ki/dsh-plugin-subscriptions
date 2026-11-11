@@ -23,7 +23,7 @@ const result = await build({
 const code = result.output.find(file => file.type === 'chunk').code
 /** Every logged-in account the fixture's `status` RPC lists. */
 const ACCOUNTS = [['claude', 'claude-a'], ['codex', 'codex-a'], ['codex', 'codex-b']]
-const forcedPayloads = ACCOUNTS.map(([provider, account]) => ({ provider, account, force: true }))
+const forcedPayloads = ACCOUNTS.map(([provider, account]) => ({ provider, account, force: true, resetPoolHealth: false }))
 const plainPayloads = ACCOUNTS.map(([provider, account]) => ({ provider, account }))
 const byAccount = (a, b) => `${a.provider}/${a.account}`.localeCompare(`${b.provider}/${b.account}`)
 const failedText = message => `Refresh failed: ${message}. Showing the last known values.`
@@ -111,6 +111,22 @@ try {
   await page.waitForFunction(() => /41%/.test(document.querySelector('[data-composer-stats] button')?.textContent ?? ''))
   assert.match(await panel.innerText(), /41%/, 'the open dialog shows the refreshed values')
   console.log('50%: second click inside the interval re-reads without force')
+
+  // Fulfilled stale snapshots are failures too; their values must remain visible.
+  await fixture(() => { usageFixture.refreshFailed = true })
+  await clickAndSettle('error')
+  await panel.waitFor({ state: 'detached' })
+  assert.match(await badge.innerText(), /41%/)
+  assert.ok((await badge.getAttribute('title') ?? '').includes(failedText('Latest quota unavailable')))
+  assert.ok((await badge.getAttribute('aria-label') ?? '').includes(failedText('Latest quota unavailable')))
+  await clickAndSettle('error')
+  await panel.waitFor()
+  assert.match(await panel.innerText(), /41%/)
+  assert.ok((await panel.innerText()).includes(failedText('Latest quota unavailable')))
+  await fixture(() => { usageFixture.refreshFailed = false })
+  await clickAndSettle('idle')
+  assert.equal((await badge.getAttribute('title') ?? '').includes('Refresh failed'), false)
+  await clickAndSettle('idle') // restore the open dialog for the next scenario
 
   // A failing usage RPC keeps the last values and reports the failure (R5).
   await fixture(() => { usageFixture.failUsage = 'Rate limited (HTTP 429)' })

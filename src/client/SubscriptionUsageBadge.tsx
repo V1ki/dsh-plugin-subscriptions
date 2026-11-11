@@ -367,7 +367,8 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
         roster.map(async ({ provider, account }) => {
           const usage = cacheOnly ? readUsageCache(rpc, keyOf(provider, account))
             : await callSubscriptionsAuth<ProviderUsage>(rpc, 'usage', {
-              provider, account: account.key, ...force ? { force: true } : {},
+              // Quota-only refresh: preserve inference health; Settings keeps its retry-now action.
+              provider, account: account.key, ...force ? { force: true, resetPoolHealth: false } : {},
             })
           if (!usage) throw new Error('No cached quota')
           return { provider, account, usage }

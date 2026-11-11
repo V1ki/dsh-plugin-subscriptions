@@ -26,10 +26,12 @@ const { SubscriptionsAuthController } = plugin
 const { OAuthFlowManager } = await import('../src/auth/oauth-flow.js')
 const { DeviceFlowManager } = await import('../src/auth/device-flow.js')
 const { PoolUsageTracker } = await import('../src/providers/pool-usage.js')
+const { PoolHealthRegistry, accountKey, memberKey } = await import('../src/providers/pool-health.js')
+const { usageRefreshFailure } = await import('../src/client/usage-refresh.js')
 
 import { OAuthEndpointError } from '../src/providers/common.js'
 import type { FetchFn, ProviderUsage } from '../src/providers/common.js'
-import type { ClaudeSession, CodexSession, GrokSession } from '../src/auth/store.js'
+import type { ClaudeSession, CodexSession, GrokSession, ProviderId } from '../src/auth/store.js'
 
 const codexSession: CodexSession = {
   accessToken: 'at',
@@ -440,7 +442,7 @@ test('usage(): pool cache and RPC preserve reset credits and optional errors', a
 // Status-bar click refresh (R6): the badge's forced `usage` RPC goes through
 // the controller into the SHARED pool usage cache. These drive the real
 // `usage` route (registerAuthRpc + fake connection) so the wire payload
-// `{ provider, account, force: true }` is part of what is pinned.
+// `{ provider, account, force: true, resetPoolHealth: false }` is pinned.
 // ---------------------------------------------------------------------------
 
 const { registerAuthRpc } = await import('../src/auth/rpc.js')
@@ -471,13 +473,13 @@ function freshness(result: RpcResult<unknown>): { stale: boolean | undefined; re
  * A shared pool usage cache behind a counting fetcher, wired into the real
  * `usage` RPC route. `answer` decides what the provider returns next.
  */
-async function sharedUsageRoute(answer: () => Promise<ProviderUsage>) {
+async function sharedUsageRoute(answer: () => Promise<ProviderUsage>, onUsageForced?: (provider: ProviderId, account: string) => void) {
   const calls = { count: 0 }
   const tracker = new PoolUsageTracker((provider, account) =>
     provider === 'claude' && account === 'a1' ? () => { calls.count += 1; return answer() } : undefined)
   const controller = new SubscriptionsAuthController(
     new OAuthFlowManager(), new DeviceFlowManager(), () => {}, () => undefined,
-    { claude: unreachableFetcher }, undefined, tracker,
+    { claude: unreachableFetcher }, undefined, tracker, {}, {}, undefined, onUsageForced,
   )
   const ctx = new Context()
   const fake = createFakeConnection()
@@ -503,7 +505,7 @@ test('UC: a forced usage RPC (status-bar click) replaces the shared cache entry;
   assert.deepEqual(content(await route.usage({})), content({ ok: true, value: BEFORE_CLICK }), 'a plain read inside the TTL is served from the cache')
   assert.equal(route.calls.count, 1)
 
-  const clicked = await route.usage({ force: true })
+  const clicked = await route.usage({ force: true, resetPoolHealth: false })
   assert.deepEqual(content(clicked), content({ ok: true, value: AFTER_CLICK }), 'the click bypasses the fresh cache')
   assert.deepEqual(freshness(clicked), { stale: false, refreshFailed: false }, 'the forced answer is fresh')
   assert.equal(route.calls.count, 2)
@@ -532,12 +534,12 @@ test('ST: a forced usage RPC during a live 429 cooldown makes no provider call a
   rateLimited = true
   // First click: the forced fetch is attempted, hits the 429 and enters cooldown;
   // the badge still gets the last known values.
-  const limited = await route.usage({ force: true })
+  const limited = await route.usage({ force: true, resetPoolHealth: false })
   assert.deepEqual(content(limited), content({ ok: true, value: BEFORE_CLICK }))
   assert.equal(freshness(limited).refreshFailed, true, 'the last known snapshot is marked as a failed refresh')
   assert.equal(route.calls.count, 2)
   // Further clicks (forced) and other views (plain) during the cooldown.
-  assert.deepEqual(content(await route.usage({ force: true })), content({ ok: true, value: BEFORE_CLICK }))
+  assert.deepEqual(content(await route.usage({ force: true, resetPoolHealth: false })), content({ ok: true, value: BEFORE_CLICK }))
   assert.deepEqual(content(await route.usage({})), content({ ok: true, value: BEFORE_CLICK }))
   assert.equal(route.calls.count, 2, 'force never punches through the live cooldown')
 })
@@ -545,10 +547,10 @@ test('ST: a forced usage RPC during a live 429 cooldown makes no provider call a
 test('ST: a forced usage RPC during a live cooldown with no prior snapshot answers the cooldown error without a provider call', async () => {
   const route = await sharedUsageRoute(() =>
     Promise.reject(new OAuthEndpointError('claude usage token endpoint error (HTTP 429)', 429, undefined, 60_000)))
-  const first = await route.usage({ force: true })
+  const first = await route.usage({ force: true, resetPoolHealth: false })
   assert.equal(first.ok, false)
   if (!first.ok) assert.match(first.error.message, /HTTP 429/, 'the badge gets an error message to show')
-  const second = await route.usage({ force: true })
+  const second = await route.usage({ force: true, resetPoolHealth: false })
   assert.equal(second.ok, false)
   assert.equal(route.calls.count, 1)
 })
@@ -562,4 +564,66 @@ test('usage(): with no pool tracker (pool disabled), every call hits the raw fet
   await controller.usage('codex', 'a1', new AbortController().signal)
   await controller.usage('codex', 'a1', new AbortController().signal)
   assert.equal(calls, 2, 'unchanged prior behavior when the pool usage cache is unavailable')
+})
+
+// PR #209 review regressions: exercise the actual RPC/controller/cache path.
+for (const outcome of ['success', 'fallback', 'no snapshot'] as const) {
+  test(`badge quota refresh preserves inference cooldowns: ${outcome}`, async () => {
+    const health = new PoolHealthRegistry()
+    const now = Date.now()
+    const keys = [accountKey('claude', 'a1'), memberKey('claude', 'a1', 'model-a'), memberKey('claude', 'a2', 'model-b')]
+    for (const key of keys) health.markUnavailable(key, 120_000, 'inference limited', now)
+    let fail = outcome === 'no snapshot'
+    const route = await sharedUsageRoute(() => fail
+      ? Promise.reject(new OAuthEndpointError('usage HTTP 429', 429, undefined, 60_000))
+      : Promise.resolve(BEFORE_CLICK), (provider, account) => health.clear(provider, account))
+    if (!fail) await route.usage({})
+    fail = outcome !== 'success'
+    const before = keys.map(key => health.earliestRecoveryRecord(new Set([key]), now))
+    const clicked = await route.usage({ force: true, resetPoolHealth: false })
+    assert.equal(clicked.ok, outcome !== 'no snapshot')
+    if (outcome === 'fallback') assert.equal(freshness(clicked).refreshFailed, true)
+    assert.equal(route.calls.count, outcome === 'no snapshot' ? 1 : 2, 'cache bypass still fetches')
+    await route.usage({ force: true, resetPoolHealth: false })
+    assert.deepEqual(keys.map(key => health.earliestRecoveryRecord(new Set([key]), now)), before,
+      'account and member records keep their original deadlines and reasons')
+    assert.equal(health.isMemberAvailable('claude', 'a1', 'model-a', now), false)
+    // Legacy Settings payload must still clear only the selected account.
+    await route.usage({ force: true })
+    assert.equal(health.isMemberAvailable('claude', 'a1', 'model-a', now), true)
+    assert.equal(health.isMemberAvailable('claude', 'a2', 'model-b', now), false)
+  })
+}
+
+test('usage RPC validates resetPoolHealth and never clears health on a plain read', async () => {
+  let clears = 0
+  const route = await sharedUsageRoute(() => Promise.resolve(BEFORE_CLICK), () => { clears += 1 })
+  for (const resetPoolHealth of [null, 'false', 0, {}]) {
+    const response = await route.usage({ force: true, resetPoolHealth })
+    assert.equal(response.ok, false)
+    if (!response.ok) assert.equal(response.error.code, 'bad-request')
+  }
+  assert.equal(route.calls.count, 0)
+  await route.usage({ resetPoolHealth: true })
+  assert.equal(clears, 0)
+  await route.usage({ force: true, resetPoolHealth: true })
+  assert.equal(clears, 1)
+})
+
+test('real fallback metadata reports failure on the first failed recheck and through cooldown, then clears on recovery', async () => {
+  let fail = false
+  const route = await sharedUsageRoute(() => fail ? Promise.reject(new Error('usage offline')) : Promise.resolve(BEFORE_CLICK))
+  const round = async (force: boolean) => {
+    const result = await route.usage({ force, resetPoolHealth: false })
+    assert.ok(result.ok)
+    return usageRefreshFailure([{ status: 'fulfilled', value: { usage: result.value as ProviderUsage } }])
+  }
+  assert.equal(await round(false), undefined)
+  fail = true
+  assert.equal(await round(true), 'Latest quota unavailable')
+  assert.equal(await round(true), 'Latest quota unavailable')
+  assert.equal(route.calls.count, 2, 'usage cooldown is respected')
+  fail = false
+  route.tracker.invalidate('claude', 'a1') // simulate expiration without waiting five minutes
+  assert.equal(await round(true), undefined)
 })
