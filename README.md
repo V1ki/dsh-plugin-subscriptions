@@ -245,6 +245,26 @@ minutes to preserve their existing auxiliary-request behavior. Requests from sub
 along with the main conversation. It takes effect after restarting DSH and affects Claude only; Codex, Grok,
 Copilot and Antigravity use their own caching.
 
+Claude's extended thinking is replayed the way Claude Code replays it: each `thinking` block's signature (and each
+`redacted_thinking` payload) is kept with the assistant message, together with the received thinking text, and both
+are sent back unchanged, in their original position, on later requests. In a tool loop that lets the model continue
+from its earlier reasoning instead of re-deriving it after every tool result.
+
+This plugin conservatively replays thinking only to the same concrete provider, account, and model that produced
+it. Some models support cross-model thinking replay; this plugin does not enable it. History from another model,
+provider or pool member is sent without its thinking, as before, and so is reasoning stored by earlier releases.
+
+Anthropic binds each thinking block to everything before it (the `system` prompt, the set of `tools`, and earlier
+messages) and to the thinking block that preceded it; see
+[preserved thinking](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking#prefix-check). The
+plugin records that binding with each response and sends a block back only while it still holds, so when DSH changes
+an earlier part of the request (a rewritten system prompt or tool list, a pruned tool result, a compaction summary)
+the thinking that depended on it is left out and the rest of the history is sent as usual. As a backstop, requests to
+Claude 5.1 and later models also ask the API to drop, rather than reject, a block it finds invalid
+(`block_binding: { prefix_mismatch_behavior: "drop_block" }` with the `thinking-binding-controls-2026-08-01` beta),
+and if the API still refuses a replayed block the turn is retried once without replayed thinking. Cache breakpoints
+never land on a thinking block, which Anthropic rejects.
+
 `wire` (copilot entries only) pins a model to `chat-completions` or `responses`. Manual
 entries keep working without it — the field exists because a configured model the live
 catalog does not know would otherwise default to `/chat/completions`, which
