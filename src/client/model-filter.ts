@@ -82,3 +82,44 @@ export function modelEditorState(input: {
     noticeKey: NOTICE_KEYS[modelEditorNotice(input.accounts)],
   }
 }
+
+/** Compact window label for the model editor: 500000 → `500K`, 1000000 → `1M`. */
+export function formatWindowLabel(tokens: number | undefined): string {
+  if (tokens === undefined) return ''
+  if (tokens >= 1_000_000 && tokens % 1_000_000 === 0) return `${tokens / 1_000_000}M`
+  if (tokens >= 1_000 && tokens % 1_000 === 0) return `${tokens / 1_000}K`
+  return String(tokens)
+}
+
+/** The catalog tiers a window picker offers for one model, default tier excluded. */
+export function contextWindowTiers(model: {
+  defaultContextWindow?: number
+  contextWindowOptions?: readonly number[]
+}): number[] {
+  // The advertised default is the "follow provider" choice, so listing it again
+  // as an explicit tier would give the same budget two labels.
+  return (model.contextWindowOptions ?? []).filter(tier => tier !== model.defaultContextWindow)
+}
+
+/**
+ * Select state for one model's window picker.
+ *
+ * `value` is what the `<select>` should show: `''` for follow-provider,
+ * otherwise the saved tier. `unavailable` is set when a saved tier is no
+ * longer offered, so the picker can keep showing (disabled) what the user
+ * saved instead of silently rewriting the preference (issue #149).
+ */
+export function contextWindowChoice(
+  saved: string,
+  model: { defaultContextWindow?: number; contextWindowOptions?: readonly number[] },
+): { value: string; tiers: number[]; unavailable?: number } {
+  const tiers = contextWindowTiers(model)
+  const trimmed = saved.trim()
+  const savedValue = trimmed === '' ? undefined : Number(trimmed)
+  if (savedValue === undefined || !Number.isSafeInteger(savedValue) || savedValue <= 0) return { value: '', tiers }
+  // A saved value equal to the advertised default is the same choice as
+  // following the provider, so render it that way.
+  if (savedValue === model.defaultContextWindow) return { value: '', tiers }
+  if (tiers.includes(savedValue)) return { value: String(savedValue), tiers }
+  return { value: String(savedValue), tiers, unavailable: savedValue }
+}

@@ -561,6 +561,12 @@ export interface DiscoveredModel {
   description?: string
   /** Advertised combined context capacity in tokens. */
   contextWindow?: number
+  /**
+   * Selectable context-window tiers the provider advertises, ascending and
+   * deduplicated. Present only when the catalog offers more than one tier, so
+   * an absent list means the advertised `contextWindow` is the only choice.
+   */
+  contextWindowOptions?: number[]
   /** Server-advertised per-request output token ceiling, when disclosed. */
   maxOutputTokens?: number
   /** Provider sort hint; lower sorts earlier. */

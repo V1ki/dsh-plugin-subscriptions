@@ -816,6 +816,7 @@ export function apply(ctx: Context, config: Config): void {
     return model === undefined ? 'standard' : modelSpeeds.get(model) ?? 'standard'
   }
   let codexAdapter: CodexAdapter | undefined
+  let grokAdapter: GrokAdapter | undefined
   // Dropped on every copilot auth transition so replay state (captured
   // reasoning) never survives an account switch in memory.
   let copilotAdapter: CopilotAdapter | undefined
@@ -872,7 +873,7 @@ export function apply(ctx: Context, config: Config): void {
           onCatalogChanged: catalogChanged,
           accountCatalogStore: account => accountCatalogStore('codex', account),
           defaultEffortOf: (model: string) => defaultEffortOf('codex', model),
-          contextWindowOf: model => preferences.contextWindow(model),
+          contextWindowOf: model => preferences.contextWindow('codex', model),
           pool: () => poolAdapter,
           speedFor: (sessionId: string | undefined, model: string): boolean | Promise<boolean> =>
             sessionId !== undefined
@@ -953,8 +954,12 @@ export function apply(ctx: Context, config: Config): void {
           onCatalogChanged: catalogChanged,
           accountCatalogStore: account => accountCatalogStore('grok', account),
           defaultEffortOf: (model: string) => defaultEffortOf('grok', model),
+          // Catalog-driven context tiers (issue #149): the Settings page
+          // offers the window list and the adapter caps the request here.
+          contextWindowOf: model => preferences.contextWindow('grok', model),
           pool: () => poolAdapter,
         })
+        grokAdapter = adapter
         adapters.set('grok', adapter)
         handles.set('grok', register('grok', adapter))
         break
@@ -1310,6 +1315,10 @@ export function apply(ctx: Context, config: Config): void {
             }
           }
         }
+        // Grok's tiers are account-independent: one catalog lookup per model.
+        const grokLimits = provider === 'grok' && grokAdapter
+          ? await grokAdapter.contextLimits(model.id).catch(() => undefined)
+          : undefined
         // A model with unavailable capabilities can still be hidden or restored.
         const info = await withTimeout(() => adapter.resolveModel(provider, model.id), DISCOVERY_TIMEOUT_MS).catch(() => undefined)
         return {
@@ -1322,6 +1331,11 @@ export function apply(ctx: Context, config: Config): void {
             defaultContextWindow: Math.min(...contexts.map(entry => entry.default)),
             maxContextWindow: Math.min(...contexts.map(entry => entry.max)),
           } : {}),
+          ...(grokLimits === undefined ? {} : {
+            defaultContextWindow: grokLimits.default,
+            maxContextWindow: grokLimits.max,
+            ...grokLimits.options === undefined ? {} : { contextWindowOptions: grokLimits.options },
+          }),
         }
       }))
       // Announce forced refresh only after the replacement catalog is ready.

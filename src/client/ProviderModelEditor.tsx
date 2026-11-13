@@ -5,7 +5,7 @@ import type { ProviderPreferences, SubagentSpeedTier, SubscriptionTool } from '.
 import type { SubscriptionProvider } from './SubscriptionsSection.js'
 import { callSubscriptionsAuth } from './subscriptions-rpc.js'
 import type { AccountCatalogRow } from './account-preferences.js'
-import { modelEditorState, savedModelIds } from './model-filter.js'
+import { contextWindowChoice, formatWindowLabel, modelEditorState, savedModelIds } from './model-filter.js'
 import type { SubscriptionsKey } from './locales.js'
 
 interface ModelRow {
@@ -13,6 +13,8 @@ interface ModelRow {
   name: string
   contextWindow?: number
   defaultContextWindow?: number
+  /** Selectable tiers the provider's catalog advertises (ascending), when it discloses a choice. */
+  contextWindowOptions?: number[]
   efforts?: { id: string; name: string }[]
   configured?: string
   maxContextWindow?: number
@@ -97,6 +99,33 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
     }
   }
   function edit(next: ProviderPreferences) { setDraft(next); setDirty(true) }
+
+  /** A saved grok context override that differs from the advertised default. */
+  function hasGrokContextOverride(model: ModelRow): boolean {
+    const saved = draft.contextWindows?.[model.id]
+    return saved !== undefined && saved !== model.defaultContextWindow
+  }
+
+  /** Catalog-driven window picker (issue #149): tiers come from the live grok catalog. */
+  function grokContextPicker(model: ModelRow) {
+    const choice = contextWindowChoice(contexts[model.id] ?? '', model)
+    return <div style={actions}>
+      <label style={actions}>{t('modelsContextWindow')}
+        <select aria-label={`${model.name} ${t('modelsContextWindow')}`} value={choice.value} onChange={event => {
+          setContexts({ ...contexts, [model.id]: event.target.value }); setDirty(true)
+        }}>
+          <option value="">{t('modelsContextFollow', { default: formatWindowLabel(model.defaultContextWindow) })}</option>
+          {choice.tiers.map(tier => <option key={tier} value={String(tier)}>{formatWindowLabel(tier)}</option>)}
+          {choice.unavailable !== undefined && <option value={String(choice.unavailable)} disabled>
+            {t('modelsContextUnavailableOption', { value: formatWindowLabel(choice.unavailable) })}
+          </option>}
+        </select>
+      </label>
+      <small>{t('modelsContextBounds', {
+        default: formatWindowLabel(model.defaultContextWindow), max: formatWindowLabel(model.maxContextWindow),
+      })}</small>
+    </div>
+  }
   useEffect(() => { void load() }, [provider, rpc])
 
   useImperativeHandle(ref, () => ({
@@ -113,7 +142,7 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
         windows[model] = value
       }
       setError('')
-      const { accounts: _accounts, ...settings } = { ...draft, ...(provider === 'codex' ? { contextWindows: windows } : {}) }
+      const { accounts: _accounts, ...settings } = { ...draft, ...(provider === 'codex' || provider === 'grok' ? { contextWindows: windows } : {}) }
       return {
         settings,
         efforts: catalog.models.flatMap(model => {
@@ -206,6 +235,9 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
               </label>
               <small>{t('modelsContextBounds', { default: model.defaultContextWindow, max: model.maxContextWindow })}</small>
             </div>}
+            {provider === 'grok' && model.defaultContextWindow !== undefined
+              && ((model.contextWindowOptions?.length ?? 0) > 1 || hasGrokContextOverride(model))
+              && grokContextPicker(model)}
             </div>
             {provider === 'codex' && (model.fastTier || Object.hasOwn(draft.subagentSpeeds ?? {}, model.id)) && <div style={{ display: 'grid', gap: 6 }}>
               <label style={actions}>{t('modelsSubagentSpeed')}
@@ -225,6 +257,7 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
         </div>
         </>}
         {provider === 'codex' && <small>{t('modelsContextHint')}</small>}
+        {provider === 'grok' && <small>{t('modelsContextGrokHint')}</small>}
         {catalog.tools.length > 0 && <div style={{ display: 'grid', gap: 8 }}>
           <strong>{t('modelsTools')}</strong>
           <small>{t('modelsToolsHint')}</small>
