@@ -25,6 +25,30 @@ import type {} from '@deepseek-ai/dsh-web'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { OAuthFlowManager, type OAuthAttempt } from './auth/oauth-flow.js'
 import { DeviceFlowManager, type DeviceAttempt } from './auth/device-flow.js'
+import {
+  completeKimiLogin,
+  fetchKimiModels,
+  isKimiPermanentRefreshError,
+  KIMI_API_BASE,
+  KIMI_PREEMPT_MS,
+  kimiDeviceFlow,
+  kimiHeaders,
+  refreshKimi,
+} from './auth/kimi.js'
+import {
+  completeQwenLogin,
+  fetchQwenModels,
+  isQwenPermanentRefreshError,
+  QWEN_API_BASE,
+  QWEN_PREEMPT_MS,
+  QWEN_USER_AGENT,
+  qwenDeviceFlow,
+  refreshQwen,
+} from './auth/qwen.js'
+import { isGlmPermanentRefreshError, refreshGlm, startGlmLogin } from './auth/zcode.js'
+import type { GlmLoginAttempt } from './auth/zcode.js'
+import { ChatSubscriptionAdapter } from './providers/chat-subscription.js'
+import type { ChatSubscriptionDiscovered, ChatSubscriptionSession } from './providers/chat-subscription.js'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { readClaudeCodeCredentials, refreshClaudeSynced } from './auth/claude-code-creds.js'
@@ -60,8 +84,11 @@ import type {
   CodexSession,
   CopilotSession,
   AntigravitySession,
+  GlmSession,
   GrokSession,
+  KimiSession,
   ProviderId,
+  QwenSession,
   StoredSession,
 } from './auth/store.js'
 import { DISCOVERY_TIMEOUT_MS, validateModels, withTimeout } from './providers/common.js'
@@ -183,7 +210,16 @@ export interface Config {
     grok?: ModelEntry[]
     copilot?: ModelEntry[]
     antigravity?: ModelEntry[]
+    kimi?: ModelEntry[]
+    glm?: ModelEntry[]
+    qwen?: ModelEntry[]
   }
+  /**
+   * GLM Coding Plan station. `bigmodel` (mainland, bigmodel.cn) is the
+   * default; `zai` targets the international z.ai account system. Login and
+   * inference both follow this choice.
+   */
+  glm?: { station?: 'bigmodel' | 'zai' }
   /** Antigravity-specific OAuth and endpoint configuration. */
   antigravity?: AntigravityRuntimeConfig & {
     /** Google OAuth client id. May instead be supplied as ANTIGRAVITY_CLIENT_ID. */
@@ -210,7 +246,7 @@ export interface Config {
   }
 }
 
-const providerIdSchema = z.union(['codex', 'claude', 'grok', 'copilot', 'antigravity'])
+const providerIdSchema = z.union(['codex', 'claude', 'grok', 'copilot', 'antigravity', 'kimi', 'glm', 'qwen'])
 const modelEntrySchema: z<ModelEntry> = z.object({
   id: z.string().required(),
   name: z.string(),
@@ -227,7 +263,9 @@ const poolMemberSchema: z<PoolMemberRef> = z.object({
 })
 
 export const Config: z<Config> = z.object({
-  providers: z.array(providerIdSchema).default(['codex', 'claude', 'grok', 'copilot', 'antigravity']),
+  providers: z.array(providerIdSchema).default([
+    'codex', 'claude', 'grok', 'copilot', 'antigravity', 'kimi', 'glm', 'qwen',
+  ]),
   codexClientVersion: z.string(),
   streamIdleTimeoutMs: z.number().min(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   claudePromptCacheTtl: z.union(['5m', '1h']).default(DEFAULT_PROMPT_CACHE_TTL),
@@ -241,6 +279,12 @@ export const Config: z<Config> = z.object({
     grok: z.array(modelEntrySchema),
     copilot: z.array(modelEntrySchema),
     antigravity: z.array(modelEntrySchema),
+    kimi: z.array(modelEntrySchema),
+    glm: z.array(modelEntrySchema),
+    qwen: z.array(modelEntrySchema),
+  }),
+  glm: z.object({
+    station: z.union(['bigmodel', 'zai']).default('bigmodel'),
   }),
   antigravity: z.object({
     clientId: z.string(),
@@ -294,6 +338,25 @@ const DEFAULT_MODELS: Record<ProviderId, ModelEntry[]> = {
     { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', inputModalities: ['text', 'image'] },
     { id: 'claude-opus-4-6-thinking', name: 'Claude Opus 4.6 Thinking', inputModalities: ['text', 'image'] },
   ],
+  // Static fallback only; the authenticated /coding/v1/models response wins.
+  kimi: [
+    { id: 'kimi-for-coding', name: 'Kimi for Coding (K2.8)', contextWindow: 1_048_576 },
+    { id: 'kimi-for-coding-highspeed', name: 'Kimi for Coding Highspeed', contextWindow: 262_144 },
+    { id: 'k3', name: 'K3', contextWindow: 1_048_576 },
+    { id: 'k3-256k', name: 'K3 256K', contextWindow: 262_144 },
+    { id: 'k3.1-pro', name: 'K3.1 Pro', contextWindow: 1_048_576 },
+    { id: 'k3.1-pro-highspeed', name: 'K3.1 Pro Highspeed', contextWindow: 1_048_576 },
+  ],
+  // Coding Plan models; glm-5.3 is text-only, glm-5.3-flash takes images.
+  glm: [
+    { id: 'glm-5.3', name: 'GLM-5.3', contextWindow: 1_000_000, maxTokens: 128_000 },
+    { id: 'glm-5.3-flash', name: 'GLM-5.3 Flash', contextWindow: 1_000_000, maxTokens: 128_000,
+      inputModalities: ['text', 'image'] },
+  ],
+  // Qwen subscription catalog; live discovery replaces this list.
+  qwen: [
+    { id: 'qwen3.8-max', name: 'Qwen3.8 Max' },
+  ],
 }
 
 /** Validate and detach the model catalog for every provider. */
@@ -310,6 +373,9 @@ function resolveCatalog(models: Config['models']): Record<ProviderId, ModelEntry
     grok: resolve('grok'),
     copilot: resolve('copilot'),
     antigravity: resolve('antigravity'),
+    kimi: resolve('kimi'),
+    glm: resolve('glm'),
+    qwen: resolve('qwen'),
   }
 }
 
@@ -327,6 +393,9 @@ function accountOf(provider: ProviderId, session: StoredSession | undefined): st
     case 'grok': return (session as GrokSession).account
     case 'copilot': return (session as CopilotSession).account
     case 'antigravity': return (session as AntigravitySession).account
+    case 'kimi': return (session as KimiSession).account
+    case 'glm': return (session as GlmSession).account
+    case 'qwen': return (session as QwenSession).account
   }
 }
 
@@ -337,6 +406,10 @@ function planOf(provider: ProviderId, session: StoredSession): string | undefine
     case 'claude': return (session as ClaudeSession).subscriptionType
     case 'grok': return undefined
     case 'copilot': return undefined
+    case 'antigravity': return undefined
+    case 'kimi': return undefined
+    case 'glm': return undefined
+    case 'qwen': return (session as QwenSession).plan
   }
 }
 
@@ -377,6 +450,16 @@ export class SubscriptionsAuthController implements AuthController {
 
   /** In-flight OAuth completions, one per provider at most. */
   private completions = new Map<ProviderId, Promise<void>>()
+
+  /**
+   * In-flight ZCode login (GLM). Its polling runs against the official
+   * CLI flow instead of the loopback engine, so it is tracked separately;
+   * `busy` must include it or the Settings card would stop polling while the
+   * user completes the browser step.
+   */
+  private zcodeLogins = new Map<ProviderId, GlmLoginAttempt>()
+  /** Reserving the ZCode flow before its first network call closes the double-click window. */
+  private glmStarting = false
 
   /**
    * Per-provider claim counter. Everything that takes ownership of a
@@ -428,6 +511,8 @@ export class SubscriptionsAuthController implements AuthController {
      * failure must not outlive an explicit re-check (issue #139).
      */
     private readonly onUsageForced?: (provider: ProviderId, account: string) => void,
+    /** Which ZCode station the GLM login and inference use. */
+    private readonly glmStation: () => 'bigmodel' | 'zai' = () => 'bigmodel',
   ) {}
 
   prepareReset(account: string, signal: AbortSignal) {
@@ -473,7 +558,9 @@ export class SubscriptionsAuthController implements AuthController {
     const detail = this.lastError.get(provider)
     const clientVersion = await this.clientVersions[provider]?.()
     return {
-      busy: this.flows.isBusy(provider) || this.deviceFlows.isBusy(provider) || this.finalizing.has(provider),
+      busy: this.flows.isBusy(provider) || this.deviceFlows.isBusy(provider)
+        || this.zcodeLogins.has(provider) || this.finalizing.has(provider)
+        || (provider === 'glm' && this.glmStarting),
       accounts: entries.map(({ key, session }, index) => {
         const account = accountOf(provider, session)
         const plan = planOf(provider, session)
@@ -521,6 +608,35 @@ export class SubscriptionsAuthController implements AuthController {
       // Explicit browser flow: skip the credential import entirely.
       const attempt = await this.flows.start('claude', claudeFlow)
       this.completions.set('claude', this.complete('claude', attempt, this.claim('claude')))
+      return { authorizeUrl: attempt.authorizeUrl }
+    }
+    if (provider === 'kimi' || provider === 'qwen') {
+      // Device flow: the UI shows the user code while the background task
+      // polls the provider's OAuth host for the token pair.
+      const spec = provider === 'kimi' ? await kimiDeviceFlow() : qwenDeviceFlow()
+      const attempt = await this.deviceFlows.start(provider, spec)
+      this.beginFinalizing(provider)
+      void this.completeChatDevice(provider, attempt)
+      return { authorizeUrl: attempt.verificationUrl, userCode: attempt.userCode }
+    }
+    if (provider === 'glm') {
+      // ZCode server-mediated flow: the browser completes against the station's
+      // own callback; the plugin polls the flow and then mints the plan key.
+      if (this.zcodeLogins.has('glm') || this.glmStarting) {
+        throw new Error('a glm login attempt is already in progress')
+      }
+      // `startGlmLogin` awaits its init call, so reserve the slot first: two
+      // clicks in that window must not open two browser flows.
+      this.glmStarting = true
+      let attempt: GlmLoginAttempt
+      try {
+        attempt = await startGlmLogin(this.glmStation())
+      } finally {
+        this.glmStarting = false
+      }
+      this.zcodeLogins.set('glm', attempt)
+      this.beginFinalizing('glm')
+      void this.completeGlm(attempt)
       return { authorizeUrl: attempt.authorizeUrl }
     }
     if (provider === 'copilot') {
@@ -610,6 +726,48 @@ export class SubscriptionsAuthController implements AuthController {
     }
   }
 
+  /** Drive one Kimi/Qwen device grant to a stored session. */
+  private async completeChatDevice(provider: ProviderId, attempt: DeviceAttempt): Promise<void> {
+    const claim = this.claim(provider)
+    try {
+      const tokens = await attempt.waitTokens()
+      const session = provider === 'kimi' ? completeKimiLogin(tokens) : await completeQwenLogin(tokens)
+      if (this.claims.get(provider) !== claim) return
+      await this.persist(provider, session)
+      this.lastError.delete(provider)
+      this.onAuthChanged(provider, accountKeyOf(provider, session))
+    } catch (error) {
+      if (this.claims.get(provider) !== claim) return
+      if (!(error instanceof Error && error.message === 'login cancelled')) {
+        this.lastError.set(provider, errorChain(error))
+      }
+    } finally {
+      this.endFinalizing(provider)
+    }
+  }
+
+  /** Drive one ZCode login through provisioning to a stored GLM session. */
+  private async completeGlm(attempt: GlmLoginAttempt): Promise<void> {
+    const claim = this.claim('glm')
+    try {
+      const session = await attempt.wait()
+      if (this.claims.get('glm') !== claim) return
+      await this.persist('glm', session)
+      this.lastError.delete('glm')
+      this.onAuthChanged('glm', accountKeyOf('glm', session))
+    } catch (error) {
+      if (this.claims.get('glm') !== claim) return
+      if (!(error instanceof Error && error.message === 'login cancelled')) {
+        this.lastError.set('glm', errorChain(error))
+      }
+    } finally {
+      // Only the owning attempt may clear the slot: a cancel + immediate retry
+      // installs a new attempt before this one finishes.
+      if (this.zcodeLogins.get('glm') === attempt) this.zcodeLogins.delete('glm')
+      this.endFinalizing('glm')
+    }
+  }
+
   /** Token exchange for one OAuth code; `protected` so tests can stand in for the provider endpoint. */
   protected exchange(provider: ProviderId, code: string, attempt: OAuthAttempt): Promise<StoredSession> {
     switch (provider) {
@@ -622,6 +780,11 @@ export class SubscriptionsAuthController implements AuthController {
       case 'copilot':
         // Device flow: exchange happens in completeDevice, never here.
         return Promise.reject(new Error('copilot uses the device flow; no authorization code to exchange'))
+      case 'kimi':
+      case 'qwen':
+        return Promise.reject(new Error(`${provider} uses the device flow; no authorization code to exchange`))
+      case 'glm':
+        return Promise.reject(new Error('glm uses the ZCode flow; no authorization code to exchange'))
       case 'antigravity':
         return exchangeAntigravityCode(
           code,
@@ -633,10 +796,18 @@ export class SubscriptionsAuthController implements AuthController {
     }
   }
 
-  private persist(provider: ProviderId, session: StoredSession): Promise<void> {
+  private async persist(provider: ProviderId, session: StoredSession): Promise<void> {
     // Keyed by the account's stable identity: re-logging the same account
     // updates in place, a different account appends.
-    return saveAccountSession(provider, accountKeyOf(provider, session), session as never)
+    let account = accountKeyOf(provider, session)
+    if (provider === 'kimi' && (session as KimiSession).account === undefined) {
+      // An opaque Kimi access token carries no identity, and its rotating
+      // refresh token cannot serve as one — logging the same single account
+      // in again would otherwise append a duplicate on every login.
+      const existing = await listAccounts('kimi')
+      if (existing.length === 1) account = existing[0].key
+    }
+    await saveAccountSession(provider, account, session as never)
   }
 
   /**
@@ -665,6 +836,8 @@ export class SubscriptionsAuthController implements AuthController {
     this.claim(provider)
     this.flows.pending(provider)?.cancel()
     this.deviceFlows.pending(provider)?.cancel()
+    this.zcodeLogins.get(provider)?.cancel()
+    this.zcodeLogins.delete(provider)
     return Promise.resolve()
   }
 
@@ -672,6 +845,8 @@ export class SubscriptionsAuthController implements AuthController {
     this.claim(provider)
     this.flows.pending(provider)?.cancel()
     this.deviceFlows.pending(provider)?.cancel()
+    this.zcodeLogins.get(provider)?.cancel()
+    this.zcodeLogins.delete(provider)
     await deleteAccountSession(provider, account)
     this.lastError.delete(provider)
     this.onAuthChanged(provider, account)
@@ -1025,6 +1200,123 @@ export function apply(ctx: Context, config: Config): void {
         handles.set('antigravity', register('antigravity', adapter))
         break
       }
+      case 'kimi': {
+        const tokens = new AccountTokenManager<KimiSession>({
+          provider: 'kimi',
+          displayName: 'Kimi Code',
+          makeOptions: () => ({
+            preemptMs: KIMI_PREEMPT_MS,
+            refresh: refreshKimi,
+            isPermanent: isKimiPermanentRefreshError,
+          }),
+          onAccountRemoved: account => { authChanged('kimi', account) },
+        })
+        accountTokens.set('kimi', tokens as unknown as AccountTokenManager<StoredSession>)
+        const adapter = new ChatSubscriptionAdapter({
+          definition: {
+            id: 'kimi',
+            name: 'Kimi Code',
+            label: 'Kimi Code',
+            endpoint: `${KIMI_API_BASE}/chat/completions`,
+            replayReasoning: true,
+            headers: () => kimiHeaders(),
+            discover: async (session, fetchFn, signal) => (await fetchKimiModels(
+              session as KimiSession, fetchFn, signal,
+            )).map(model => ({
+              id: model.id,
+              name: model.name,
+              ...model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow },
+              ...model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens },
+              inputModalities: model.inputModalities,
+            }) satisfies ChatSubscriptionDiscovered),
+          },
+          tokens: tokens as unknown as AccountTokenManager<ChatSubscriptionSession>,
+          models: catalog.kimi,
+          streamIdleTimeoutMs,
+          rateLimit,
+          onWarn,
+          resolveAttachments,
+          pool: () => poolAdapter,
+        })
+        adapters.set('kimi', adapter)
+        handles.set('kimi', register('kimi', adapter))
+        break
+      }
+      case 'glm': {
+        const station = config.glm?.station === 'zai' ? 'zai' : 'bigmodel'
+        const tokens = new AccountTokenManager<GlmSession>({
+          provider: 'glm',
+          displayName: 'GLM Coding Plan',
+          makeOptions: () => ({
+            preemptMs: 24 * 60 * 60_000,
+            refresh: refreshGlm,
+            isPermanent: isGlmPermanentRefreshError,
+          }),
+          onAccountRemoved: account => { authChanged('glm', account) },
+        })
+        accountTokens.set('glm', tokens as unknown as AccountTokenManager<StoredSession>)
+        const adapter = new ChatSubscriptionAdapter({
+          definition: {
+            id: 'glm',
+            name: 'GLM Coding Plan',
+            label: 'GLM Coding Plan',
+            endpoint: station === 'zai'
+              ? 'https://api.z.ai/api/coding/paas/v4/chat/completions'
+              : 'https://open.bigmodel.cn/api/coding/paas/v4/chat/completions',
+            replayReasoning: true,
+          },
+          tokens: tokens as unknown as AccountTokenManager<ChatSubscriptionSession>,
+          models: catalog.glm,
+          streamIdleTimeoutMs,
+          rateLimit,
+          onWarn,
+          resolveAttachments,
+          pool: () => poolAdapter,
+        })
+        adapters.set('glm', adapter)
+        handles.set('glm', register('glm', adapter))
+        break
+      }
+      case 'qwen': {
+        const tokens = new AccountTokenManager<QwenSession>({
+          provider: 'qwen',
+          displayName: 'Qwen Code',
+          makeOptions: () => ({
+            preemptMs: QWEN_PREEMPT_MS,
+            refresh: refreshQwen,
+            isPermanent: isQwenPermanentRefreshError,
+          }),
+          onAccountRemoved: account => { authChanged('qwen', account) },
+        })
+        accountTokens.set('qwen', tokens as unknown as AccountTokenManager<StoredSession>)
+        const adapter = new ChatSubscriptionAdapter({
+          definition: {
+            id: 'qwen',
+            name: 'Qwen Code',
+            label: 'Qwen Code',
+            endpoint: `${QWEN_API_BASE}/chat/completions`,
+            headers: () => ({ 'user-agent': QWEN_USER_AGENT }),
+            discover: async (session, fetchFn, signal) => (await fetchQwenModels(
+              session as QwenSession, fetchFn, signal,
+            )).map(model => ({
+              id: model.id,
+              name: model.name,
+              ...model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow },
+              inputModalities: model.inputModalities,
+            }) satisfies ChatSubscriptionDiscovered),
+          },
+          tokens: tokens as unknown as AccountTokenManager<ChatSubscriptionSession>,
+          models: catalog.qwen,
+          streamIdleTimeoutMs,
+          rateLimit,
+          onWarn,
+          resolveAttachments,
+          pool: () => poolAdapter,
+        })
+        adapters.set('qwen', adapter)
+        handles.set('qwen', register('qwen', adapter))
+        break
+      }
     }
   }
 
@@ -1072,6 +1364,9 @@ export function apply(ctx: Context, config: Config): void {
           )
         }
         case 'copilot':
+        case 'kimi':
+        case 'glm':
+        case 'qwen':
           return undefined
       }
     }
@@ -1274,6 +1569,7 @@ export function apply(ctx: Context, config: Config): void {
     },
     resetRedemption,
     (provider, account) => poolHealth?.clear(provider, account),
+    () => config.glm?.station === 'zai' ? 'zai' : 'bigmodel',
   ), speed, {
     get: () => proxyGetConfig(),
     set: input => proxySetConfig(input),

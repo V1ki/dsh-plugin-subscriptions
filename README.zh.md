@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-把你的 **ChatGPT(Codex)**、**Claude**、**Grok(X Premium)**、**GitHub Copilot** 和 **Google Antigravity** 订阅当作 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的 LLM provider 使用 —— 不需要 API key。Codex、Grok 和 Antigravity 通过 dsh web 界面 OAuth 登录(设置 → 订阅);Copilot 使用 GitHub OAuth 设备码流程;Claude 在存在 Claude Code 会话时直接导入凭据(macOS Keychain 或 `~/.claude/.credentials.json`),否则回退到同样的浏览器 OAuth 流程,因此不要求安装 Claude Code CLI。Token 保存在 `~/.dsh/plugins/subscriptions/auth.json`(权限 0600),过期自动刷新。
+把你的 **ChatGPT(Codex)**、**Claude**、**Grok(X Premium)**、**GitHub Copilot**、**Google Antigravity**、**Kimi Code**、**GLM Coding Plan** 和 **Qwen Code** 订阅当作 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的 LLM provider 使用 —— 不需要 API key。Codex、Grok 和 Antigravity 通过 dsh web 界面 OAuth 登录(设置 → 订阅);Copilot 使用 GitHub OAuth 设备码流程;Claude 在存在 Claude Code 会话时直接导入凭据(macOS Keychain 或 `~/.claude/.credentials.json`),否则回退到同样的浏览器 OAuth 流程,因此不要求安装 Claude Code CLI。Token 保存在 `~/.dsh/plugins/subscriptions/auth.json`(权限 0600),过期自动刷新。
 
 ## 订阅与模型显示名
 
@@ -79,6 +79,11 @@ Antigravity 用量优先读取 `retrieveUserQuotaSummary`，只展示服务端�
 | `grok`   | X Premium (xAI)  | 从 `api.x.ai/v1/models` 实时获取(仅对话模型);推理等级来自 Grok CLI 目录(`cli-chat-proxy.grok.com/v1/models`) |
 | `copilot` | GitHub Copilot  | 从 `api.githubcopilot.com/models` 实时获取(两种 wire 的对话模型,含按模型的视觉标记与推理等级);登录使用 OAuth 设备码流程(在 `github.com/login/device` 输入页面显示的验证码) |
 | `antigravity` | Google Antigravity | 从 Antigravity `v1internal:fetchAvailableModels` 实时获取;请求使用 `generateContent` / `streamGenerateContent`,支持文本、图片、流式推理与工具调用转换 |
+| `kimi` | Kimi Code(Moonshot) | 从 `api.kimi.com/coding/v1/models` 实时获取;登录走 `auth.kimi.com` 的 OAuth 设备码 |
+| `glm` | 智谱 GLM Coding Plan | 内置 `glm-5.3` / `glm-5.3-flash`;用 ZCode 浏览器授权自动签发套餐 Key。`glm.station` 选 `bigmodel`(国内,默认)或 `zai`(国际) |
+| `qwen` | Qwen Code(chat.qwen.ai Plus/Pro) | 从 `api.qwen.ai/compatible-mode/v1/models` 实时获取;OAuth 设备码登录。**不是**阿里云百炼 Coding Plan |
+
+这三家国内订阅都用浏览器登录,不需要粘贴 Key:Kimi 和 Qwen 使用各自官方 CLI 的公开 OAuth 设备码客户端(界面会显示验证码),GLM 走官方 ZCode 授权链路并自动签发账号的 `zcode-api-key`。凭据与其它路由共用同一份存储、刷新与多账号逻辑。GLM 的授权链路和 Kimi 的客户端身份不属于官方文档承诺的第三方接入方式,可能随服务端调整而变化;端点、拒绝语义和 bigmodel 计费注意项见[国内订阅说明](docs/cn-subscriptions.md)。
 
 只有已登录的 provider 才会出现在会话模型选择器里;登录/退出后列表自动刷新。支持视觉的模型会声明 `['text', 'image']` 输入模态,图片内容会被翻译成各 provider 的 wire 格式。
 
@@ -211,7 +216,9 @@ Codex 的 **速度** 控件与 `/fast` 按底层模型（与其独立账号入�
 - id: llm-subscriptions
   name: dsh-plugin-subscriptions
   config:
-    providers: [codex, claude]        # 子集;默认五个全启用
+    providers: [codex, claude]        # 子集;默认八个全启用
+    glm:
+      station: bigmodel                # GLM Coding Plan 站点:bigmodel(默认)或 zai
     streamIdleTimeoutMs: 300000
     claudePromptCacheTtl: 5m           # Claude 提示缓存时长:5m(默认)或 1h
     rateLimit:

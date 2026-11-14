@@ -12,6 +12,9 @@ export const PROVIDER_TOOLS = {
   grok: ['image_generate', 'video_generate', 'x_search'],
   copilot: [],
   antigravity: [],
+  kimi: [],
+  glm: [],
+  qwen: [],
 } as const
 export type SubscriptionTool = 'image_generate' | 'video_generate' | 'x_search' | 'web_search'
 /** Mirrors `PromptCacheTtl` in translate/anthropic.ts; kept here so the client bundle needs no translate import. */

@@ -40,7 +40,7 @@ const POLL_INTERVAL_MS = 2000
 const MODEL_FILTER_THRESHOLD = 8
 
 /** Subscription provider ids, fixed by the node half's OAuth adapters. */
-export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity'
+export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity' | 'kimi' | 'glm' | 'qwen'
 
 /** One logged-in account as answered by the `status` endpoint. */
 export interface AccountStatus {
@@ -176,7 +176,19 @@ const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [
   { id: 'grok', name: 'Grok (X Premium)' },
   { id: 'copilot', name: 'GitHub Copilot' },
   { id: 'antigravity', name: 'Google Antigravity' },
+  { id: 'kimi', name: 'Kimi Code' },
+  { id: 'glm', name: 'GLM Coding Plan' },
+  { id: 'qwen', name: 'Qwen Code' },
 ]
+
+/**
+ * Providers that finish through a loopback callback can accept a pasted
+ * callback URL/code; device-code and server-mediated flows have nothing to
+ * paste, so they never render the manual fallback.
+ */
+const MANUAL_CALLBACK_PROVIDERS: ReadonlySet<SubscriptionProvider> = new Set([
+  'codex', 'claude', 'grok', 'antigravity',
+])
 
 /** Human text of an action failure, SubscriptionsAuthError or not. */
 function messageOf(error: unknown): string {
@@ -488,7 +500,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [statuses, setStatuses] = useState<Partial<Record<SubscriptionProvider, ProviderStatus>>>({})
   const [errors, setErrors] = useState<Partial<Record<SubscriptionProvider, string>>>({})
   const [manualDrafts, setManualDrafts] = useState<Record<SubscriptionProvider, string>>({
-    codex: '', claude: '', grok: '', copilot: '', antigravity: '',
+    codex: '', claude: '', grok: '', copilot: '', antigravity: '', kimi: '', glm: '', qwen: '',
   })
   /** Pending device-flow codes (copilot), shown while the attempt polls. */
   const [deviceCodes, setDeviceCodes] = useState<Partial<Record<SubscriptionProvider, { userCode: string; verificationUrl: string }>>>({})
@@ -1110,7 +1122,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 </div>
               </div>
             )}
-            {busy && deviceCode === undefined && (
+            {busy && deviceCode === undefined && MANUAL_CALLBACK_PROVIDERS.has(id) && (
               <details style={styles.manual}>
                 <summary>{t('manualSummary')}</summary>
                 <div style={styles.manualRow}>

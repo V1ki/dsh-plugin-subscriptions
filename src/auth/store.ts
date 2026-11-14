@@ -21,10 +21,12 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { parseJsonText } from '../json-text.js'
 
 /** Provider routes this plugin can serve. */
-export type ProviderId = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity'
+export type ProviderId = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity' | 'kimi' | 'glm' | 'qwen'
 
 /** Every provider route, in display order. */
-export const PROVIDER_IDS: readonly ProviderId[] = ['codex', 'claude', 'grok', 'copilot', 'antigravity']
+export const PROVIDER_IDS: readonly ProviderId[] = [
+  'codex', 'claude', 'grok', 'copilot', 'antigravity', 'kimi', 'glm', 'qwen',
+]
 
 /** Stored ChatGPT/Codex subscription session. */
 export interface CodexSession {
@@ -89,6 +91,51 @@ export interface CopilotSession {
   account?: string
 }
 
+/**
+ * Stored Kimi Code session. The device-code grant returns both tokens in one
+ * step; the access token is the Bearer credential for `api.kimi.com/coding/v1`
+ * and the refresh token rotates on every refresh.
+ */
+export interface KimiSession {
+  accessToken: string
+  refreshToken: string
+  /** Epoch milliseconds at which the access token expires. */
+  expiresAt: number
+  /** Kimi account identity, when the token response carried a claim. */
+  account?: string
+}
+
+/** Stored Qwen Code session (Qwen account OAuth, chat.qwen.ai Plus/Pro). */
+export interface QwenSession {
+  accessToken: string
+  refreshToken: string
+  /** Epoch milliseconds at which the access token expires. */
+  expiresAt: number
+  /** Qwen account identity, when userinfo reported it. */
+  account?: string
+  /** Subscription tier reported by userinfo (e.g. plus, pro). */
+  plan?: string
+}
+
+/**
+ * Stored GLM Coding Plan session. Login mints a long-lived coding-plan key
+ * (`<id>.<secret>`) through the official ZCode authorization chain; the
+ * business token that minted it is kept so a refresh can re-mint the key
+ * without another browser round trip.
+ */
+export interface GlmSession {
+  /** The minted `<apiKey>.<secretKey>` plan credential. */
+  accessToken: string
+  /** Business token (zai) or account access token (bigmodel) used to re-mint. */
+  refreshToken: string
+  /** Epoch milliseconds at which the stored key is re-minted or re-login is required. */
+  expiresAt: number
+  /** Which ZCode station minted the key. */
+  station: 'bigmodel' | 'zai'
+  /** Account email / display name, when the login response carried it. */
+  account?: string
+}
+
 /** Stored Google OAuth session for the Antigravity v1internal API. */
 export interface AntigravitySession {
   accessToken: string
@@ -121,10 +168,14 @@ export interface SessionMap {
   grok?: ProviderAccounts<GrokSession>
   copilot?: ProviderAccounts<CopilotSession>
   antigravity?: ProviderAccounts<AntigravitySession>
+  kimi?: ProviderAccounts<KimiSession>
+  glm?: ProviderAccounts<GlmSession>
+  qwen?: ProviderAccounts<QwenSession>
 }
 
 /** Any stored session, for provider-agnostic plumbing. */
 export type StoredSession = CodexSession | ClaudeSession | GrokSession | CopilotSession | AntigravitySession
+  | KimiSession | GlmSession | QwenSession
 
 /** The session type one provider stores. */
 export type SessionOf<K extends ProviderId> = NonNullable<SessionMap[K]>['accounts'][string]
@@ -170,6 +221,12 @@ export function accountKeyOf(provider: ProviderId, session: StoredSession): stri
       return (session as AntigravitySession).account ?? tokenHash(session.refreshToken)
     case 'copilot':
       return (session as CopilotSession).account ?? tokenHash(session.refreshToken)
+    case 'kimi':
+      return (session as KimiSession).account ?? tokenHash(session.refreshToken)
+    case 'qwen':
+      return (session as QwenSession).account ?? tokenHash(session.refreshToken)
+    case 'glm':
+      return (session as GlmSession).account ?? tokenHash(session.refreshToken)
   }
 }
 

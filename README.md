@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-Use your **ChatGPT (Codex)**, **Claude**, **Grok (X Premium)**, **GitHub Copilot**, and **Google Antigravity** subscriptions as LLM providers in [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) — no API keys. Codex, Grok, and Antigravity log in via OAuth in the dsh web UI (Settings → Subscriptions), while Copilot uses the GitHub OAuth device flow; Claude imports credentials from an existing Claude Code session when there is one (macOS Keychain or `~/.claude/.credentials.json`) and otherwise falls back to the same browser OAuth flow, so the Claude Code CLI is not required. Tokens live at `~/.dsh/plugins/subscriptions/auth.json` (mode 0600) and refresh automatically.
+Use your **ChatGPT (Codex)**, **Claude**, **Grok (X Premium)**, **GitHub Copilot**, **Google Antigravity**, **Kimi Code**, **GLM Coding Plan**, and **Qwen Code** subscriptions as LLM providers in [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) — no API keys. Codex, Grok, and Antigravity log in via OAuth in the dsh web UI (Settings → Subscriptions), while Copilot uses the GitHub OAuth device flow; Claude imports credentials from an existing Claude Code session when there is one (macOS Keychain or `~/.claude/.credentials.json`) and otherwise falls back to the same browser OAuth flow, so the Claude Code CLI is not required. Tokens live at `~/.dsh/plugins/subscriptions/auth.json` (mode 0600) and refresh automatically.
 
 ## Subscription and model display names
 
@@ -79,6 +79,11 @@ The `video_generate` tool plays the generated clip inline:
 | `grok`   | X Premium (xAI)   | live catalog from `api.x.ai/v1/models` (chat models only); reasoning efforts from the Grok CLI catalog (`cli-chat-proxy.grok.com/v1/models`) |
 | `copilot` | GitHub Copilot   | live catalog from `api.githubcopilot.com/models` (chat models on both wires, with per-model vision flags and reasoning efforts); login uses the OAuth device flow (enter the shown code at `github.com/login/device`) |
 | `antigravity` | Google Antigravity | live catalog from Antigravity `v1internal:fetchAvailableModels`; requests use `generateContent` / `streamGenerateContent` with text, image, streaming reasoning, and tool-call conversion |
+| `kimi` | Kimi Code (Moonshot) | live catalog from `api.kimi.com/coding/v1/models`; OAuth device flow against `auth.kimi.com` |
+| `glm` | 智谱 GLM Coding Plan | built-in `glm-5.3` / `glm-5.3-flash`; the ZCode browser login provisions the plan key automatically. Set `glm.station` to `bigmodel` (China, default) or `zai` (international) |
+| `qwen` | Qwen Code (chat.qwen.ai Plus/Pro) | live catalog from `api.qwen.ai/compatible-mode/v1/models`; OAuth device flow. **Not** the Alibaba Cloud (Bailian) Coding Plan |
+
+The three Chinese routes log in with a browser instead of a pasted key. Kimi and Qwen use the public OAuth device-code client of their official CLIs (the UI shows the code to confirm); GLM runs the official ZCode authorization chain and mints the account's `zcode-api-key` — no key is ever typed. Credentials share the same store, refresh and multi-account handling as the other routes. GLM's chain and Kimi's client identity are not documented third-party integrations, so they can change without notice; see [Chinese subscriptions](docs/cn-subscriptions.md) for the exact endpoints, refusal semantics, and the bigmodel plan-billing caveat.
 
 Only logged-in providers appear in the session model picker; the lists above refresh on login/logout. Vision-capable models declare `['text', 'image']` input modalities, and image content is translated to each provider's wire format.
 
@@ -212,7 +217,9 @@ Existing defaults continue to load from and save to `~/.dsh/plugins/subscription
 - id: llm-subscriptions
   name: dsh-plugin-subscriptions
   config:
-    providers: [codex, claude]        # subset; default all five
+    providers: [codex, claude]        # subset; default all eight
+    glm:
+      station: bigmodel                # GLM Coding Plan station: bigmodel (default) or zai
     streamIdleTimeoutMs: 300000
     claudePromptCacheTtl: 5m           # Claude prompt-cache lifetime: 5m (default) or 1h
     rateLimit:
@@ -317,7 +324,7 @@ Waiting on that reported delay is executed by [`@deepseek-ai/dsh-llm-retry`](htt
 
 A reset further out than `maxWaitMs` — a weekly window days away, or a whole pool cooling down past it — fails the turn immediately with the reset time attached, rather than parking the session for days. `wait: false` drops back to local backoff alone.
 
-All five routes share Claude Code's own retry shape: ten retries after the first attempt, backing off from 1 s with 20% jitter under a 60 s cap. These are consumer subscription endpoints that shed load in bursts, and the dsh-llm defaults (five retries from 500 ms to 10 s) give up after about fifteen seconds, which is short for that. A 429 that discloses no reset is now retried locally for roughly 17 minutes before the turn fails — about 5 minutes with `wait: false`, where the 60 s cap actually binds. Copilot currently uses the generic `retry-after` signal; unrecognized GitHub rate-limit headers are surfaced through the plugin warning sink for a future provider-specific reader.
+All subscription routes share Claude Code's own retry shape: ten retries after the first attempt, backing off from 1 s with 20% jitter under a 60 s cap. These are consumer subscription endpoints that shed load in bursts, and the dsh-llm defaults (five retries from 500 ms to 10 s) give up after about fifteen seconds, which is short for that. A 429 that discloses no reset is now retried locally for roughly 17 minutes before the turn fails — about 5 minutes with `wait: false`, where the 60 s cap actually binds. Copilot currently uses the generic `retry-after` signal; unrecognized GitHub rate-limit headers are surfaced through the plugin warning sink for a future provider-specific reader.
 
 One trade-off worth knowing: the delay ceiling is shared with that local backoff, so raising `maxWaitMs` also raises how long an unrelated transient failure (`TRANSPORT`, `SERVER`, `TIMEOUT`) can back off for before the finite retry budget runs out — up to 512 s on the last of the ten retries instead of the 60 s cap.
 
@@ -365,7 +372,7 @@ The workflow checks that the tag matches `package.json`, installs with the froze
 ## Layout
 
 - `src/index.ts` — plugin entry: config schema, adapter registration, auth-change re-announce, RPC wiring
-- `src/auth/` — PKCE/JWT helpers, token store, OAuth flow engine (temp loopback callback server), Claude Code credential reader (Keychain/file), `/subscriptions-auth` RPC channel
+- `src/auth/` — PKCE/JWT helpers, token store, OAuth flow engine (temp loopback callback server), device-code engine, ZCode/GLM login + key minting, Kimi/Qwen login modules, Claude Code credential reader (Keychain/file), `/subscriptions-auth` RPC channel
 - `src/providers/` — per-provider OAuth constants/exchange/refresh + `LlmAdapter`s, multi-account token plumbing (`accounts.ts`), the pool (`pool.ts` + `pool-health.ts` / `pool-usage.ts` / `pool-family.ts`), and `rate-limit.ts` (reset-instant parsing + retry policy)
 - `src/translate/` — dsh `Message[]` ⟷ OpenAI Responses / Anthropic Messages / Antigravity wire formats, SSE → `StreamChunk`
 - `src/providers/codex-search.ts` — Codex provider for DSH's native `web_search` capability
