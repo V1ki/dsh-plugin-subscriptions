@@ -52,16 +52,21 @@ test('provider selections survive refresh-independent reloads and concurrent pro
     assert.equal(store.visible('codex', 'future-model'), true)
     await Promise.all([
       store.set('codex', { visibleModels: ['gpt-6-astra'], contextWindows: { 'gpt-6-astra': 512000 } }),
-      store.set('grok', { visibleModels: [] }),
+      store.set('grok', { visibleModels: [], contextWindows: { 'grok-4.7': 500000 } }),
     ])
     const reload = new ProviderSettingsStore(path)
     assert.equal(reload.visible('codex', 'gpt-6-astra'), true)
     assert.equal(reload.visible('codex', 'future-model'), false)
     assert.equal(reload.visible('grok', 'grok-4'), false)
-    assert.equal(reload.contextWindow('gpt-6-astra'), 512000)
+    assert.equal(reload.contextWindow('codex', 'gpt-6-astra'), 512000)
+    // Grok shares the mechanism (issue #149), in its own provider bucket.
+    assert.equal(reload.contextWindow('grok', 'grok-4.7'), 500000)
+    assert.equal(reload.contextWindow('grok', 'grok-4.6'), undefined)
+    assert.equal(reload.contextWindow('codex', 'grok-4.7'), undefined)
     await reload.set('codex', {})
     assert.equal(reload.visible('codex', 'future-model'), true)
-    assert.equal(reload.contextWindow('gpt-6-astra'), undefined)
+    assert.equal(reload.contextWindow('codex', 'gpt-6-astra'), undefined)
+    assert.equal(reload.contextWindow('grok', 'grok-4.7'), 500000)
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
 
@@ -113,6 +118,12 @@ test('provider settings reject invalid contexts and unsupported tools; ids are s
   for (const value of [0, -1, 1.2, Infinity, NaN, '500000']) {
     assert.throws(() => validatePreferences('codex', { contextWindows: { model: value } }))
   }
+  // Grok accepts the same per-model override now; every other provider still refuses it.
+  assert.equal(validatePreferences('grok', { contextWindows: { 'grok-4.7': 500000 } }).contextWindows?.['grok-4.7'], 500000)
+  for (const value of [0, -1, 1.2, Infinity, NaN, '500000']) {
+    assert.throws(() => validatePreferences('grok', { contextWindows: { model: value } }))
+  }
+  assert.throws(() => validatePreferences('claude', { contextWindows: { model: 500000 } }), /only for Codex and Grok/)
   assert.throws(() => validatePreferences('claude', { tools: { image_generate: false } }))
   assert.throws(() => validatePreferences('codex', { tools: { video_generate: true } }))
   assert.throws(() => validatePreferences('codex', { visibleModels: [null] }))
@@ -147,7 +158,7 @@ test('Codex subagent speed defaults persist independently and validate model key
     assert.equal(restored.subagentSpeed('m'), 'fast')
     assert.equal(restored.subagentSpeed('other'), 'standard')
     assert.equal(restored.subagentSpeed('missing'), 'standard')
-    assert.equal(restored.contextWindow('m'), 512000)
+    assert.equal(restored.contextWindow('codex', 'm'), 512000)
     const copy = restored.get('codex')
     copy.subagentSpeeds!.m = 'standard'
     assert.equal(restored.subagentSpeed('m'), 'fast')
