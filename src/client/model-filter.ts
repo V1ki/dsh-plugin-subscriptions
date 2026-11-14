@@ -123,3 +123,25 @@ export function contextWindowChoice(
   if (tiers.includes(savedValue)) return { value: String(savedValue), tiers }
   return { value: String(savedValue), tiers, unavailable: savedValue }
 }
+
+/**
+ * Overrides to persist for one save.
+ *
+ * An explicit value equal to the advertised default is the same choice as
+ * following the provider, so it is dropped instead of stored as a pinned
+ * override. Keeping such a key would display "follow provider" while the
+ * pinned value survives a later default increase (Codex review on #213).
+ */
+export function pruneDefaultContextOverrides(
+  windows: Readonly<Record<string, number>>,
+  models: readonly { id: string; defaultContextWindow?: number }[],
+): Record<string, number> {
+  const defaults = new Map(models.map(model => [model.id, model.defaultContextWindow]))
+  const kept: Record<string, number> = {}
+  for (const [model, value] of Object.entries(windows)) {
+    // An unknown model has no advertised default to compare against.
+    if (defaults.get(model) === value) continue
+    kept[model] = value
+  }
+  return kept
+}

@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   contextWindowChoice, contextWindowTiers, formatWindowLabel,
-  modelEditorNotice, modelEditorState, modelListState, savedModelIds,
+  modelEditorNotice, modelEditorState, modelListState, pruneDefaultContextOverrides, savedModelIds,
 } from '../src/client/model-filter.js'
 import { en, zh } from '../src/client/locales.js'
 
@@ -142,4 +142,16 @@ test('the grok window picker copy exists in both languages', () => {
   }
   assert.match(en.modelsContextFollow, /\{default\}/)
   assert.match(zh.modelsContextUnavailableOption, /\{value\}/)
+})
+
+test('an explicit override equal to the advertised default is not persisted', () => {
+  const models = [
+    { id: 'grok-4.7', defaultContextWindow: 500_000 },
+    { id: 'codex-model', defaultContextWindow: 400_000 },
+  ]
+  assert.deepEqual(pruneDefaultContextOverrides({ 'grok-4.7': 500_000, 'codex-model': 872_000, missing: 123 }, models), {
+    'codex-model': 872_000, missing: 123,
+  })
+  // Nothing to drop when every saved window differs from its default.
+  assert.deepEqual(pruneDefaultContextOverrides({}, models), {})
 })

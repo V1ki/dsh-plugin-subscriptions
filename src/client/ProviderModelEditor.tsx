@@ -5,7 +5,7 @@ import type { ProviderPreferences, SubagentSpeedTier, SubscriptionTool } from '.
 import type { SubscriptionProvider } from './SubscriptionsSection.js'
 import { callSubscriptionsAuth } from './subscriptions-rpc.js'
 import type { AccountCatalogRow } from './account-preferences.js'
-import { contextWindowChoice, formatWindowLabel, modelEditorState, savedModelIds } from './model-filter.js'
+import { contextWindowChoice, formatWindowLabel, modelEditorState, pruneDefaultContextOverrides, savedModelIds } from './model-filter.js'
 import type { SubscriptionsKey } from './locales.js'
 
 interface ModelRow {
@@ -142,7 +142,10 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
         windows[model] = value
       }
       setError('')
-      const { accounts: _accounts, ...settings } = { ...draft, ...(provider === 'codex' || provider === 'grok' ? { contextWindows: windows } : {}) }
+      // A saved value equal to the advertised default is rendered as "follow
+      // provider"; persist that choice by dropping the key, never by pinning it.
+      const keptWindows = pruneDefaultContextOverrides(windows, catalog.models)
+      const { accounts: _accounts, ...settings } = { ...draft, ...(provider === 'codex' || provider === 'grok' ? { contextWindows: keptWindows } : {}) }
       return {
         settings,
         efforts: catalog.models.flatMap(model => {
