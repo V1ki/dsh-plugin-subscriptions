@@ -108,6 +108,8 @@ Harness uses `includePrerelease: true` and admits all versions at or above the m
 
 In DSH `0.2.1-rc.2`, the load-time check uses `engines.dsh` when declared; otherwise, every `@deepseek-ai/dsh` and `@deepseek-ai/dsh-*` peer must match the running DSH version. Prereleases participate in this check. This plugin does not declare `engines.dsh`, so its DSH peer ranges determine whether it can load. The `@deepseek-ai/cordis` and `@deepseek-ai/schemastery` peers affect package-manager dependency resolution, not this load-time check. They keep their `^4.0.1` / `^3.18.1` floors and also list the `4.0.5-alpha` / `3.18.5-alpha` builds bundled with DSH `0.2.1-alpha.2` and `0.2.1-alpha.3`, because those caret ranges exclude these prereleases under npm's default semver rules.
 
+The browser bundle resolves `@deepseek-ai/dsh-client-ui-primitives` from the running host, and that module's exports change between DSH releases: `0.2.2` removed `useAnchoredPosition`, which made the composer usage badge throw on render and disappear. The badge now positions and dismisses its own dialog, and host icons are looked up by name and render nothing when absent. `test/host-primitives-compat.spec.ts` loads the client entry against a host module with no exports, so a new named import of a host value fails the test run.
+
 DSH `0.1.x` is no longer supported. Users on that line must upgrade to a supported DSH version or retain an older compatible plugin release.
 
 ### Managing accounts and pool models

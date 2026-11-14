@@ -30,8 +30,11 @@ import { subscriptionChromeCss } from './provider-settings-styles.js'
 import { createPortal } from 'react-dom'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
+// Namespace import only: a host export this bundle names may be gone on
+// another DSH release, and calling `undefined` during render retires the slot
+// entry. Icons resolve by name with a fallback; hooks live in this plugin.
 import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
-import { useAnchoredPosition, useDismissOnOutsidePointer } from '@deepseek-ai/dsh-client-ui-primitives'
+import { useAnchoredPosition, useDismissOnOutsidePointer } from './anchored-panel.js'
 import { callSubscriptionsAuth, usageBarColor } from './SubscriptionsSection.js'
 import type { AccountStatus, ProviderStatus, ProviderUsage, SubscriptionProvider, UsageWindow } from './SubscriptionsSection.js'
 import type { ModelDirectoriesLike } from './SpeedSelect.js'

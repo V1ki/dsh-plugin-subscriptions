@@ -62,6 +62,10 @@ try {
   console.log('40%: current/recent single-provider selection verified')
   await badge.click()
   await panel.waitFor()
+  // The plugin places the dialog itself (no host positioning hook): once
+  // visible it has been measured, and it keeps 12px from every viewport edge.
+  const box = await panel.boundingBox()
+  assert.ok(box.x >= 12 && box.y >= 12 && box.x + box.width <= 900 - 12 && box.y + box.height <= 900 - 12, JSON.stringify(box))
   const anti = panel.locator('section').filter({ hasText: 'Antigravity' })
   // The dialog follows the retained subscription the badge shows: first, with
   // its model previewed, but not tagged current while an API model is selected.

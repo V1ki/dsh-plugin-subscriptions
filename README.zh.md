@@ -107,6 +107,8 @@ Harness 使用 `includePrerelease: true`，放行不低于下限的所有版本�
 
 DSH `0.2.1-rc.2` 加载时优先使用已声明的 `engines.dsh`；未声明时，要求所有 `@deepseek-ai/dsh` 和 `@deepseek-ai/dsh-*` peer 范围均匹配当前 DSH 版本，预发布版本也参与匹配。本插件未声明 `engines.dsh`，因此由 DSH peer 范围决定是否允许加载。`@deepseek-ai/cordis` 与 `@deepseek-ai/schemastery` 的 peer 影响包管理器的依赖解析，不参与这项加载检查；它们保留 `^4.0.1` / `^3.18.1` 下限，并额外列出 DSH `0.2.1-alpha.2`、`0.2.1-alpha.3` 自带的 `4.0.5-alpha` / `3.18.5-alpha` 版本，因为这些脱字符范围按 npm 默认的 semver 规则不包含上述预发布版本。
 
+浏览器端 bundle 在运行时从宿主解析 `@deepseek-ai/dsh-client-ui-primitives`，该模块的导出会随 DSH 版本变化：`0.2.2` 移除了 `useAnchoredPosition`，导致输入框下方的订阅用量徽标在渲染时抛错并消失。现在徽标自行完成弹窗定位与外部点击关闭，宿主图标按名称查找，缺失时不渲染。`test/host-primitives-compat.spec.ts` 会让客户端入口链接到一个没有任何导出的宿主模块，新增对宿主值的具名导入会使测试失败。
+
 不再支持 DSH `0.1.x`。仍使用该版本线的用户需要升级到受支持的 DSH 版本，或保留与其兼容的旧版插件。
 
 ### 管理账号与 Pool 模型
