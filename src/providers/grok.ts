@@ -685,6 +685,20 @@ export interface GrokAdapterOptions {
   rateLimit?: RateLimitWait
 }
 
+/** Advertised default window, largest selectable tier, and tiers for one resolved model. */
+function grokContextBounds(
+  discovered: DiscoveredModel | undefined,
+  configured: ModelEntry | undefined,
+): { default: number; max: number; options?: number[] } {
+  const fallback = discovered?.contextWindow ?? configured?.contextWindow ?? GROK_CONTEXT_WINDOW
+  const options = discovered?.contextWindowOptions ?? []
+  return {
+    default: fallback,
+    max: Math.max(fallback, ...options),
+    ...options.length === 0 ? {} : { options: [...options] },
+  }
+}
+
 /** Grok wire adapter: one instance serves the `grok` provider route. */
 export class GrokAdapter extends LlmAdapter {
   private readonly catalog: ModelCatalogCache
@@ -855,15 +869,10 @@ export class GrokAdapter extends LlmAdapter {
    * override can only shrink the budget in that case.
    */
   async contextLimits(model: string): Promise<{ default: number; max: number; options?: number[] }> {
-    const discovered = await this.discovered(model)
-    const configured = this.options.models.find(entry => entry.id === model)
-    const fallback = discovered?.contextWindow ?? configured?.contextWindow ?? GROK_CONTEXT_WINDOW
-    const options = discovered?.contextWindowOptions ?? []
-    return {
-      default: fallback,
-      max: Math.max(fallback, ...options),
-      ...options.length === 0 ? {} : { options: [...options] },
-    }
+    return grokContextBounds(
+      await this.discovered(model),
+      this.options.models.find(entry => entry.id === model),
+    )
   }
 
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
@@ -878,7 +887,7 @@ export class GrokAdapter extends LlmAdapter {
   async resolveOwnModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     const discovered = await this.discovered(model)
     const configured = this.options.models.find(entry => entry.id === model)
-    const limits = await this.contextLimits(model)
+    const bounds = grokContextBounds(discovered, configured)
     // Efforts come from the discovered CLI catalog; models it does not
     // cover expose none, so the harness rejects explicit efforts before
     // provider I/O instead of the API 400ing. A configured default effort
@@ -891,7 +900,7 @@ export class GrokAdapter extends LlmAdapter {
       name: discovered?.name ?? configured?.name ?? model,
       ...discovered?.description === undefined ? {} : { description: discovered.description },
       inputModalities: configured?.inputModalities ?? grokModalities(model),
-      context: { contextWindow: Math.min(this.options.contextWindowOf?.(model) ?? limits.default, limits.max) },
+      context: { contextWindow: Math.min(this.options.contextWindowOf?.(model) ?? bounds.default, bounds.max) },
       defaultMaxTokens: configured?.maxTokens ?? GROK_DEFAULT_MAX_TOKENS,
       ...reasoning === undefined ? {} : { reasoning },
     }
