@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-subscriptions",
-  "version": "0.9.16-cn.1",
+  "version": "0.9.17-cn.1",
   "description": "Use ChatGPT (Codex), Claude, Grok (X Premium), GitHub Copilot, Google Antigravity, Kimi Code, GLM Coding Plan, and Qwen Code subscriptions as DeepSeek Harness LLM providers, with browser login from the web Settings page",
   "license": "MIT",
   "repository": {

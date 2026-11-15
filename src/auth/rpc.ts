@@ -106,6 +106,8 @@ export interface ProviderStatus {
   accounts: AccountStatus[]
   /** The last login error, shown until the next success. */
   detail?: string
+  /** Qwen only: whether a console session for quota reads is linked. */
+  quotaLinked?: boolean
   /** The CLI version this route presents (Codex, Claude), and where it came from. */
   clientVersion?: CliVersion
 }

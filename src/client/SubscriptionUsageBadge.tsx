@@ -215,7 +215,7 @@ export function compactSegment(d: ProviderUsageDisplay, model?: string, t: Trans
   const source = t(account.isDefault ? 'quotaDefaultAccount' : 'quotaListedAccount')
   const freshness = account.usage && quotaIsStale(account.usage) ? ` · ${t('quotaStale')}` : ''
   const prefix = `${d.name} · ${source}`
-  if (windows.length === 0) return `${prefix} · ${quotaUnavailableText(account.usage, account.loadFailed === true, t) ?? t('usageNoVisibleModels')}`
+  if (windows.length === 0) return `${prefix} · ${quotaUnavailableText(account.usage, account.loadFailed === true, t, d.provider) ?? t('usageNoVisibleModels')}`
   if (d.provider === 'antigravity') {
     const matching = model === undefined ? [] : windows.filter(w => antigravityQuotaApplies(w.scope, model))
     if (matching.length === 0) {

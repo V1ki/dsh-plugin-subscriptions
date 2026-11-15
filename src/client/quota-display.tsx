@@ -58,8 +58,13 @@ export function useQuotaClock(): number {
 }
 
 /** Availability is separate from the age of an existing quota snapshot. */
-export function quotaUnavailableText(usage: ProviderUsage | undefined, failed: boolean, t: Translate): string | undefined {
-  if (usage?.supported === false) return t('quotaUnsupported')
+export function quotaUnavailableText(
+  usage: ProviderUsage | undefined,
+  failed: boolean,
+  t: Translate,
+  provider?: string,
+): string | undefined {
+  if (usage?.supported === false) return provider === 'qwen' ? t('qwenQuotaShort') : t('quotaUnsupported')
   if (usage?.windows?.length) return undefined
   if (failed || usage?.refreshFailed) return t('quotaFailedNoData')
   return t('usageEmpty')

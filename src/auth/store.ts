@@ -122,6 +122,18 @@ export interface QwenSession {
   plan?: string
   /** OpenAI-compatible base URL the key belongs to. */
   baseURL?: string
+  /**
+   * Optional console login used ONLY to read quota. The platform exposes
+   * account quota to a signed-in console session, never to an inference key.
+   */
+  console?: {
+    accessToken: string
+    refreshToken?: string
+    expiresAt: number
+    /** Cached gateway token exchanged from `accessToken`. */
+    cliAccessToken?: string
+    user?: string
+  }
 }
 
 /**

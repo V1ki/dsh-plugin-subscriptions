@@ -71,6 +71,7 @@ GLM 的 Coding Plan 没有对第三方开放的 OAuth 应用，但官方 ZCode �
 - OpenAI 兼容端点**没有 `GET /models`**，所以模型目录是内置的文档清单（`qwen3.8-max`、`qwen3.8-flash`、`qwen3.7-plus`、`deepseek-v4-pro`），可以在配置里覆盖。
 - 思考等级：Qwen3.8 系列和 DeepSeek V4 Pro 支持 `reasoning_effort: low | medium | xhigh`（默认 xhigh），插件直接写顶层 `reasoning_effort`；Qwen3.7 Plus 没有声明档位，因此不提供选择。
 - 注意 `sk-sp-` 前缀同样用于阿里云百炼/ModelStudio 的套餐 Key；本路由只按千问AI平台的端点发送，百炼 Key 在这里会鉴权失败。百炼 Coding Plan 仍只有 `sk-sp-` Key，没有 OAuth。
+- **额度需要额外一次控制台登录**：推理 Key 读不到额度，所以保存 Key 后，卡片上会出现“登录查询额度”按钮。它走官方 CLI 同款的 PKCE 设备码（`t.qianwenai.com`），把控制台凭据存进同一个 qwen 会话，只用于读额度；推理仍然只用 API Key。没有登录时卡片会明确提示，不再显示笼统的“此服务商不支持额度查询”。
 
 ## 用量与余额
 
@@ -80,15 +81,15 @@ GLM 的 Coding Plan 没有对第三方开放的 OAuth 应用，但官方 ZCode �
 |---|---|---|
 | Kimi | `GET https://api.kimi.com/coding/v1/usages`（Bearer access token） | 5 小时窗口、旧套餐的每周窗口、共享月度池与其 Code 份额、`/me` 的套餐名；Extra Usage 钱包余额按固定点 ÷1e6 换算成货币 |
 | GLM | `GET {站点}/api/monitor/usage/quota/limit` + `GET {站点}/api/biz/customer-package-reset/list`（铸造的套餐 Key） | 5 小时 credits、每周 credits、MCP 月度窗口、套餐档位；可用重置卡数量与到期时间 |
-| Qwen | 无（需控制台登录会话，见下） | 卡片明确提示“推理 Key 无法读取额度” |
+| Qwen | `usage` / `subscription` / `quota-config` 控制台网关（需要先点“登录查询额度”） | 月度（旧套餐为每周）已用比例、重置时间、套餐 specCode；用该档位的月度 credits × (1 − 已用比例) 算出剩余 credits；按量计费账号显示现金余额 |
 
 **GLM 重置卡**：官方文档说 API-KEY 用户通常不会收到重置卡，所以“可用 0 次”是正常状态；插件只读取并展示，不在 DSH 内执行“使用重置卡”的写操作。
 
-**Qwen 余额/额度**：千问AI平台只把账户额度暴露给控制台登录会话（官方 CLI 的 device flow + console 网关），推理 Key 本身没有任何公开的额度接口。插件不会用本地 token 数伪造余额。如果以后需要，可以再接官方 CLI 的登录态来读取。
+**Qwen 余额/额度**：千问AI平台只把账户额度暴露给控制台登录会话，推理 Key 本身没有公开的额度接口。插件已经接上官方 CLI 使用的 PKCE 设备码 + console 网关：保存 Key 后点“登录查询额度”，之后就能看到月度/每周已用比例、重置时间和剩余 credits；按量计费账号则显示现金余额。控制台 token 只用于额度读取，不会发往推理请求。
 
 ## 安全与数据
 
-- 所有凭据只进 `auth.json` 和 DSH 凭据存储；不写入插件配置、不写日志、不回显。
+- 所有凭据只进 `auth.json` 和 DSH 凭据存储；不写入插件配置、不写日志、不回显。Qwen 的控制台 token 与推理 Key 存在同一个会话里，只用于额度查询。
 - Kimi 的设备 id 存在 `~/.dsh/plugins/subscriptions/kimi-device-id`（0600），只用于登录与推理的 `X-Msh-Device-Id`。
 - 刷新失败按上游语义处理：401/403 或 `invalid_grant` 视为永久失效并移除该账号；网络/5xx 保留可用 token 重试。
 - 这三条路由不跟随重定向，token 只发往固定端点。
@@ -111,7 +112,7 @@ Git 安装会现场执行仓库的 `prepare` 构建（tsdown 编译 Host 与 Cli
 
 ## 已知限制
 
-- Qwen 千问AI平台的推理 Key 没有公开额度接口，卡片只能提示原因；Kimi/GLM 的额度可用。
+- Qwen 千问AI平台的额度需要额外一次“登录查询额度”（官方 CLI 同款控制台登录）；只保存 Key 时只能显示提示，不能显示额度。
 - Kimi 没有“重置卡”概念，只有按时间重置的窗口；GLM 有重置卡但通常不会发给 API-KEY 用户。
 - 各模型的可选思考档位以目录声明为准；`kimi-for-coding-highspeed`、`qwen3.7-plus` 等没有档位的模型不会显示选择器，使用服务端默认行为。
 - GLM 的授权链路、Kimi 的客户端身份都属于官方未承诺的第三方接入方式；服务端策略变化可能导致登录失败。失败时会明确报错，不会静默回退到按量计费端点。

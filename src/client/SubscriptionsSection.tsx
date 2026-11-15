@@ -59,6 +59,7 @@ export interface ProviderStatus {
   busy: boolean
   accounts: AccountStatus[]
   detail?: string
+  quotaLinked?: boolean
   /** The CLI version the route presents (Codex, Claude), and where it came from. */
   clientVersion?: { version: string; source: ClientVersionSource }
 }
@@ -707,7 +708,11 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       for (const account of statuses[id]?.accounts ?? []) {
         const key = `${id}:${account.key}`
         live.add(key)
-        if (usages[key] === undefined && usageErrors[key] === undefined) void loadUsage(id, account.key)
+        const stale = usages[key]
+        if (stale === undefined && usageErrors[key] === undefined) void loadUsage(id, account.key)
+        // A Qwen snapshot taken before the console login says "unsupported";
+        // reconnect the usage read once that login appears.
+        else if (stale?.supported === false && statuses[id]?.quotaLinked === true) void loadUsage(id, account.key)
       }
     }
     setUsages(prev => dropStale(prev, live))
@@ -1007,7 +1012,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                           {t('usageRefresh')}
                         </button>}
                       </div>
-                      {usage && <UsageFreshness usage={usage} t={t} />}
+                      {usage && usage.supported !== false && <UsageFreshness usage={usage} t={t} />}
                       {usage?.supported === false && (
                         <p style={styles.statusLine}>
                           {t(id === 'qwen' ? 'qwenUsageNote' : 'quotaUnsupported')}
@@ -1107,8 +1112,15 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                     <button type="button" disabled={qwenKeyDraft.trim() === ''} onClick={() => { void saveQwenKey() }}>
                       {accounts.length > 0 ? t('qwenKeyChange') : t('qwenKeySave')}
                     </button>
+                    {accounts.length > 0 && (
+                      <button type="button" onClick={() => { void login('qwen') }}>
+                        {t('qwenQuotaLogin')}
+                      </button>
+                    )}
                   </div>
-                  <p style={styles.statusLine}>{t('qwenKeyHint')}</p>
+                  <p style={styles.statusLine}>
+                    {status?.quotaLinked === true ? t('qwenQuotaLinked') : t('qwenKeyHint')}
+                  </p>
                 </>
               )}
               {!busy && id !== 'qwen' && accounts.length === 0 && (

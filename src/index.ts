@@ -45,6 +45,9 @@ import {
 import { isGlmPermanentRefreshError, refreshGlm, startGlmLogin } from './auth/zcode.js'
 import { fetchGlmUsage } from './providers/glm-usage.js'
 import { fetchKimiUsage } from './providers/kimi-usage.js'
+import { exchangeQwenCliToken, startQwenConsoleLogin } from './auth/qwen-console.js'
+import type { QwenConsoleAttempt } from './auth/qwen-console.js'
+import { fetchQwenUsage } from './providers/qwen-usage.js'
 import type { GlmLoginAttempt } from './auth/zcode.js'
 import { ChatSubscriptionAdapter } from './providers/chat-subscription.js'
 import type { ChatSubscriptionDiscovered, ChatSubscriptionReasoning, ChatSubscriptionSession } from './providers/chat-subscription.js'
@@ -520,6 +523,9 @@ export class SubscriptionsAuthController implements AuthController {
   private zcodeLogins = new Map<ProviderId, GlmLoginAttempt>()
   /** Reserving the ZCode flow before its first network call closes the double-click window. */
   private glmStarting = false
+  /** In-flight Qwen console login (quota reads only; inference stays key-based). */
+  private qwenConsoleLogins = new Map<ProviderId, QwenConsoleAttempt>()
+  private qwenConsoleStarting = false
 
   /**
    * Per-provider claim counter. Everything that takes ownership of a
@@ -618,9 +624,12 @@ export class SubscriptionsAuthController implements AuthController {
     const detail = this.lastError.get(provider)
     const clientVersion = await this.clientVersions[provider]?.()
     return {
+      ...provider === 'qwen' ? { quotaLinked: (entries[0]?.session as QwenSession | undefined)?.console !== undefined } : {},
       busy: this.flows.isBusy(provider) || this.deviceFlows.isBusy(provider)
-        || this.zcodeLogins.has(provider) || this.finalizing.has(provider)
-        || (provider === 'glm' && this.glmStarting),
+        || this.zcodeLogins.has(provider) || this.qwenConsoleLogins.has(provider)
+        || this.finalizing.has(provider)
+        || (provider === 'glm' && this.glmStarting)
+        || (provider === 'qwen' && this.qwenConsoleStarting),
       accounts: entries.map(({ key, session }, index) => {
         const account = accountOf(provider, session)
         const plan = planOf(provider, session)
@@ -680,9 +689,26 @@ export class SubscriptionsAuthController implements AuthController {
       return { authorizeUrl: attempt.verificationUrl, userCode: attempt.userCode }
     }
     if (provider === 'qwen') {
-      // 千问AI平台 has no OAuth for model calls; the Settings card asks for
-      // the platform API key instead of starting a browser flow.
-      throw new BadRequest('Qwen 千问AI平台 is authenticated with an API key; save it in Settings → Subscriptions')
+      // Inference is key-based; this browser flow only connects the console
+      // session that can read quota.
+      if (this.qwenConsoleLogins.has('qwen') || this.qwenConsoleStarting) {
+        throw new Error('a qwen console login attempt is already in progress')
+      }
+      const accounts = await listAccounts('qwen')
+      if (accounts.length === 0) {
+        throw new BadRequest('Save the Qwen API key first, then log in to read quota')
+      }
+      this.qwenConsoleStarting = true
+      let attempt: QwenConsoleAttempt
+      try {
+        attempt = await startQwenConsoleLogin()
+      } finally {
+        this.qwenConsoleStarting = false
+      }
+      this.qwenConsoleLogins.set('qwen', attempt)
+      this.beginFinalizing('qwen')
+      void this.completeQwenConsole(attempt)
+      return { authorizeUrl: attempt.authorizeUrl }
     }
     if (provider === 'glm') {
       // ZCode server-mediated flow: the browser completes against the station's
@@ -812,6 +838,39 @@ export class SubscriptionsAuthController implements AuthController {
     }
   }
 
+  /** Merge a finished console login into the Qwen key session (quota only). */
+  private async completeQwenConsole(attempt: QwenConsoleAttempt): Promise<void> {
+    const claim = this.claim('qwen')
+    try {
+      const credentials = await attempt.wait()
+      if (this.claims.get('qwen') !== claim) return
+      const accounts = await listAccounts('qwen')
+      const current = accounts[0]
+      if (current === undefined) throw new Error('the Qwen API key was removed; save it and log in again')
+      let cliAccessToken: string | undefined
+      try {
+        cliAccessToken = await exchangeQwenCliToken(credentials.accessToken)
+      } catch {
+        // Usage will retry the exchange with the stored device token.
+      }
+      const session: QwenSession = {
+        ...(current.session as QwenSession),
+        console: { ...credentials, ...cliAccessToken === undefined ? {} : { cliAccessToken } },
+      }
+      await saveAccountSession('qwen', current.key, session as never)
+      this.lastError.delete('qwen')
+      this.onAuthChanged('qwen', current.key)
+    } catch (error) {
+      if (this.claims.get('qwen') !== claim) return
+      if (!(error instanceof Error && error.message === 'login cancelled')) {
+        this.lastError.set('qwen', errorChain(error))
+      }
+    } finally {
+      if (this.qwenConsoleLogins.get('qwen') === attempt) this.qwenConsoleLogins.delete('qwen')
+      this.endFinalizing('qwen')
+    }
+  }
+
   /**
    * Store one provider API key as a non-expiring session (Qwen 千问AI平台).
    * @throws BadRequest when the provider or the key is not one this route accepts.
@@ -824,6 +883,10 @@ export class SubscriptionsAuthController implements AuthController {
     } catch (error) {
       throw new BadRequest(error instanceof Error ? error.message : String(error))
     }
+    // Replacing the inference key must not silently disconnect the console
+    // session that provides quota.
+    const existing = (await listAccounts('qwen'))[0]?.session as QwenSession | undefined
+    if (existing?.console !== undefined) session = { ...session, console: existing.console }
     this.claim(provider)
     await this.persist(provider, session)
     this.lastError.delete(provider)
@@ -922,6 +985,8 @@ export class SubscriptionsAuthController implements AuthController {
     this.deviceFlows.pending(provider)?.cancel()
     this.zcodeLogins.get(provider)?.cancel()
     this.zcodeLogins.delete(provider)
+    this.qwenConsoleLogins.get(provider)?.cancel()
+    this.qwenConsoleLogins.delete(provider)
     return Promise.resolve()
   }
 
@@ -931,6 +996,8 @@ export class SubscriptionsAuthController implements AuthController {
     this.deviceFlows.pending(provider)?.cancel()
     this.zcodeLogins.get(provider)?.cancel()
     this.zcodeLogins.delete(provider)
+    this.qwenConsoleLogins.get(provider)?.cancel()
+    this.qwenConsoleLogins.delete(provider)
     await deleteAccountSession(provider, account)
     this.lastError.delete(provider)
     this.onAuthChanged(provider, account)
@@ -1411,6 +1478,14 @@ export function apply(ctx: Context, config: Config): void {
           defaultEffortOf: model => defaultEffortOf('qwen', model),
           pool: () => poolAdapter,
         })
+        usageFetchers.qwen = async (account, signal) => {
+          const session = await tokens.session(account)
+          const result = await fetchQwenUsage(session, proxiedFetch, signal)
+          if (result.updated !== undefined) {
+            await saveAccountSession('qwen', account, result.updated as never)
+          }
+          return result.usage
+        }
         adapters.set('qwen', adapter)
         handles.set('qwen', register('qwen', adapter))
         break
