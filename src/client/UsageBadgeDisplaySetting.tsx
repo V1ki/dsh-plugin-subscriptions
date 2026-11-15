@@ -1,6 +1,6 @@
 import { useId, useState } from 'react'
 import type { CSSProperties } from 'react'
-import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import { SettingHelp } from './SettingHelp.js'
 import type { SubscriptionsKey } from './locales.js'
 import { setUsageBadgeMode, useUsageBadgeMode, setQuotaDisplayMode, useQuotaDisplayMode } from './usage-badge-preferences.js'
 
@@ -64,18 +64,6 @@ export function UsageBadgeDisplaySetting({ t }: { t: Translate }) {
       {failed && <p role="alert" style={{ ...styles.hint, color: 'var(--dsw-alias-state-error-primary)' }}>{t('usageBadgeDisplaySaveFailed')}</p>}
     </div>
   )
-}
-
-/** A separate button avoids nesting an interactive control inside the select label. */
-function SettingHelp({ title, hint, t }: { title: string; hint: string; t: Translate }) {
-  return <Tooltip label={hint} side="bottom" portal openOnClick maxWidth={340}>
-    <button type="button" className="dsh-subscription-setting-help" aria-label={t('settingsHelpLabel', { setting: title })}>
-      <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none">
-        <circle cx="8" cy="8" r="6.25" stroke="currentColor" strokeWidth="1.3" />
-        <path d="M8 7v4M8 4.75v.1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-      </svg>
-    </button>
-  </Tooltip>
 }
 
 const styles: Record<string, CSSProperties> = {
