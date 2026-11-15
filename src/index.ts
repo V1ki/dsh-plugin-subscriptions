@@ -1536,10 +1536,17 @@ export function apply(ctx: Context, config: Config): void {
             AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS),
           )
         }
-        case 'copilot':
         case 'kimi':
         case 'glm':
-        case 'qwen':
+        case 'qwen': {
+          // These routes register their usage fetcher in the provider loop;
+          // the pool's own fetcher table must forward to it or Settings would
+          // report the route as "no usage" even though the endpoint exists.
+          const fetcher = usageFetchers[provider]
+          return fetcher === undefined ? undefined : () =>
+            fetcher(account, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS))
+        }
+        case 'copilot':
           return undefined
       }
     }

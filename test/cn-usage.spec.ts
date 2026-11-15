@@ -5,6 +5,13 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { Context } from '@deepseek-ai/cordis'
+import { LlmRuntime } from '@deepseek-ai/dsh-llm'
+import * as plugin from '../src/index.js'
+import { createFakeConnection } from './fake-connection.js'
 import './keep-alive.js'
 import { fetchKimiUsage } from '../src/providers/kimi-usage.js'
 import { fetchGlmUsage } from '../src/providers/glm-usage.js'
@@ -206,4 +213,65 @@ test('glm usage: a failed reset lookup keeps the windows and reports the error',
   assert.equal(usage.windows?.length, 1)
   assert.equal(usage.resetCredits, undefined)
   assert.match(usage.resetCreditsError ?? '', /HTTP 500/)
+})
+
+test('host: a pool-enabled profile reads Kimi/GLM usage instead of reporting unsupported', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'cn-usage-host-'))
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  await mkdir(join(home, 'plugins', 'subscriptions'), { recursive: true })
+  const far = Date.now() + 30 * 24 * 60 * 60_000
+  await writeFile(join(home, 'plugins', 'subscriptions', 'auth.json'), JSON.stringify({
+    kimi: { default: 'k', accounts: { k: { accessToken: 'kimi-at', refreshToken: 'kimi-rt', expiresAt: far } } },
+    glm: { default: 'g', accounts: { g: {
+      accessToken: 'kid.secret', refreshToken: 'biz', expiresAt: far, station: 'bigmodel',
+    } } },
+  }))
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input instanceof Request ? input.url : input)
+    const json = (body: unknown): Response =>
+      new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+    if (url.endsWith('/coding/v1/usages')) {
+      return json({ usages: { limit_5h: { used_ratio: 0.25, reset_time: '2026-11-15T18:00:00Z' } } })
+    }
+    if (url.endsWith('/coding/v1/me')) return json({ user_level_name: 'Pro' })
+    if (url.endsWith('/coding/v1/models')) return json({ data: [] })
+    if (url.includes('/api/monitor/usage/quota/limit')) {
+      return json({ code: 200, success: true, data: {
+        level: 'pro',
+        limits: [{ type: 'CREDIT_LIMIT', unit: 3, number: 5, percentage: 40, nextResetTime: 1787563232239 }],
+      } })
+    }
+    if (url.includes('/customer-package-reset/list')) {
+      return json({ code: 200, success: true, data: { fiveHourResets: [], weekResets: [] } })
+    }
+    return new Response('{}', { status: 404 })
+  }) as typeof fetch
+
+  const ctx = new Context()
+  const llm = new LlmRuntime(ctx)
+  const connection = createFakeConnection()
+  ctx.provide('connection', connection.connection)
+  ctx.provide('tools', { register: () => () => {} })
+  // Default config: the account pool is enabled, so usage goes through the
+  // pool cache and its own fetcher table.
+  const runtime = ctx.plugin(plugin, {})
+  try {
+    await new Promise(resolve => setTimeout(resolve, 100))
+    const kimi = await connection.handler('usage', { provider: 'kimi', account: 'k' }, new AbortController().signal)
+    assert.equal(kimi.ok, true)
+    assert.equal((kimi.value as { supported: boolean }).supported, true)
+    assert.equal((kimi.value as { windows: { usedPercent: number }[] }).windows[0]?.usedPercent, 25)
+    const glm = await connection.handler('usage', { provider: 'glm', account: 'g' }, new AbortController().signal)
+    assert.equal(glm.ok, true)
+    assert.equal((glm.value as { supported: boolean }).supported, true)
+    assert.equal((glm.value as { windows: { usedPercent: number }[] }).windows[0]?.usedPercent, 40)
+  } finally {
+    await runtime.dispose()
+    globalThis.fetch = originalFetch
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    await rm(home, { recursive: true, force: true })
+  }
 })
