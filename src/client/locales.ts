@@ -52,6 +52,7 @@ export const en = {
   modelsUnavailable: "Currently unavailable",
 
   nav: 'Subscriptions',
+  providerTabs: 'Subscription providers',
   intro: 'Log a subscription provider in or out. Login opens the provider’s authorization page in a new tab; headless setups can paste the callback URL or code instead.',
   unavailable: 'Connection unavailable; subscription status cannot be loaded.',
   checking: 'Checking…',
@@ -276,6 +277,7 @@ export const zh = {
   modelsUnavailable: "当前不可用",
 
   nav: '订阅',
+  providerTabs: '订阅服务商',
   intro: '在此登录或退出订阅服务商。点击登录会在新标签页打开服务商的授权页面；无浏览器环境可改为粘贴回调 URL 或授权码。',
   unavailable: '连接不可用，无法加载订阅状态。',
   checking: '查询中…',

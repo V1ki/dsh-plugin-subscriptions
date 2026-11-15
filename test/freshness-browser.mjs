@@ -78,7 +78,7 @@ try {
     page.setDefaultTimeout(10000)
     page.on('pageerror', error => errors.push(error.message))
     await page.goto('http://freshness.test/')
-    const card = page.getByText('Codex (ChatGPT)', { exact: true }).locator('xpath=../..')
+    const card = page.getByRole('tabpanel').filter({ hasText: 'Codex (ChatGPT)' })
     await page.getByText('A (synthetic)', { exact: true }).waitFor()
     await page.waitForFunction(() => !document.querySelector('button[disabled]'))
     const accountA = card.getByText('A (synthetic)', { exact: true }).locator('xpath=../..')

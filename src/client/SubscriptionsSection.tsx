@@ -14,7 +14,7 @@
 import { creditBalanceText, quotaPercent, quotaText, UsageFreshness, useQuotaClock } from './quota-display.js'
 import { useQuotaDisplayMode } from './usage-badge-preferences.js'
 import { readUsageCache, subscribeUsage } from './usage-cache.js'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import { en } from './locales.js'
@@ -177,6 +177,15 @@ const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [
   { id: 'copilot', name: 'GitHub Copilot' },
   { id: 'antigravity', name: 'Google Antigravity' },
 ]
+
+/** Sort the visible provider names within connected and disconnected groups. */
+export function sortedSubscriptionProviders(statuses: Partial<Record<SubscriptionProvider, ProviderStatus>>) {
+  return [...PROVIDERS].sort((a, b) => {
+    const connectionOrder = Number(hasAccount(statuses[b.id])) - Number(hasAccount(statuses[a.id]))
+    return connectionOrder || (statuses[a.id]?.displayName || a.name).localeCompare(statuses[b.id]?.displayName || b.name)
+      || a.id.localeCompare(b.id)
+  })
+}
 
 /** Human text of an action failure, SubscriptionsAuthError or not. */
 function messageOf(error: unknown): string {
@@ -486,6 +495,20 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const { rpc } = props
   const t = props.t ?? fallbackTranslate
   const [statuses, setStatuses] = useState<Partial<Record<SubscriptionProvider, ProviderStatus>>>({})
+  // Undefined until a status snapshot arrives or the user chooses a tab.
+  const [selectedProvider, setSelectedProvider] = useState<SubscriptionProvider>()
+  const tabIdPrefix = useId()
+  const tabRefs = useRef<Partial<Record<SubscriptionProvider, HTMLButtonElement>>>({})
+  const focusToRestore = useRef<{ element: HTMLElement; provider: SubscriptionProvider } | null>(null)
+  useLayoutEffect(() => {
+    const previous = focusToRestore.current
+    focusToRestore.current = null
+    if (!previous || (document.activeElement !== document.body && document.activeElement !== previous.element)) return
+    if (previous.element.isConnected) previous.element.focus()
+    else tabRefs.current[previous.provider]?.focus()
+  }, [statuses])
+  const sortedProviders = sortedSubscriptionProviders(statuses)
+  const activeProvider = selectedProvider ?? sortedProviders[0].id
   const [errors, setErrors] = useState<Partial<Record<SubscriptionProvider, string>>>({})
   const [manualDrafts, setManualDrafts] = useState<Record<SubscriptionProvider, string>>({
     codex: '', claude: '', grok: '', copilot: '', antigravity: '',
@@ -561,7 +584,11 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       return
     }
     if (!mountedRef.current) return
+    const focused = document.activeElement
+    const provider = focused instanceof HTMLElement ? focused.closest<HTMLElement>('[data-subscription-provider]')?.dataset.subscriptionProvider as SubscriptionProvider | undefined : undefined
+    focusToRestore.current = focused instanceof HTMLElement && provider ? { element: focused, provider } : null
     setStatuses(response.providers)
+    setSelectedProvider(current => current ?? sortedSubscriptionProviders(response.providers)[0].id)
     // The poll recovered: drop any error line a previous failed poll left.
     for (const { id } of PROVIDERS) setProviderError(id, undefined)
     for (const { id } of PROVIDERS) {
@@ -901,13 +928,43 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
         <p style={styles.statusLine}>{proxyStatusText(t, proxy, proxyLoadError)}</p>
       </div>
       <div style={styles.separator} />
-      {PROVIDERS.map(({ id, name }) => {
+      <div className="dsh-subscription-provider-area">
+      <div className="dsh-subscription-tabs" role="tablist" aria-label={t('providerTabs')}>
+        {sortedProviders.map(({ id, name }, index) => {
+          const status = statuses[id]
+          const displayName = status?.displayName || name
+          return <button key={id} type="button" role="tab" data-subscription-provider={id} id={`${tabIdPrefix}-tab-${id}`}
+            ref={node => { if (node) tabRefs.current[id] = node; else delete tabRefs.current[id] }}
+            aria-controls={`${tabIdPrefix}-panel-${id}`} aria-selected={activeProvider === id}
+            aria-label={`${displayName} — ${statusText(t, status)}`} tabIndex={activeProvider === id ? 0 : -1}
+            onFocus={() => setSelectedProvider(id)}
+            onClick={() => setSelectedProvider(id)}
+            onKeyDown={event => {
+              let next = index
+              if (event.key === 'ArrowRight') next = (index + 1) % sortedProviders.length
+              else if (event.key === 'ArrowLeft') next = (index + sortedProviders.length - 1) % sortedProviders.length
+              else if (event.key === 'Home') next = 0
+              else if (event.key === 'End') next = sortedProviders.length - 1
+              else return
+              event.preventDefault()
+              const nextId = sortedProviders[next].id
+              setSelectedProvider(nextId)
+              tabRefs.current[nextId]?.focus()
+            }}>
+            <span aria-hidden="true" style={{ ...styles.dot, background: dotColor(status) }} />
+            {displayName}
+          </button>
+        })}
+      </div>
+      {sortedProviders.map(({ id, name }) => {
         const status = statuses[id]
         const busy = status?.busy === true
         const deviceCode = deviceCodes[id]
         const accounts = status?.accounts ?? []
         return (
-          <div key={id} style={styles.card}>
+          <div key={id} role="tabpanel" data-subscription-provider={id} id={`${tabIdPrefix}-panel-${id}`}
+            aria-labelledby={`${tabIdPrefix}-tab-${id}`} hidden={activeProvider !== id} tabIndex={0}>
+          <div style={styles.card}>
             <div style={styles.cardHeader}>
               <span style={{ ...styles.dot, background: dotColor(status) }} />
               <span style={styles.name}>{status?.displayName || name}</span>
@@ -1127,8 +1184,10 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
               </details>
             )}
           </div>
+          </div>
         )
       })}
+      </div>
       {managedProvider && <ProviderAccountManager provider={managedProvider.id} name={managedProvider.name}
         rpc={rpc} t={t} onClose={() => { setManagedProvider(undefined); void refresh() }} />}
       <style>{'.subscriptions-reset-dialog::backdrop { background: var(--dsw-alias-bg-mask-1, #0006); backdrop-filter: var(--dsw-mask-blur, none); }'}</style>
