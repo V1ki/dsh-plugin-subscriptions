@@ -102,9 +102,9 @@ Image generation and editing share same-provider account scheduling: try the def
 
 ### DSH compatibility
 
-DSH peers use `>=0.2.0-rc.2 || >=0.2.1-0 || >=0.2.2-0` with no upper bound. The prerelease anchors admit the `0.2.1` and `0.2.2` lines under npm/pnpm's default peer matching. Maintain one anchor per supported release line, not an entry for every RC. Development dependencies are pinned to `0.2.2-rc.3`.
+DSH peers use two short ranges with no upper bound: `>=0.2.0-rc.2 || >=0.2.1-0`. The first retains the minimum supported version; the second admits all `0.2.1` alpha/RC builds under npm/pnpm's default peer matching, avoiding version-mismatch warnings from these five DSH peers for that release line. Maintain one prerelease anchor per supported release line, not an entry for every RC. Development dependencies remain pinned to `0.2.1-rc.2`.
 
-Harness uses `includePrerelease: true` and admits all versions at or above the minimum, including future prereleases. npm/pnpm default matching admits later stable versions but requires an explicit prerelease anchor for each new release line (for example, `>=0.2.3-0` for `0.2.3` prereleases). There is no upper bound: future incompatible releases are not blocked, and admission does not guarantee runtime compatibility.
+Harness uses `includePrerelease: true` and admits all versions at or above the minimum, including future prereleases. npm/pnpm default matching admits later stable versions but requires an explicit prerelease anchor for each new release line (for example, `>=0.2.2-0` for `0.2.2` prereleases). There is no upper bound: future incompatible releases are not blocked, and admission does not guarantee runtime compatibility.
 
 In DSH `0.2.1-rc.2`, the load-time check uses `engines.dsh` when declared; otherwise, every `@deepseek-ai/dsh` and `@deepseek-ai/dsh-*` peer must match the running DSH version. Prereleases participate in this check. This plugin does not declare `engines.dsh`, so its DSH peer ranges determine whether it can load. The `@deepseek-ai/cordis` and `@deepseek-ai/schemastery` peers affect package-manager dependency resolution, not this load-time check. They keep their `^4.0.1` / `^3.18.1` floors and also list the `4.0.5-alpha` / `3.18.5-alpha` builds bundled with DSH `0.2.1-alpha.2` and `0.2.1-alpha.3`, because those caret ranges exclude these prereleases under npm's default semver rules.
 
@@ -338,10 +338,8 @@ This plugin only supplies model routes. Approval policy lives elsewhere:
 
 ## Develop
 
-DSH 0.2.2-rc.3 requires Node.js 24.9 or later.
-
 ```sh
-pnpm install   # development baseline: published DSH 0.2.2-rc.3 packages
+pnpm install   # development baseline: published DSH 0.2.1-rc.2 packages
 pnpm build     # tsc (lib/) + tsdown (lib/client.js browser bundle)
 pnpm test      # node --test over compiled unit specs
 ```
