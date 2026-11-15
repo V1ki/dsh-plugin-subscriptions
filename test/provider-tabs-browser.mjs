@@ -43,8 +43,8 @@ try {
     return panel
   }
   async function settingsVisible(page) {
-    assert.equal(await page.getByLabel('Status-bar quota display').isVisible(), true)
-    assert.equal(await page.getByLabel('Quota percentages').isVisible(), true)
+    assert.equal(await page.getByLabel('Status-bar quota display', { exact: true }).isVisible(), true)
+    assert.equal(await page.getByLabel('Quota percentages', { exact: true }).isVisible(), true)
     assert.equal(await page.getByText('Proxy', { exact: true }).isVisible(), true)
     assert.equal(await page.getByRole('button', { name: 'Configure…' }).isVisible(), true)
   }

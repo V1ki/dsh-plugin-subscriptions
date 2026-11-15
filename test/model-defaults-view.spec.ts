@@ -1,3 +1,4 @@
+import './css-hook.js'
 /**
  * Unit tests for the collapsible default-effort section's pure logic: which
  * models become rows, the counts the collapsed header reports, when the name
@@ -9,11 +10,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import {
-  deriveModelDefaultsView,
-  modelDefaultsSignature,
-  shouldFetchModelDefaults,
-} from '../src/client/SubscriptionsSection.js'
+const { deriveModelDefaultsView, modelDefaultsSignature, shouldFetchModelDefaults } = await import('../src/client/SubscriptionsSection.js')
 import type {
   ModelDefaultsFetchInput,
   ModelDefaultView,

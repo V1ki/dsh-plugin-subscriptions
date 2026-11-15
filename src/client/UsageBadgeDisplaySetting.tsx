@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { useId, useState } from 'react'
 import type { CSSProperties } from 'react'
+import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SubscriptionsKey } from './locales.js'
 import { setUsageBadgeMode, useUsageBadgeMode, setQuotaDisplayMode, useQuotaDisplayMode } from './usage-badge-preferences.js'
 
@@ -10,11 +11,16 @@ export function UsageBadgeDisplaySetting({ t }: { t: Translate }) {
   const mode = useUsageBadgeMode()
   const quotaMode = useQuotaDisplayMode()
   const [failed, setFailed] = useState(false)
+  const badgeId = useId()
+  const quotaId = useId()
   return (
     <div style={styles.card}>
-      <label style={styles.field}>
-        <span>{t('usageBadgeDisplay')}</span>
-        <select
+      <div style={styles.field}>
+        <div style={styles.labelRow}>
+          <label htmlFor={badgeId}>{t('usageBadgeDisplay')}</label>
+          <SettingHelp title={t('usageBadgeDisplay')} hint={t('usageBadgeDisplayHint')} t={t} />
+        </div>
+        <select id={badgeId}
           style={styles.select}
           aria-label={t('usageBadgeDisplay')}
           value={mode}
@@ -33,11 +39,13 @@ export function UsageBadgeDisplaySetting({ t }: { t: Translate }) {
           <option value="recent">{t('usageBadgeDisplayRecent')}</option>
           <option value="hidden">{t('usageBadgeDisplayHidden')}</option>
         </select>
-      </label>
-      <p style={styles.hint}>{t('usageBadgeDisplayHint')}</p>
-      <label style={styles.field}>
-        <span>{t('quotaDisplay')}</span>
-        <select style={styles.select} aria-label={t('quotaDisplay')} value={quotaMode}
+      </div>
+      <div style={styles.field}>
+        <div style={styles.labelRow}>
+          <label htmlFor={quotaId}>{t('quotaDisplay')}</label>
+          <SettingHelp title={t('quotaDisplay')} hint={t('quotaDisplayHint')} t={t} />
+        </div>
+        <select id={quotaId} style={styles.select} aria-label={t('quotaDisplay')} value={quotaMode}
           onChange={event => {
             const value = event.currentTarget.value
             if (value !== 'used' && value !== 'remaining') return
@@ -52,11 +60,22 @@ export function UsageBadgeDisplaySetting({ t }: { t: Translate }) {
           <option value="used">{t('quotaUsed')}</option>
           <option value="remaining">{t('quotaRemaining')}</option>
         </select>
-      </label>
-      <p style={styles.hint}>{t('quotaDisplayHint')}</p>
+      </div>
       {failed && <p role="alert" style={{ ...styles.hint, color: 'var(--dsw-alias-state-error-primary)' }}>{t('usageBadgeDisplaySaveFailed')}</p>}
     </div>
   )
+}
+
+/** A separate button avoids nesting an interactive control inside the select label. */
+function SettingHelp({ title, hint, t }: { title: string; hint: string; t: Translate }) {
+  return <Tooltip label={hint} side="bottom" portal openOnClick maxWidth={340}>
+    <button type="button" className="dsh-subscription-setting-help" aria-label={t('settingsHelpLabel', { setting: title })}>
+      <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none">
+        <circle cx="8" cy="8" r="6.25" stroke="currentColor" strokeWidth="1.3" />
+        <path d="M8 7v4M8 4.75v.1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      </svg>
+    </button>
+  </Tooltip>
 }
 
 const styles: Record<string, CSSProperties> = {
@@ -66,6 +85,7 @@ const styles: Record<string, CSSProperties> = {
     padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 6,
   },
   field: { display: 'flex', flexDirection: 'column', gap: 6, fontSize: 13, fontWeight: 500, lineHeight: '20px' },
+  labelRow: { display: 'flex', alignItems: 'center', gap: 4 },
   select: { width: '100%' },
   hint: { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
 }

@@ -167,6 +167,19 @@ ${formScope} button:disabled {
   opacity: 0.4;
   cursor: default;
 }
+.dsh-subscriptions-settings button.dsh-subscription-setting-help {
+  min-height: 24px;
+  width: 24px;
+  padding: 4px;
+  border: 0;
+  border-radius: 50%;
+  color: var(--dsw-alias-label-tertiary);
+}
+.dsh-subscriptions-settings button.dsh-subscription-setting-help:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary, var(--dsw-alias-brand-primary));
+  outline-offset: 2px;
+}
+
 ${formScope} button.dsh-subscription-quiet {
   border-color: transparent;
   color: var(--dsw-alias-label-secondary, var(--dsw-alias-label-primary));

@@ -1,6 +1,7 @@
+import './css-hook.js'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { sortedSubscriptionProviders } from '../src/client/SubscriptionsSection.js'
+const { sortedSubscriptionProviders } = await import('../src/client/SubscriptionsSection.js')
 import type { ProviderStatus } from '../src/client/SubscriptionsSection.js'
 import { en, zh } from '../src/client/locales.js'
 
