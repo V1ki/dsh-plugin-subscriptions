@@ -70,3 +70,21 @@ test('reported cache shows the five native model families without duplicate Flas
     ['claude-opus-5-5', 'Claude Opus 5.5'], ['claude-sonnet-5-5', 'Claude Sonnet 5.5'], ['gpt-oss-120b', 'GPT-OSS 120B'],
   ])
 })
+
+test('Hydrogen xhigh joins its family as a fourth effort', () => {
+  // Upstream reports thinkingLevel 100 for -xhigh, which is outside the LOW/MEDIUM/HIGH enum.
+  const groups = groupAntigravityModels([
+    { id: 'gemini-4-hydrogen-low', name: 'Gemini 4 Hydrogen (Low)', antigravity: { visible: true, thinkingLevel: 'LOW' } },
+    { id: 'gemini-4-hydrogen-medium', name: 'Gemini 4 Hydrogen (Medium)', antigravity: { visible: true, thinkingLevel: 'MEDIUM' } },
+    { id: 'gemini-4-hydrogen-high', name: 'Gemini 4 Hydrogen (High)', antigravity: { visible: true, thinkingLevel: 'HIGH' } },
+    { id: 'gemini-4-hydrogen-xhigh', name: 'Gemini 4 Hydrogen (XHigh)', antigravity: { visible: true } },
+  ])
+  assert.equal(groups.length, 1)
+  assert.equal(groups[0].id, 'gemini-4-hydrogen')
+  assert.equal(groups[0].name, 'Gemini 4 Hydrogen')
+  assert.deepEqual(groups[0].reasoning?.efforts.map(effort => [effort.id, effort.name]), [
+    ['low', 'Low'], ['medium', 'Medium'], ['high', 'High'], ['xhigh', 'Extra High'],
+  ])
+  assert.equal(groups[0].reasoning?.defaultEffort, 'high')
+  assert.equal(selectAntigravityVariant(groups[0], 'xhigh').id, 'gemini-4-hydrogen-xhigh')
+})
