@@ -25,6 +25,23 @@ export const providerSettingsCss = `
   line-height: 1.5;
   color-scheme: light;
 }
+.dsh-subscription-provider-area { min-width: 0; }
+.dsh-subscription-tabs {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  max-width: 100%;
+  padding: 3px 3px 8px;
+}
+.dsh-subscriptions-settings .dsh-subscription-tabs button {
+  gap: 6px;
+  white-space: nowrap;
+}
+.dsh-subscriptions-settings .dsh-subscription-tabs button[aria-selected="true"] {
+  background: var(--dsw-alias-interactive-bg-active, var(--dsw-alias-bg-layer-3));
+  border-color: var(--dsw-alias-state-business-primary, var(--dsw-alias-brand-primary));
+  font-weight: 600;
+}
 body[data-ds-dark-theme] ${formScope} {
   color-scheme: dark;
 }

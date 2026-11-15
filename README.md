@@ -20,7 +20,7 @@ Antigravity usage keeps explicitly reported shared limits from `retrieveUserQuot
 
 ## Demo
 
-Settings → **Subscriptions**: per-provider login/logout, no API keys. Claude imports credentials from Claude Code when available and otherwise uses OAuth, as Codex and Grok always do (settings screenshots use demo accounts and catalog data):
+Settings → **Subscriptions**: choose a provider in the horizontally scrollable tab bar for login, usage, and account settings. Providers with signed-in accounts appear first; each group is ordered alphabetically by display name. Claude imports credentials from Claude Code when available and otherwise uses OAuth, as Codex and Grok always do. The screenshot below shows the previous card layout with demo accounts and catalog data:
 
 ![Subscriptions settings page](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/subscriptions.png)
 
