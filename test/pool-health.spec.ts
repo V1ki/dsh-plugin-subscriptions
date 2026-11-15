@@ -65,7 +65,7 @@ test('classifyPoolFailure: the provider retry-after wins over the default cooldo
 })
 
 test('classifyPoolFailure: auth failures park the account until re-login', () => {
-  for (const code of ['AUTH', 'INVALID_CREDENTIAL', 'MISSING_CREDENTIAL']) {
+  for (const code of ['AUTH', 'INVALID_CREDENTIAL', 'MISSING_CREDENTIAL'] as const) {
     assert.deepEqual(classifyPoolFailure(new LlmError('denied', code), 'claude'), {
       action: 'switch',
       cooldownMs: AUTH_COOLDOWN_MS,
@@ -76,7 +76,7 @@ test('classifyPoolFailure: auth failures park the account until re-login', () =>
 })
 
 test('classifyPoolFailure: transient server failures cool the member briefly', () => {
-  for (const code of ['SERVER', 'TIMEOUT']) {
+  for (const code of ['SERVER', 'TIMEOUT'] as const) {
     assert.deepEqual(classifyPoolFailure(new LlmError('oops', code), 'codex'), {
       action: 'switch',
       cooldownMs: TRANSIENT_COOLDOWN_MS,
@@ -95,7 +95,7 @@ test('classifyPoolFailure: an empty completion switches without a health record'
 })
 
 test('classifyPoolFailure: plan/model availability switches the member', () => {
-  for (const code of ['HTTP_402', 'HTTP_404']) {
+  for (const code of ['HTTP_402', 'HTTP_404'] as const) {
     assert.deepEqual(classifyPoolFailure(new LlmError('unavailable', code), 'codex'), {
       action: 'switch',
       cooldownMs: TRANSIENT_COOLDOWN_MS,
@@ -106,7 +106,7 @@ test('classifyPoolFailure: plan/model availability switches the member', () => {
 })
 
 test('classifyPoolFailure: request-fault and unknown failures rethrow', () => {
-  for (const code of ['CONTEXT_WINDOW_EXCEEDED', 'ABORTED', 'HTTP_400']) {
+  for (const code of ['CONTEXT_WINDOW_EXCEEDED', 'ABORTED', 'HTTP_400'] as const) {
     assert.deepEqual(classifyPoolFailure(new LlmError('bad request', code), 'codex'), { action: 'throw' })
   }
   assert.deepEqual(classifyPoolFailure(new Error('plain'), 'codex'), { action: 'throw' })

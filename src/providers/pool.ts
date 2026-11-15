@@ -27,7 +27,7 @@ import type { ConcretePoolMember, PoolDefinition, PoolMemberRef } from './pool-f
 import { poolKey } from './pool-family.js'
 import { accountKey, classifyPoolFailure, memberKey, PoolHealthRegistry } from './pool-health.js'
 import type { MemberQuota, PoolUsageTracker } from './pool-usage.js'
-import { withAbortSignal } from './common.js'
+import { llmErrorFromFailure, withAbortSignal } from './common.js'
 import { streamAccountWithReplay } from './replay.js'
 
 /** Member-selection strategy: plain priority failover or quota-aware scheduling. */
@@ -287,7 +287,7 @@ export class PoolAdapter extends LlmAdapter {
         }
         if (first.value.type === 'finish' && first.value.reason.kind === 'error') {
           const failure = first.value.reason.failure
-          throw new LlmError(failure.message, failure.code, failure)
+          throw llmErrorFromFailure(failure)
         }
       } catch (error: unknown) {
         try { await iterator.return?.() } catch { /* preserve the attempt failure */ }
@@ -461,12 +461,11 @@ export class PoolAdapter extends LlmAdapter {
     }
     const failure = last?.error instanceof LlmError ? last.error.failure : undefined
     this.options.onWarn(message)
-    return new LlmError(message, code, {
+    return llmErrorFromFailure({ message, code,
       ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs },
       ...failure?.status === undefined ? {} : { status: failure.status },
       ...failure?.requestId === undefined ? {} : { requestId: failure.requestId },
-      ...last === undefined ? {} : { cause: last.error },
-    })
+    }, last === undefined ? undefined : { cause: last.error })
   }
 }
 

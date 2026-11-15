@@ -101,9 +101,9 @@ Codex 编辑走 `/backend-api/codex/images/edits`，Grok 编辑走 `/v1/images/e
 
 ### DSH 兼容性
 
-DSH peer 统一使用两段短范围，不设上限：`>=0.2.0-rc.2 || >=0.2.1-0`。第一段保留最低支持版本；第二段让所有 `0.2.1` alpha/RC 都满足 npm/pnpm 默认的 peer 匹配规则，避免这五个 DSH peer 对该版本线产生版本不匹配警告。以后每条受支持的预发布版本线只维护一个锚点，不再逐个追加 RC。开发依赖仍固定到 `0.2.1-rc.2`。
+DSH peer 使用不设上限的范围 `>=0.2.0-rc.2 || >=0.2.1-0 || >=0.2.2-0`。预发布锚点使 npm/pnpm 默认规则接受 `0.2.1` 和 `0.2.2` 版本线。每条受支持的预发布版本线只维护一个锚点，不逐个追加 RC。开发依赖固定到 `0.2.2-rc.3`。
 
-Harness 使用 `includePrerelease: true`，放行不低于下限的所有版本，包括未来预发布版。npm/pnpm 默认规则允许更高的正式版，但新的预发布版本线仍需显式锚点，例如为 `0.2.2` 预发布版添加 `>=0.2.2-0`。当前不设上限，不会拦截未来可能不兼容的版本；准入不代表运行时兼容保证。
+Harness 使用 `includePrerelease: true`，放行不低于下限的所有版本，包括未来预发布版。npm/pnpm 默认规则允许更高的正式版，但新的预发布版本线仍需显式锚点，例如为 `0.2.3` 预发布版添加 `>=0.2.3-0`。当前不设上限，不会拦截未来可能不兼容的版本；准入不代表运行时兼容保证。
 
 DSH `0.2.1-rc.2` 加载时优先使用已声明的 `engines.dsh`；未声明时，要求所有 `@deepseek-ai/dsh` 和 `@deepseek-ai/dsh-*` peer 范围均匹配当前 DSH 版本，预发布版本也参与匹配。本插件未声明 `engines.dsh`，因此由 DSH peer 范围决定是否允许加载。`@deepseek-ai/cordis` 与 `@deepseek-ai/schemastery` 的 peer 影响包管理器的依赖解析，不参与这项加载检查；它们保留 `^4.0.1` / `^3.18.1` 下限，并额外列出 DSH `0.2.1-alpha.2`、`0.2.1-alpha.3` 自带的 `4.0.5-alpha` / `3.18.5-alpha` 版本，因为这些脱字符范围按 npm 默认的 semver 规则不包含上述预发布版本。
 
@@ -330,8 +330,10 @@ DSH `v0.1.3-alpha.1` 新增宿主统一代理支持。建议在启动环境或 `
 
 ## 开发
 
+DSH 0.2.2-rc.3 需要 Node.js 24.9 或更高版本。
+
 ```sh
-pnpm install   # 开发基线：已发布的 DSH 0.2.1-rc.2 依赖
+pnpm install   # 开发基线：已发布的 DSH 0.2.2-rc.3 依赖
 pnpm build     # tsc(lib/)+ tsdown(lib/client.js 浏览器 bundle)
 pnpm test      # 编译后跑 node --test 单测
 ```

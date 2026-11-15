@@ -6,7 +6,7 @@
  * base64 data.
  */
 
-import { LlmError } from '@deepseek-ai/dsh-llm'
+import { llmErrorFromFailure } from '../providers/common.js'
 import * as llm from '@deepseek-ai/dsh-llm'
 import type { CompatibleContentBlock as ContentBlock, CompatibleMessage as Message, LegacyToolResultBlock as ToolResultBlock } from '../compat.js'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
@@ -174,14 +174,14 @@ export async function resolveImages(
     ? !('offloaded' in block && block.offloaded === true)
     : block.type === 'tool-result' && block.content.some(hasRetainedImage)
   if (attachments === undefined && messages.some(message => message.content.some(hasRetainedImage))) {
-    throw new LlmError(
-      'dsh-plugin-subscriptions: the request carries an image but no attachments service is mounted; '
-      + 'image input requires the harness attachment store',
-      'UNSUPPORTED',
-    )
+    throw llmErrorFromFailure({
+      message: 'dsh-plugin-subscriptions: the request carries an image but no attachments service is mounted; '
+        + 'image input requires the harness attachment store',
+      code: 'UNSUPPORTED',
+    })
   }
   const readForRequest = async (ref: ImageAttachmentRef) => {
-    if (attachments === undefined) throw new LlmError('No attachment service for retained image', 'UNSUPPORTED')
+    if (attachments === undefined) throw llmErrorFromFailure({ message: 'No attachment service for retained image', code: 'UNSUPPORTED' })
     const target = limit === undefined ? undefined : imageRequestTarget(ref, limit)
     if (target !== undefined) {
       try {

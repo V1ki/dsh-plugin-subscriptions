@@ -56,6 +56,23 @@ for (const withUsage of [false, true]) test(`pool handles terminal failure befor
   assert.ok(chunks.some(chunk => chunk.type === 'text-delta' && chunk.text === 'hi'))
 })
 
+test('pool preserves external terminal failure code and provider facts', async () => {
+  const adapter = new FakeAdapter(async function* () {
+    yield { type: 'finish', reason: { kind: 'error', failure: {
+      code: 'EXTERNAL_PROVIDER_FAILURE', message: 'provider failed', status: 418, providerRetryAfterMs: 1234,
+    } } }
+  })
+  const { pool } = makePool({ codex: adapter })
+  await assert.rejects(collect(pool.stream(OPTIONS)), (error: unknown) => {
+    assert.ok(error instanceof LlmError)
+    assert.equal(error.code, 'EXTERNAL_PROVIDER_FAILURE')
+    assert.equal(error.failure.status, 418)
+    assert.equal(error.failure.providerRetryAfterMs, 1234)
+    return true
+  })
+  assert.deepEqual(adapter.accounts, ['a1'])
+})
+
 test('pool canonicalizes legacy aliases before deduplication', async () => {
   const adapter = new FakeAdapter(() => serveOk())
   const pool = new PoolAdapter({
