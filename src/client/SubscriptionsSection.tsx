@@ -23,6 +23,7 @@ import { AntigravityQuotaSummary } from './AntigravityQuotaSummary.js'
 import { antigravityQuotaScope } from '../antigravity-model-id.js'
 import { visibleUsageWindows } from './usage-window-filter.js'
 import { ProviderAccountManager } from './ProviderAccountManager.js'
+import { SubscriptionTabs } from './SubscriptionTabs.js'
 import { providerSettingsCss } from './provider-settings-styles.js'
 import { UsageBadgeDisplaySetting } from './UsageBadgeDisplaySetting.js'
 import type { SubscriptionsKey } from './locales.js'
@@ -907,55 +908,15 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     <div className="dsh-subscriptions-settings" style={styles.section}>
       <style>{providerSettingsCss}</style>
       <p style={styles.intro}>{t('intro')}</p>
-      <UsageBadgeDisplaySetting t={t} />
-      <div style={styles.proxyCard}>
-        <div style={styles.cardHeader}>
-          <span style={{
-            ...styles.dot,
-            background: proxy?.enabled === true
-              ? 'var(--dsw-alias-state-success-primary)'
-              : 'var(--dsw-alias-label-dimmed)',
-          }} />
-          <span style={styles.name}>{t('proxyTitle')}</span>
-          <button
-            type="button"
-            style={{ marginLeft: 'auto', flexShrink: 0 }}
-            onClick={openProxyDialog}
-          >
-            {t('proxyConfigure')}
-          </button>
-        </div>
-        <p style={styles.statusLine}>{proxyStatusText(t, proxy, proxyLoadError)}</p>
-      </div>
-      <div style={styles.separator} />
       <div className="dsh-subscription-provider-area">
-      <div className="dsh-subscription-tabs" role="tablist" aria-label={t('providerTabs')}>
-        {sortedProviders.map(({ id, name }, index) => {
+      <SubscriptionTabs prefix={tabIdPrefix} label={t('providerTabs')} active={activeProvider}
+        onSelect={setSelectedProvider} tabRefs={tabRefs} tabs={sortedProviders.map(({ id, name }) => {
           const status = statuses[id]
           const displayName = status?.displayName || name
-          return <button key={id} type="button" role="tab" data-subscription-provider={id} id={`${tabIdPrefix}-tab-${id}`}
-            ref={node => { if (node) tabRefs.current[id] = node; else delete tabRefs.current[id] }}
-            aria-controls={`${tabIdPrefix}-panel-${id}`} aria-selected={activeProvider === id}
-            aria-label={`${displayName} — ${statusText(t, status)}`} tabIndex={activeProvider === id ? 0 : -1}
-            onFocus={() => setSelectedProvider(id)}
-            onClick={() => setSelectedProvider(id)}
-            onKeyDown={event => {
-              let next = index
-              if (event.key === 'ArrowRight') next = (index + 1) % sortedProviders.length
-              else if (event.key === 'ArrowLeft') next = (index + sortedProviders.length - 1) % sortedProviders.length
-              else if (event.key === 'Home') next = 0
-              else if (event.key === 'End') next = sortedProviders.length - 1
-              else return
-              event.preventDefault()
-              const nextId = sortedProviders[next].id
-              setSelectedProvider(nextId)
-              tabRefs.current[nextId]?.focus()
-            }}>
-            <span aria-hidden="true" style={{ ...styles.dot, background: dotColor(status) }} />
-            {displayName}
-          </button>
-        })}
-      </div>
+          return { key: id, id, label: displayName, provider: id,
+            ariaLabel: displayName + ' — ' + statusText(t, status),
+            content: <><span aria-hidden="true" style={{ ...styles.dot, background: dotColor(status) }} />{displayName}</> }
+        })} />
       {sortedProviders.map(({ id, name }) => {
         const status = statuses[id]
         const busy = status?.busy === true
@@ -1188,8 +1149,30 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
         )
       })}
       </div>
+      <div style={styles.separator} />
+      <UsageBadgeDisplaySetting t={t} />
+      <div style={styles.proxyCard}>
+        <div style={styles.cardHeader}>
+          <span style={{
+            ...styles.dot,
+            background: proxy?.enabled === true
+              ? 'var(--dsw-alias-state-success-primary)'
+              : 'var(--dsw-alias-label-dimmed)',
+          }} />
+          <span style={styles.name}>{t('proxyTitle')}</span>
+          <button
+            type="button"
+            style={{ marginLeft: 'auto', flexShrink: 0 }}
+            onClick={openProxyDialog}
+          >
+            {t('proxyConfigure')}
+          </button>
+        </div>
+        <p style={styles.statusLine}>{proxyStatusText(t, proxy, proxyLoadError)}</p>
+      </div>
       {managedProvider && <ProviderAccountManager provider={managedProvider.id} name={managedProvider.name}
-        rpc={rpc} t={t} onClose={() => { setManagedProvider(undefined); void refresh() }} />}
+        rpc={rpc} t={t} accountsVersion={JSON.stringify((statuses[managedProvider.id]?.accounts ?? []).map(account => account.key).sort())}
+        onClose={() => { setManagedProvider(undefined); void refresh() }} />}
       <style>{'.subscriptions-reset-dialog::backdrop { background: var(--dsw-alias-bg-mask-1, #0006); backdrop-filter: var(--dsw-mask-blur, none); }'}</style>
       <dialog ref={resetDialogRef} className="subscriptions-reset-dialog"
         aria-labelledby="subscriptions-reset-title" onCancel={() => setResetConfirmation(undefined)}
