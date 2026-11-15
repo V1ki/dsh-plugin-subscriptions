@@ -20,7 +20,7 @@ Antigravity 用量优先读取 `retrieveUserQuotaSummary`，只展示服务端�
 
 ## 演示
 
-设置 → **订阅**：在可水平滚动的标签栏选择 provider，查看登录、用量和账号设置。已登录账号的 provider 排在前面，每组按显示名的字母顺序排列。Claude 有 Claude Code 会话时导入凭据，否则和 Codex、Grok 一样走 OAuth。下图展示的是旧版卡片布局，使用演示账号和目录数据：
+设置 → **订阅**:每个 provider 的登录/退出,无需 API key。Claude 有 Claude Code 会话时导入凭据,否则和 Codex、Grok 一样走 OAuth(以下设置截图使用演示账号与目录数据):
 
 ![订阅设置页](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/subscriptions.png)
 
