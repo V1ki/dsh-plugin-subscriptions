@@ -1,8 +1,9 @@
+import './css-hook.js'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { AntigravityQuotaSummary } from '../src/client/AntigravityQuotaSummary.js'
+const { AntigravityQuotaSummary } = await import('../src/client/AntigravityQuotaSummary.js')
 import { en, zh } from '../src/client/locales.js'
 import { parseAntigravityQuotaSummary } from '../src/providers/antigravity-usage.js'
 import { antigravityQuotaSummary } from './fixtures/antigravity-quota-summary.js'
