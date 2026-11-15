@@ -7,7 +7,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import './keep-alive.js'
-import { startQwenConsoleLogin } from '../src/auth/qwen-console.js'
+import { listQwenConsoleModels, startQwenConsoleLogin } from '../src/auth/qwen-console.js'
 import { fetchQwenUsage } from '../src/providers/qwen-usage.js'
 import type { QwenSession } from '../src/auth/store.js'
 
@@ -209,4 +209,36 @@ test('qwen usage: without a console session the route reports unsupported', asyn
     throw new Error('must not fetch')
   }) as typeof fetch)
   assert.deepEqual(usage, { supported: false })
+})
+
+test('qwen console: the platform catalog is read and media models are filtered out', async () => {
+  let request: RequestInit | undefined
+  const { fetchFn } = routedFetch([
+    {
+      match: url => url.hostname === 'cli.qianwenai.com',
+      respond: () => ({
+        body: {
+          code: '200',
+          data: {
+            Data: [{
+              Group: 'text',
+              Models: [
+                { Model: 'qwen4-max-preview' },
+                { Model: 'qwen3.8-max' },
+                { Model: 'qwen-image-3.0-pro' },
+                { Model: 'wan3.0-video' },
+                { Model: 'qwen-audio-3.0-tts-plus' },
+              ],
+            }],
+          },
+        },
+      }),
+    },
+  ])
+  const ids = await listQwenConsoleModels({
+    accessToken: 'console-at',
+    cliAccessToken: 'cli-token',
+    expiresAt: Date.now() + 86_400_000,
+  }, fetchFn)
+  assert.deepEqual(ids, ['qwen4-max-preview', 'qwen3.8-max'])
 })

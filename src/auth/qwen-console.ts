@@ -286,6 +286,56 @@ export async function exchangeQwenCliToken(
   return cliAccessToken
 }
 
+/** Model IDs that are never chat-completions text models. */
+const NON_TEXT_MODEL = /(^|[-.])(image|video|audio|tts|asr|embedding|rerank|ocr|music|realtime|3d)([-.]|$)|^(wan|happyhorse|sambert|paraformer|cosyvoice|z-image|tongyi-embedding)/i
+
+/** Collect every `Model` string in a nested catalog payload. */
+function collectModelIds(value: unknown, found: Set<string>): void {
+  if (Array.isArray(value)) {
+    for (const entry of value) collectModelIds(entry, found)
+    return
+  }
+  const row = record(value)
+  if (row === undefined) return
+  const id = text(row.Model) ?? text(row.model)
+  if (id !== undefined && !NON_TEXT_MODEL.test(id)) found.add(id)
+  for (const [key, entry] of Object.entries(row)) {
+    if (key !== 'Model' && key !== 'model') collectModelIds(entry, found)
+  }
+}
+
+/**
+ * List the account's platform models through the console catalog
+ * (`ListModelSeries`). This is the only source that reflects preview models
+ * the console shows before they appear in public documentation.
+ * @returns chat-model IDs, or an empty array when the payload has no catalog.
+ */
+export async function listQwenConsoleModels(
+  credentials: QwenConsoleCredentials,
+  fetchFn: typeof fetch = proxiedFetch,
+  signal: AbortSignal = new AbortController().signal,
+): Promise<string[]> {
+  const token = credentials.cliAccessToken
+    ?? await exchangeQwenCliToken(credentials.accessToken, fetchFn, signal)
+  const body = await postJson(fetchFn, CLI_GATEWAY, {
+    headers: { authorization: `Bearer ${token}` },
+    body: {
+      product: 'AliyunDeliveryService',
+      action: 'ListModelSeries',
+      version: '2026-02-10',
+      region: REGION,
+      params: { Language: 'zh' },
+    },
+    signal,
+  }, 'console model list')
+  if (text(body.code) !== '200') {
+    throw new Error('Qwen console model list was rejected; log in again')
+  }
+  const found = new Set<string>()
+  collectModelIds(body.data, found)
+  return [...found]
+}
+
 /** Unwrap the console gateway's nested envelope to the business payload. */
 function unwrapGateway(body: Record<string, unknown>): Record<string, unknown> {
   const layer1 = record(body.data)

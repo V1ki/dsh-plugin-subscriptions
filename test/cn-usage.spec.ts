@@ -226,6 +226,12 @@ test('host: a pool-enabled profile reads Kimi/GLM usage instead of reporting uns
     glm: { default: 'g', accounts: { g: {
       accessToken: 'kid.secret', refreshToken: 'biz', expiresAt: far, station: 'bigmodel',
     } } },
+    qwen: { default: 'Token Plan', accounts: { 'Token Plan': {
+      accessToken: 'sk-sp-x', refreshToken: 'sk-sp-x', expiresAt: far,
+      account: 'Token Plan', plan: 'Token Plan',
+      baseURL: 'https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1',
+      console: { accessToken: 'console-at', cliAccessToken: 'cli-token', expiresAt: far },
+    } } },
   }))
   const originalFetch = globalThis.fetch
   globalThis.fetch = (async (input: RequestInfo | URL) => {
@@ -245,6 +251,12 @@ test('host: a pool-enabled profile reads Kimi/GLM usage instead of reporting uns
     }
     if (url.includes('/customer-package-reset/list')) {
       return json({ code: 200, success: true, data: { fiveHourResets: [], weekResets: [] } })
+    }
+    if (url.startsWith('https://cli.qianwenai.com/data/v2/api.json')) {
+      return json({ code: '200', data: { Data: [{ Models: [
+        { Model: 'qwen4-max-preview' },
+        { Model: 'qwen3.8-max' },
+      ] }] } })
     }
     return new Response('{}', { status: 404 })
   }) as typeof fetch
@@ -267,6 +279,10 @@ test('host: a pool-enabled profile reads Kimi/GLM usage instead of reporting uns
     assert.equal(glm.ok, true)
     assert.equal((glm.value as { supported: boolean }).supported, true)
     assert.equal((glm.value as { windows: { usedPercent: number }[] }).windows[0]?.usedPercent, 40)
+    // The console catalog replaces the static Qwen list, so preview models
+    // the platform shows appear in the picker.
+    const qwenModels = await llm.listModels('qwen')
+    assert.deepEqual(qwenModels.map(model => model.id), ['qwen4-max-preview', 'qwen3.8-max'])
   } finally {
     await runtime.dispose()
     globalThis.fetch = originalFetch

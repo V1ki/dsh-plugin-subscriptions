@@ -428,5 +428,7 @@ test('reasoning configs: the advertised efforts and wire fields match the vendor
   assert.deepEqual(qwenReasoning('qwen3.8-max')?.efforts.map(effort => effort.id), ['low', 'medium', 'xhigh'])
   assert.equal(qwenReasoning('qwen3.8-max')?.defaultEffort, 'xhigh')
   assert.deepEqual(qwenReasoning('qwen3.8-flash')?.body('xhigh'), { reasoning_effort: 'xhigh' })
+  assert.deepEqual(qwenReasoning('qwen4-max-preview')?.efforts.map(effort => effort.id), ['low', 'medium', 'xhigh'])
+  assert.equal(qwenReasoning('qwen4-max-preview')?.defaultEffort, 'xhigh')
   assert.equal(qwenReasoning('qwen3.7-plus'), undefined)
 })

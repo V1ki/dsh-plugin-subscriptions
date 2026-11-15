@@ -45,7 +45,7 @@ import {
 import { isGlmPermanentRefreshError, refreshGlm, startGlmLogin } from './auth/zcode.js'
 import { fetchGlmUsage } from './providers/glm-usage.js'
 import { fetchKimiUsage } from './providers/kimi-usage.js'
-import { exchangeQwenCliToken, startQwenConsoleLogin } from './auth/qwen-console.js'
+import { exchangeQwenCliToken, listQwenConsoleModels, startQwenConsoleLogin } from './auth/qwen-console.js'
 import type { QwenConsoleAttempt } from './auth/qwen-console.js'
 import { fetchQwenUsage } from './providers/qwen-usage.js'
 import type { GlmLoginAttempt } from './auth/zcode.js'
@@ -355,8 +355,12 @@ const DEFAULT_MODELS: Record<ProviderId, ModelEntry[]> = {
     { id: 'glm-5.3-flash', name: 'GLM-5.3 Flash', contextWindow: 1_000_000, maxTokens: 128_000,
       inputModalities: ['text', 'image'] },
   ],
-  // 千问AI平台 has no GET /models; this is the documented text catalog.
+  // 千问AI平台 has no GET /models; this is the documented fallback catalog.
+  // The console catalog (ListModelSeries) replaces it after the quota login,
+  // which is how preview models such as qwen4-max-preview appear.
   qwen: [
+    { id: 'qwen4-max-preview', name: 'Qwen4 Max Preview', contextWindow: 1_000_000, maxTokens: 131_072 },
+    { id: 'qwen4-max', name: 'Qwen4 Max', contextWindow: 1_000_000, maxTokens: 131_072 },
     { id: 'qwen3.8-max', name: 'Qwen3.8 Max', contextWindow: 1_000_000, maxTokens: 131_072 },
     { id: 'qwen3.8-flash', name: 'Qwen3.8 Flash', contextWindow: 1_000_000, maxTokens: 131_072 },
     { id: 'qwen3.7-plus', name: 'Qwen3.7 Plus', contextWindow: 1_000_000, maxTokens: 131_072 },
@@ -418,7 +422,7 @@ const QWEN_REASONING = [
 
 /** @internal Exported for tests only. */
 export function qwenReasoning(model: string): ChatSubscriptionReasoning | undefined {
-  if (!model.startsWith('qwen3.8') && model !== 'deepseek-v4-pro') return undefined
+  if (!model.startsWith('qwen4') && !model.startsWith('qwen3.8') && model !== 'deepseek-v4-pro') return undefined
   return { efforts: QWEN_REASONING, defaultEffort: 'xhigh', body: effort => ({ reasoning_effort: effort }) }
 }
 
@@ -1468,6 +1472,14 @@ export function apply(ctx: Context, config: Config): void {
             endpoint: session => `${(session as QwenSession).baseURL ?? QWEN_STANDARD_BASE}/chat/completions`,
             headers: () => ({ 'user-agent': QWEN_USER_AGENT }),
             reasoning: qwenReasoning,
+            discover: async (session, fetchFn, signal) => {
+              // The console catalog reflects the account's real (including
+              // preview) list; without a console login the static fallback wins.
+              const console = (session as QwenSession).console
+              if (console === undefined) return []
+              return (await listQwenConsoleModels(console, fetchFn, signal))
+                .map(id => ({ id, name: id }))
+            },
           },
           tokens: tokens as unknown as AccountTokenManager<ChatSubscriptionSession>,
           models: catalog.qwen,

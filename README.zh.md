@@ -87,7 +87,7 @@ Kimi 和 GLM 用浏览器登录,不需要粘贴 Key:Kimi 使用官方 CLI 的公
 
 只有已登录的 provider 才会出现在会话模型选择器里;登录/退出后列表自动刷新。支持视觉的模型会声明 `['text', 'image']` 输入模态,图片内容会被翻译成各 provider 的 wire 格式。
 
-已登录的卡片还会显示**订阅用量**——按限额窗口(5 小时会话窗、每周窗,以及计划包含的按模型每周窗)展示已用百分比、进度条和重置时间,并带刷新按钮。Codex 用量来自 `chatgpt.com/backend-api/wham/usage`(同时报告计划类型),Claude 用量来自 `api.anthropic.com/api/oauth/usage`,Grok 用量来自 Grok Build CLI 代理的 `cli-chat-proxy.grok.com/v1/billing`(即 CLI `/usage` 面板的数据源,报告共享每周额度和订阅档位)。Antigravity 从 `retrieveUserQuotaSummary` 显示共享限额，按 Gemini、Claude/GPT 与 Gemini 4 Argon 展示剩余百分比和重置时间；`loadCodeAssist` 提供订阅档位与积分。摘要不可用时仅回退到可选模型的原始限额。Copilot 没有用量接口,其卡片不显示用量区块。Kimi Code 的用量来自 `api.kimi.com/coding/v1/usages`(5 小时窗口、旧套餐的每周窗口、共享月度池和 Extra Usage 钱包);GLM 读取 `{站点}/api/monitor/usage/quota/limit` 和重置卡列表,因此卡片会像 Codex 一样显示窗口条、重置时间和可用重置次数。Qwen 千问AI平台的推理 Key 读不到额度,需要在卡片上再点一次“登录查询额度”(官方 CLI 同款 PKCE 设备码);之后会显示月度 credits 的已用/剩余和重置时间,按量计费账号显示现金余额。
+已登录的卡片还会显示**订阅用量**——按限额窗口(5 小时会话窗、每周窗,以及计划包含的按模型每周窗)展示已用百分比、进度条和重置时间,并带刷新按钮。Codex 用量来自 `chatgpt.com/backend-api/wham/usage`(同时报告计划类型),Claude 用量来自 `api.anthropic.com/api/oauth/usage`,Grok 用量来自 Grok Build CLI 代理的 `cli-chat-proxy.grok.com/v1/billing`(即 CLI `/usage` 面板的数据源,报告共享每周额度和订阅档位)。Antigravity 从 `retrieveUserQuotaSummary` 显示共享限额，按 Gemini、Claude/GPT 与 Gemini 4 Argon 展示剩余百分比和重置时间；`loadCodeAssist` 提供订阅档位与积分。摘要不可用时仅回退到可选模型的原始限额。Copilot 没有用量接口,其卡片不显示用量区块。Kimi Code 的用量来自 `api.kimi.com/coding/v1/usages`(5 小时窗口、旧套餐的每周窗口、共享月度池和 Extra Usage 钱包);GLM 读取 `{站点}/api/monitor/usage/quota/limit` 和重置卡列表,因此卡片会像 Codex 一样显示窗口条、重置时间和可用重置次数。Qwen 千问AI平台的推理 Key 读不到额度,需要在卡片上再点一次“登录查询额度”(官方 CLI 同款 PKCE 设备码);之后会显示月度 credits 的已用/剩余和重置时间,按量计费账号显示现金余额,模型列表也会切换成控制台的真实清单(包括 `qwen4-max-preview` 这类预览模型)。
 
 随 provider 启用自动注册的工具:
 

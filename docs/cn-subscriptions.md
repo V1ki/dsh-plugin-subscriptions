@@ -68,7 +68,7 @@ GLM 的 Coding Plan 没有对第三方开放的 OAuth 应用，但官方 ZCode �
 
 - 该平台**没有对模型调用开放的 OAuth**，第三方工具只能用 API Key；插件因此把 Key 保存为不过期的凭据，登录按钮换成卡片里的 Key 输入框。
 - Key 产品类型决定端点：`sk-sp-` = Token Plan（月度 credits，专用端点），`sk-ws-` / `sk-` = 按量计费（通用端点）。粘贴后插件自动识别，不需要手选。
-- OpenAI 兼容端点**没有 `GET /models`**，所以模型目录是内置的文档清单（`qwen3.8-max`、`qwen3.8-flash`、`qwen3.7-plus`、`deepseek-v4-pro`），可以在配置里覆盖。
+- OpenAI 兼容端点**没有 `GET /models`**。保存 Key 后先用内置兜底清单（`qwen4-max-preview`、`qwen4-max`、`qwen3.8-max`、`qwen3.8-flash`、`qwen3.7-plus`、`deepseek-v4-pro`）；完成“登录查询额度”后，插件通过控制台的 `ListModelSeries` 读取账号真实模型列表（包括平台上能看到、但文档还没写的预览模型），并替换静态清单。也可以在配置 `models.qwen` 里手工覆盖。
 - 思考等级：Qwen3.8 系列和 DeepSeek V4 Pro 支持 `reasoning_effort: low | medium | xhigh`（默认 xhigh），插件直接写顶层 `reasoning_effort`；Qwen3.7 Plus 没有声明档位，因此不提供选择。
 - 注意 `sk-sp-` 前缀同样用于阿里云百炼/ModelStudio 的套餐 Key；本路由只按千问AI平台的端点发送，百炼 Key 在这里会鉴权失败。百炼 Coding Plan 仍只有 `sk-sp-` Key，没有 OAuth。
 - **额度需要额外一次控制台登录**：推理 Key 读不到额度，所以保存 Key 后，卡片上会出现“登录查询额度”按钮。它走官方 CLI 同款的 PKCE 设备码（`t.qianwenai.com`），把控制台凭据存进同一个 qwen 会话，只用于读额度；推理仍然只用 API Key。没有登录时卡片会明确提示，不再显示笼统的“此服务商不支持额度查询”。
@@ -112,7 +112,8 @@ Git 安装会现场执行仓库的 `prepare` 构建（tsdown 编译 Host 与 Cli
 
 ## 已知限制
 
-- Qwen 千问AI平台的额度需要额外一次“登录查询额度”（官方 CLI 同款控制台登录）；只保存 Key 时只能显示提示，不能显示额度。
+- Qwen 千问AI平台的额度需要额外一次“登录查询额度”（官方 CLI 同款控制台登录）；只保存 Key 时只能显示提示，不能显示额度。模型列表同理：登录后才会完全对齐平台（包括预览模型）。
+
 - Kimi 没有“重置卡”概念，只有按时间重置的窗口；GLM 有重置卡但通常不会发给 API-KEY 用户。
 - 各模型的可选思考档位以目录声明为准；`kimi-for-coding-highspeed`、`qwen3.7-plus` 等没有档位的模型不会显示选择器，使用服务端默认行为。
 - GLM 的授权链路、Kimi 的客户端身份都属于官方未承诺的第三方接入方式；服务端策略变化可能导致登录失败。失败时会明确报错，不会静默回退到按量计费端点。
