@@ -613,7 +613,7 @@ const CLAUDE_MODALITIES: readonly ('text' | 'image')[] = ['text', 'image']
  * @returns the JSON body to POST.
  */
 export function claudeRequestBody(
-  options: GenerateOptions,
+  options: GenerateOptions<string>,
   messages: readonly TranslatableMessage[],
   maxTokens: number,
   thinking?: Record<string, unknown>,

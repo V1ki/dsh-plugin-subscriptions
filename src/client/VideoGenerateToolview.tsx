@@ -19,15 +19,13 @@ import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import type { ToolCallBlock } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 import { hostIcon } from './host-icons.js'
+import { mediaArguments } from './media-arguments.js'
 import { callSubscriptionsAuth } from './subscriptions-rpc.js'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
 
 /** DSH 0.1.7 renamed IconSparkle16; resolving it by name keeps older hosts working too. */
 const SparkleIcon = hostIcon(primitives, 'Sparkle')
-
-/** Title prompt truncation budget (characters). */
-const PROMPT_MAX_LENGTH = 60
 
 /** Mirror of ui-tool's ToolCallOwnerProps (see ImageGenerateToolview). */
 interface ToolCallOwnerProps {
@@ -79,29 +77,6 @@ function fallbackTranslate(key: SubscriptionsKey, params?: Record<string, unknow
     text = text.replaceAll(`{${name}}`, String(value))
   }
   return text
-}
-
-/** Extract the prompt from the call's raw args JSON; falls back to the first string value, then the raw line. */
-function derivePrompt(argsRaw: string): string {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(argsRaw)
-  } catch {
-    // Non-JSON args (mid-stream truncation): fall back to the raw string below.
-    parsed = undefined
-  }
-  let prompt: string | undefined
-  if (typeof parsed === 'object' && parsed !== null) {
-    const args = parsed as Record<string, unknown>
-    if (typeof args.prompt === 'string' && args.prompt !== '') prompt = args.prompt
-    else {
-      for (const value of Object.values(args)) {
-        if (typeof value === 'string' && value !== '') { prompt = value; break }
-      }
-    }
-  }
-  const line = (prompt ?? argsRaw).split('\n', 1)[0] ?? ''
-  return line.length > PROMPT_MAX_LENGTH ? `${line.slice(0, PROMPT_MAX_LENGTH)}…` : line
 }
 
 /** Flatten a settled result's text blocks (the fallback body and the error line). */
@@ -204,8 +179,8 @@ export function VideoGenerateToolview(props: VideoGenerateToolviewProps) {
   }, [fileName, loadVideo])
 
   if (block === undefined) return null
-  const argsRaw = (settled ? block.call?.argsRaw : 'argsRaw' in block ? block.argsRaw : undefined) ?? ''
-  const title = `video_generate: ${derivePrompt(argsRaw)}`
+  const { prompt } = mediaArguments(block)
+  const title = `video_generate: ${prompt}`
   const text = settled ? resultText(block) : ''
   return (
     <div style={styles.container}>
