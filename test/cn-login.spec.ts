@@ -11,6 +11,7 @@ import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { LlmRuntime } from '@deepseek-ai/dsh-llm'
 import * as plugin from '../src/index.js'
+import { glmReasoning, kimiReasoning, qwenReasoning } from '../src/index.js'
 import './keep-alive.js'
 import { DeviceFlowManager } from '../src/auth/device-flow.js'
 import {
@@ -408,4 +409,24 @@ test('glm(bigmodel): a raw-token 1001 retries provisioning with a Bearer header'
   const customerCalls = calls.filter(call => call.url.endsWith('/getCustomerInfo'))
   assert.equal((customerCalls[0]?.init?.headers as Record<string, string>).authorization, 'bm-token')
   assert.equal((customerCalls[1]?.init?.headers as Record<string, string>).authorization, 'Bearer bm-token')
+})
+
+test('reasoning configs: the advertised efforts and wire fields match the vendor APIs', () => {
+  assert.deepEqual(kimiReasoning('k3')?.efforts.map(effort => effort.id), ['low', 'high', 'max'])
+  assert.equal(kimiReasoning('k3')?.defaultEffort, 'high')
+  assert.equal(kimiReasoning('kimi-for-coding')?.defaultEffort, 'max')
+  assert.equal(kimiReasoning('kimi-for-coding-highspeed'), undefined)
+  assert.deepEqual(kimiReasoning('k3')?.body('low'), { reasoning_effort: 'low' })
+
+  assert.deepEqual(glmReasoning('glm-5.3')?.body('max'), {
+    thinking: { type: 'enabled' },
+    reasoning_effort: 'max',
+  })
+  assert.equal(glmReasoning('glm-5.3-flash')?.defaultEffort, 'max')
+  assert.equal(glmReasoning('glm-5.2'), undefined)
+
+  assert.deepEqual(qwenReasoning('qwen3.8-max')?.efforts.map(effort => effort.id), ['low', 'medium', 'xhigh'])
+  assert.equal(qwenReasoning('qwen3.8-max')?.defaultEffort, 'xhigh')
+  assert.deepEqual(qwenReasoning('qwen3.8-flash')?.body('xhigh'), { reasoning_effort: 'xhigh' })
+  assert.equal(qwenReasoning('qwen3.7-plus'), undefined)
 })

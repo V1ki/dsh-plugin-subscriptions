@@ -83,7 +83,7 @@ Antigravity 用量优先读取 `retrieveUserQuotaSummary`，只展示服务端�
 | `glm` | 智谱 GLM Coding Plan | 内置 `glm-5.3` / `glm-5.3-flash`;用 ZCode 浏览器授权自动签发套餐 Key。`glm.station` 选 `bigmodel`(国内,默认)或 `zai`(国际) |
 | `qwen` | Qwen 千问AI平台(Token Plan / 按量计费) | 内置文档模型清单(平台没有 `GET /models`);在 `platform.qianwenai.com/home/api-keys` 生成 Key 后粘贴,`sk-sp-` 走 Token Plan 端点,`sk-ws-`/`sk-` 走按量计费。**不是**阿里云百炼 Coding Plan |
 
-Kimi 和 GLM 用浏览器登录,不需要粘贴 Key:Kimi 使用官方 CLI 的公开 OAuth 设备码(界面显示验证码),GLM 走官方 ZCode 授权链路并自动签发账号的 `zcode-api-key`。Qwen 千问AI平台的模型调用没有 OAuth,卡片里粘贴一次平台 API Key(不写入插件配置),插件按 Key 产品类型自动选择端点。凭据与其它路由共用同一份存储、刷新与多账号逻辑。GLM 的授权链路和 Kimi 的客户端身份不属于官方文档承诺的第三方接入方式,可能随服务端调整而变化;端点、拒绝语义、用量来源和 bigmodel 计费注意项见[国内订阅说明](docs/cn-subscriptions.md)。
+Kimi 和 GLM 用浏览器登录,不需要粘贴 Key:Kimi 使用官方 CLI 的公开 OAuth 设备码(界面显示验证码),GLM 走官方 ZCode 授权链路并自动签发账号的 `zcode-api-key`。Qwen 千问AI平台的模型调用没有 OAuth,卡片里粘贴一次平台 API Key(不写入插件配置),插件按 Key 产品类型自动选择端点。凭据与其它路由共用同一份存储、刷新与多账号逻辑。每条路由也会声明官方文档给出的思考档位(Kimi `reasoning_effort` low/high/max,GLM 强制思考的 low/high/max,Qwen3.8 的 low/medium/xhigh),请求时应用选中档位或设置页里的默认档位。GLM 的授权链路和 Kimi 的客户端身份不属于官方文档承诺的第三方接入方式,可能随服务端调整而变化;端点、拒绝语义、用量来源和 bigmodel 计费注意项见[国内订阅说明](docs/cn-subscriptions.md)。
 
 只有已登录的 provider 才会出现在会话模型选择器里;登录/退出后列表自动刷新。支持视觉的模型会声明 `['text', 'image']` 输入模态,图片内容会被翻译成各 provider 的 wire 格式。
 

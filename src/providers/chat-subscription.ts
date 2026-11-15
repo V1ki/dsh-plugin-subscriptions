@@ -10,7 +10,7 @@
  * {@link AccountTokenManager}, so multi-account login, proactive refresh and
  * account pools behave exactly like the upstream providers.
  */
-import { LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
+import { LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
@@ -25,7 +25,7 @@ import { resolveImages } from '../translate/resolved.js'
 import type { TranslatableMessage } from '../translate/resolved.js'
 import { AccountTokenManager, DISCOVERY_TIMEOUT_MS, unionAccountCatalogs } from './accounts.js'
 import type { AccountAwareAdapter } from './accounts.js'
-import { idleWatchdog, httpLlmError, mapFetchFailure } from './common.js'
+import { idleWatchdog, httpLlmError, mapFetchFailure, mergeReasoning } from './common.js'
 import type { ModelEntry } from './common.js'
 import type { ProviderId } from '../auth/store.js'
 import {
@@ -53,6 +53,14 @@ export interface ChatSubscriptionDiscovered {
   inputModalities?: ('text' | 'image')[]
 }
 
+/** Selectable reasoning depth of one model and the request fields it maps to. */
+export interface ChatSubscriptionReasoning {
+  efforts: readonly { id: string; name: string }[]
+  defaultEffort?: string
+  /** Body fields to merge for one selected effort. */
+  body: (effort: string) => Record<string, unknown>
+}
+
 /** Static facts of one provider route. */
 export interface ChatSubscriptionDefinition {
   /** Provider route id. */
@@ -76,6 +84,12 @@ export interface ChatSubscriptionDefinition {
   replayReasoning?: boolean
   /** Extra request headers (device identity), per session. */
   headers?: (session: ChatSubscriptionSession) => Promise<Record<string, string>> | Record<string, string>
+  /**
+   * Selectable reasoning depth per model. A model absent from this hook has no
+   * adjustable thinking, and a request carrying an effort for it fails before
+   * the network call instead of silently ignoring the choice.
+   */
+  reasoning?: (model: string) => ChatSubscriptionReasoning | undefined
 }
 
 export interface ChatSubscriptionAdapterOptions {
@@ -86,6 +100,8 @@ export interface ChatSubscriptionAdapterOptions {
   rateLimit?: RateLimitWait
   onWarn?: (message: string) => void
   resolveAttachments: () => AttachmentStore | undefined
+  /** User-configured default effort, merged into the advertised defaults. */
+  defaultEffortOf?: (model: string) => string | undefined
   pool?: () => PoolAdapter | undefined
   fetchFn?: typeof fetch
 }
@@ -254,6 +270,7 @@ export class ChatSubscriptionAdapter extends LlmAdapter implements AccountAwareA
     if (found === undefined) {
       throw failure(`${this.options.definition.name} has no model "${model}"; configure a supported model in this route catalog`, 'INVALID_MODEL')
     }
+    const reasoning = this.reasoningOf(model)
     return {
       provider,
       id: model,
@@ -261,7 +278,20 @@ export class ChatSubscriptionAdapter extends LlmAdapter implements AccountAwareA
       inputModalities: found.inputModalities ?? ['text'],
       ...found.contextWindow === undefined ? {} : { context: { contextWindow: found.contextWindow } },
       ...found.maxTokens === undefined ? {} : { defaultMaxTokens: found.maxTokens },
+      ...reasoning === undefined ? {} : { reasoning },
     }
+  }
+
+  /** Advertised efforts plus the user's configured default, when either exists. */
+  private reasoningOf(model: string): LlmResolvedModelInfo['reasoning'] | undefined {
+    const config = this.options.definition.reasoning?.(model)
+    if (config === undefined) return undefined
+    const base = {
+      efforts: config.efforts.map(effort => ({ id: ReasoningEffortId(effort.id), name: effort.name })),
+      ...config.defaultEffort === undefined
+        ? {} : { defaultEffort: ReasoningEffortId(config.defaultEffort) },
+    }
+    return mergeReasoning(this.options.defaultEffortOf?.(model), base) as LlmResolvedModelInfo['reasoning']
   }
 
   override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
@@ -286,8 +316,24 @@ export class ChatSubscriptionAdapter extends LlmAdapter implements AccountAwareA
     try {
       let session = await this.options.tokens.session(account)
       const messages = await resolveImages(options.messages, this.options.resolveAttachments(), watchdog.signal)
+      // The harness normally passes the selected effort; when it does not,
+      // the model's advertised default (including a user-configured default
+      // from the model editor) is applied here so the choice is not lost.
+      const selectedEffort = options.reasoningEffort ?? this.reasoningOf(options.model)?.defaultEffort
+      let effortBody: Record<string, unknown> = {}
+      if (selectedEffort !== undefined) {
+        const config = definition.reasoning?.(options.model)
+        if (config === undefined || !config.efforts.some(entry => entry.id === selectedEffort)) {
+          throw failure(
+            `${definition.label} model ${options.model} does not support reasoning effort ${String(selectedEffort)}`,
+            'UNSUPPORTED_REASONING_EFFORT',
+          )
+        }
+        effortBody = config.body(selectedEffort)
+      }
       const body: Record<string, unknown> = {
         model: options.model,
+        ...effortBody,
         messages: definition.replayReasoning === true
           ? withAssistantReasoning(messages, options.system)
           : toChatMessages(messages, options.system),

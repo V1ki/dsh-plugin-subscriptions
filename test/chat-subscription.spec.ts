@@ -6,7 +6,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { MessageId } from '@deepseek-ai/dsh-llm'
+import { MessageId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '../src/compat.js'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import './keep-alive.js'
@@ -216,4 +216,54 @@ test('chat subscription: an unknown model fails instead of silently calling the 
 test('chat subscription: a non-chat route is rejected', async () => {
   const adapter = adapterFor(harness({ accounts: { dev: session() } }).tokens)
   await assert.rejects(() => adapter.listModels('glm'), /route mismatch/)
+})
+
+test('chat subscription: a reasoning config advertises efforts and maps the selected one', async () => {
+  const calls: { init?: RequestInit }[] = []
+  const reasoned = definition({
+    reasoning: model => model === 'kimi-for-coding'
+      ? {
+        efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }],
+        defaultEffort: 'high',
+        body: effort => ({ reasoning_effort: effort }),
+      }
+      : undefined,
+  })
+  const adapter = adapterFor(harness({ accounts: { dev: session() } }).tokens, {
+    definition: reasoned,
+    fetchFn: ((_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(init === undefined ? {} : { init })
+      return Promise.resolve(sse(
+        { choices: [{ delta: { content: 'ok' } }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+      ))
+    }) as typeof fetch,
+  })
+
+  const info = await adapter.resolveModel('kimi', 'kimi-for-coding')
+  assert.deepEqual(info.reasoning?.efforts.map(effort => effort.id), ['low', 'high'])
+  assert.equal(info.reasoning?.defaultEffort, 'high')
+  assert.equal(await adapter.resolveModel('kimi', 'k3').then(resolved => resolved.reasoning), undefined)
+
+  for await (const _chunk of adapter.stream({ ...STREAM_OPTIONS, reasoningEffort: ReasoningEffortId('low') })) { /* drain */ }
+  const body = JSON.parse(String(calls[0]?.init?.body)) as Record<string, unknown>
+  assert.equal(body.reasoning_effort, 'low')
+
+  // No explicit choice: the advertised/default effort is still applied.
+  for await (const _chunk of adapter.stream(STREAM_OPTIONS)) { /* drain */ }
+  const defaulted = JSON.parse(String(calls[1]?.init?.body)) as Record<string, unknown>
+  assert.equal(defaulted.reasoning_effort, 'high')
+
+  await assert.rejects(
+    () => (async () => { for await (const _chunk of adapter.stream({
+      ...STREAM_OPTIONS, reasoningEffort: ReasoningEffortId('max'),
+    })) { /* drain */ } })(),
+    /does not support reasoning effort max/,
+  )
+  await assert.rejects(
+    () => (async () => { for await (const _chunk of adapter.stream({
+      ...STREAM_OPTIONS, model: 'k3', reasoningEffort: ReasoningEffortId('low'),
+    })) { /* drain */ } })(),
+    /does not support reasoning effort low/,
+  )
 })

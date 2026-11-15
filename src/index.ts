@@ -47,7 +47,7 @@ import { fetchGlmUsage } from './providers/glm-usage.js'
 import { fetchKimiUsage } from './providers/kimi-usage.js'
 import type { GlmLoginAttempt } from './auth/zcode.js'
 import { ChatSubscriptionAdapter } from './providers/chat-subscription.js'
-import type { ChatSubscriptionDiscovered, ChatSubscriptionSession } from './providers/chat-subscription.js'
+import type { ChatSubscriptionDiscovered, ChatSubscriptionReasoning, ChatSubscriptionSession } from './providers/chat-subscription.js'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { readClaudeCodeCredentials, refreshClaudeSynced } from './auth/claude-code-creds.js'
@@ -359,6 +359,64 @@ const DEFAULT_MODELS: Record<ProviderId, ModelEntry[]> = {
     { id: 'qwen3.7-plus', name: 'Qwen3.7 Plus', contextWindow: 1_000_000, maxTokens: 131_072 },
     { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', contextWindow: 1_000_000, maxTokens: 393_216 },
   ],
+}
+
+/**
+ * Kimi Code thinking depths: K3.1/K3/K2.8 Preview take low|high|max (default
+ * high, K2.8 Preview max); K2.7 Code Highspeed is fixed-on and has no levels.
+ */
+const KIMI_REASONING = [
+  { id: 'low', name: 'Low' },
+  { id: 'high', name: 'High' },
+  { id: 'max', name: 'Max' },
+] as const
+
+/** @internal Exported for tests only. */
+export function kimiReasoning(model: string): ChatSubscriptionReasoning | undefined {
+  switch (model) {
+    case 'k3.1-pro':
+    case 'k3.1-pro-highspeed':
+    case 'k3':
+    case 'k3-256k':
+      return { efforts: KIMI_REASONING, defaultEffort: 'high', body: effort => ({ reasoning_effort: effort }) }
+    case 'kimi-for-coding':
+      return { efforts: KIMI_REASONING, defaultEffort: 'max', body: effort => ({ reasoning_effort: effort }) }
+    default:
+      return undefined
+  }
+}
+
+/** GLM-5.3 always thinks; the effort level selects low|high|max depth. */
+const GLM_REASONING = [
+  { id: 'low', name: 'Low' },
+  { id: 'high', name: 'High' },
+  { id: 'max', name: 'Max' },
+] as const
+
+/** @internal Exported for tests only. */
+export function glmReasoning(model: string): ChatSubscriptionReasoning | undefined {
+  if (model !== 'glm-5.3' && model !== 'glm-5.3-flash') return undefined
+  return {
+    efforts: GLM_REASONING,
+    defaultEffort: 'max',
+    body: effort => ({ thinking: { type: 'enabled' }, reasoning_effort: effort }),
+  }
+}
+
+/**
+ * 千问AI平台 exposes low|medium|xhigh directly on Qwen3.8 (default xhigh);
+ * other catalog entries keep the provider default.
+ */
+const QWEN_REASONING = [
+  { id: 'low', name: 'Low' },
+  { id: 'medium', name: 'Medium' },
+  { id: 'xhigh', name: 'Extra High' },
+] as const
+
+/** @internal Exported for tests only. */
+export function qwenReasoning(model: string): ChatSubscriptionReasoning | undefined {
+  if (!model.startsWith('qwen3.8') && model !== 'deepseek-v4-pro') return undefined
+  return { efforts: QWEN_REASONING, defaultEffort: 'xhigh', body: effort => ({ reasoning_effort: effort }) }
 }
 
 /** Validate and detach the model catalog for every provider. */
@@ -1259,6 +1317,7 @@ export function apply(ctx: Context, config: Config): void {
             endpoint: `${KIMI_API_BASE}/chat/completions`,
             replayReasoning: true,
             headers: () => kimiHeaders(),
+            reasoning: kimiReasoning,
             discover: async (session, fetchFn, signal) => (await fetchKimiModels(
               session as KimiSession, fetchFn, signal,
             )).map(model => ({
@@ -1305,6 +1364,7 @@ export function apply(ctx: Context, config: Config): void {
               ? 'https://api.z.ai/api/coding/paas/v4/chat/completions'
               : 'https://open.bigmodel.cn/api/coding/paas/v4/chat/completions',
             replayReasoning: true,
+            reasoning: glmReasoning,
           },
           tokens: tokens as unknown as AccountTokenManager<ChatSubscriptionSession>,
           models: catalog.glm,
@@ -1340,6 +1400,7 @@ export function apply(ctx: Context, config: Config): void {
             label: 'Qwen 千问AI平台',
             endpoint: session => `${(session as QwenSession).baseURL ?? QWEN_STANDARD_BASE}/chat/completions`,
             headers: () => ({ 'user-agent': QWEN_USER_AGENT }),
+            reasoning: qwenReasoning,
           },
           tokens: tokens as unknown as AccountTokenManager<ChatSubscriptionSession>,
           models: catalog.qwen,
@@ -1347,6 +1408,7 @@ export function apply(ctx: Context, config: Config): void {
           rateLimit,
           onWarn,
           resolveAttachments,
+          defaultEffortOf: model => defaultEffortOf('qwen', model),
           pool: () => poolAdapter,
         })
         adapters.set('qwen', adapter)

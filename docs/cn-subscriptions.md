@@ -27,6 +27,8 @@ Kimi Code 的官方 CLI 注册了一个公开的 OAuth 设备码客户端。登�
 
 模型目录优先读 `GET /coding/v1/models`（带账号 token），失败时回退到内置清单（`kimi-for-coding`、`k3`、`k3.1-pro` 等）。思考内容（`reasoning_content`）会在工具回合按原序回传，避免多轮工具调用时模型重新思考。
 
+**思考等级**：K3.1 Pro、K3、K2.8 Preview 都支持 `reasoning_effort: low | high | max`，插件按模型给出默认值（K3.1/K3 默认 high，Kimi for Coding 默认 max）；`kimi-for-coding-highspeed` 固定开启思考、没有等级可选。K3.1 Pro 关闭思考会被 HTTP 400 拒绝，所以不提供“关闭”档。
+
 **边界**：Kimi 官方文档建议第三方工具使用控制台 Key，并禁止伪造客户端身份。这里使用的是官方 CLI 已注册的公共客户端与设备信息头，不伪造 User-Agent；是否放行仍由服务端策略决定。若你的账号被限制，请改用官方客户端或控制台 Key。
 
 ## GLM Coding Plan（ZCode）
@@ -51,6 +53,8 @@ GLM 的 Coding Plan 没有对第三方开放的 OAuth 应用，但官方 ZCode �
       station: bigmodel   # 国内站（默认）；国际站填 zai
 ```
 
+**思考等级**：GLM-5.3 / GLM-5.3-Flash 强制思考，支持 `reasoning_effort: low | high | max`（默认 max）；请求同时带 `thinking: {type:"enabled"}`，插件会把选中的等级写进 `reasoning_effort`。
+
 **重要边界**
 
 - 这条链路来自官方客户端的实际行为，但**不是官方文档承诺的第三方接入方式**。端点或风控随时可能变化（例如未来的客户端签名开关）。
@@ -65,6 +69,7 @@ GLM 的 Coding Plan 没有对第三方开放的 OAuth 应用，但官方 ZCode �
 - 该平台**没有对模型调用开放的 OAuth**，第三方工具只能用 API Key；插件因此把 Key 保存为不过期的凭据，登录按钮换成卡片里的 Key 输入框。
 - Key 产品类型决定端点：`sk-sp-` = Token Plan（月度 credits，专用端点），`sk-ws-` / `sk-` = 按量计费（通用端点）。粘贴后插件自动识别，不需要手选。
 - OpenAI 兼容端点**没有 `GET /models`**，所以模型目录是内置的文档清单（`qwen3.8-max`、`qwen3.8-flash`、`qwen3.7-plus`、`deepseek-v4-pro`），可以在配置里覆盖。
+- 思考等级：Qwen3.8 系列和 DeepSeek V4 Pro 支持 `reasoning_effort: low | medium | xhigh`（默认 xhigh），插件直接写顶层 `reasoning_effort`；Qwen3.7 Plus 没有声明档位，因此不提供选择。
 - 注意 `sk-sp-` 前缀同样用于阿里云百炼/ModelStudio 的套餐 Key；本路由只按千问AI平台的端点发送，百炼 Key 在这里会鉴权失败。百炼 Coding Plan 仍只有 `sk-sp-` Key，没有 OAuth。
 
 ## 用量与余额
@@ -108,6 +113,6 @@ Git 安装会现场执行仓库的 `prepare` 构建（tsdown 编译 Host 与 Cli
 
 - Qwen 千问AI平台的推理 Key 没有公开额度接口，卡片只能提示原因；Kimi/GLM 的额度可用。
 - Kimi 没有“重置卡”概念，只有按时间重置的窗口；GLM 有重置卡但通常不会发给 API-KEY 用户。
-- 不提供推理档位切换（GLM/Kimi/Qwen 各自的思考参数没有稳定的第三方文档），模型使用服务端默认思考行为。
+- 各模型的可选思考档位以目录声明为准；`kimi-for-coding-highspeed`、`qwen3.7-plus` 等没有档位的模型不会显示选择器，使用服务端默认行为。
 - GLM 的授权链路、Kimi 的客户端身份都属于官方未承诺的第三方接入方式；服务端策略变化可能导致登录失败。失败时会明确报错，不会静默回退到按量计费端点。
 - 未做真实账号的端到端验收：登录、套餐扣费和模型可用性需要你在自己的订阅上验证一次。
