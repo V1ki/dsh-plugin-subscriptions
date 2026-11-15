@@ -28,7 +28,12 @@ export function creditBalanceText(credits: CreditBalance | undefined, t: Transla
   if (credits === undefined) return undefined
   if (credits.overageLimitReached === true) return t('creditsOverage')
   if (credits.unlimited) return t('creditsUnlimited')
-  if (credits.balance !== undefined) return t('creditsBalance', { balance: formatCreditBalance(credits.balance) })
+  if (credits.balance !== undefined) {
+    const balance = formatCreditBalance(credits.balance)
+    return credits.unit === 'currency'
+      ? t('balanceCurrency', { currency: credits.currency ?? '', balance })
+      : t('creditsBalance', { balance })
+  }
   return credits.hasCredits ? t('creditsAvailableUnknown') : undefined
 }
 

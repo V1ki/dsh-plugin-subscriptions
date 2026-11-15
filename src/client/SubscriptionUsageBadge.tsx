@@ -233,7 +233,7 @@ export function compactSegment(d: ProviderUsageDisplay, model?: string, t: Trans
   }
   const parts = windows.slice(0, 2).map(w => `${w.resetsAt !== undefined && w.resetsAt <= Date.now() ? t('quotaExpiredWindow') : windowLabel(w)} ${quotaText(w.usedPercent, mode, t)}`)
   if (windows.length > 2) parts.push(`+${windows.length - 2}`)
-  const credits = d.provider === 'codex' ? creditBalanceText(account.usage?.credits, t) : undefined
+  const credits = creditBalanceText(account.usage?.credits, t)
   return `${prefix} ${parts.join(' · ')}${credits === undefined ? '' : ` · ${credits}`}${freshness}`
 }
 

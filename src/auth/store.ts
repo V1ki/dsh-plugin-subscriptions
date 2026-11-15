@@ -105,16 +105,23 @@ export interface KimiSession {
   account?: string
 }
 
-/** Stored Qwen Code session (Qwen account OAuth, chat.qwen.ai Plus/Pro). */
+/**
+ * Stored Qwen 千问AI平台 credential. The platform has no OAuth for model
+ * calls, so `accessToken` is the paste-once API key and `refreshToken` mirrors
+ * it to satisfy the shared session shape; `expiresAt` is far in the future and
+ * the Settings card hides it.
+ */
 export interface QwenSession {
   accessToken: string
   refreshToken: string
-  /** Epoch milliseconds at which the access token expires. */
+  /** Epoch milliseconds; a static key has no real expiry. */
   expiresAt: number
-  /** Qwen account identity, when userinfo reported it. */
+  /** Product label ("Token Plan" / "按量计费"). */
   account?: string
-  /** Subscription tier reported by userinfo (e.g. plus, pro). */
+  /** Product label, shown as the plan. */
   plan?: string
+  /** OpenAI-compatible base URL the key belongs to. */
+  baseURL?: string
 }
 
 /**

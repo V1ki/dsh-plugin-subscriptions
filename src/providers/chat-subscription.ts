@@ -59,8 +59,8 @@ export interface ChatSubscriptionDefinition {
   id: ProviderId
   /** Human-readable provider name. */
   name: string
-  /** Full Chat Completions URL. */
-  endpoint: string
+  /** Full Chat Completions URL, or one resolved per session (platform keys). */
+  endpoint: string | ((session: ChatSubscriptionSession) => string)
   /** Diagnostic label used in errors. */
   label: string
   /** Optional live catalog; a failure falls back to the static entries. */
@@ -299,6 +299,8 @@ export class ChatSubscriptionAdapter extends LlmAdapter implements AccountAwareA
           ? {} : { max_tokens: options.maxTokens ?? resolved.defaultMaxTokens },
         ...options.stop === undefined ? {} : { stop: options.stop },
       }
+      const endpoint = typeof definition.endpoint === 'function'
+        ? definition.endpoint(session) : definition.endpoint
       const request = async (token: string): Promise<Response> => {
         const headers: Record<string, string> = {
           'authorization': `Bearer ${token}`,
@@ -306,7 +308,7 @@ export class ChatSubscriptionAdapter extends LlmAdapter implements AccountAwareA
           'accept': 'text/event-stream',
           ...await definition.headers?.(session) ?? {},
         }
-        return this.fetchFn(definition.endpoint, {
+        return this.fetchFn(endpoint, {
           method: 'POST',
           redirect: 'error',
           signal: watchdog.signal,

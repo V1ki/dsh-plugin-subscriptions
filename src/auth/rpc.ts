@@ -37,7 +37,7 @@ export const SUBSCRIPTIONS_AUTH_PREFIX = 'subscriptions-auth.'
  */
 export const SUBSCRIPTIONS_AUTH_ENDPOINTS = [
   'providerSettings', 'setProviderSettings',
-  'status', 'login', 'manual', 'cancel', 'logout', 'setDefault', 'usage',
+  'status', 'login', 'saveKey', 'manual', 'cancel', 'logout', 'setDefault', 'usage',
   'image', 'video', 'prepareReset', 'consumeReset',
   'speed', 'setSpeed',
   'proxyGet', 'proxySet', 'proxyTest',
@@ -186,6 +186,12 @@ export interface AuthController {
    * @throws when an attempt is already running for this provider.
    */
   login(provider: ProviderId, method?: LoginMethod): Promise<{ authorizeUrl: string; userCode?: string }>
+  /**
+   * Store one provider API key (Qwen 千问AI平台 has no OAuth). Other providers
+   * reject the call: their credentials come from the browser flow.
+   * @throws when the provider or key is not accepted.
+   */
+  saveKey(provider: ProviderId, key: string): Promise<void>
   /**
    * Feed a pasted callback URL or bare code into the pending attempt.
    * @throws when no attempt is pending or the input is unusable.
@@ -560,6 +566,11 @@ async function dispatch(
     case 'login': {
       const provider = readProvider(payload)
       return ok(await controller.login(provider, readLoginMethod(payload, provider)))
+    }
+    case 'saveKey': {
+      const provider = readProvider(payload)
+      await controller.saveKey(provider, readString(payload, 'key'))
+      return ok({ ok: true })
     }
     case 'manual': {
       const provider = readProvider(payload)

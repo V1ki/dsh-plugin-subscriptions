@@ -36,16 +36,15 @@ import {
   refreshKimi,
 } from './auth/kimi.js'
 import {
-  completeQwenLogin,
-  fetchQwenModels,
   isQwenPermanentRefreshError,
-  QWEN_API_BASE,
-  QWEN_PREEMPT_MS,
+  QWEN_STANDARD_BASE,
   QWEN_USER_AGENT,
-  qwenDeviceFlow,
+  qwenSessionFromKey,
   refreshQwen,
 } from './auth/qwen.js'
 import { isGlmPermanentRefreshError, refreshGlm, startGlmLogin } from './auth/zcode.js'
+import { fetchGlmUsage } from './providers/glm-usage.js'
+import { fetchKimiUsage } from './providers/kimi-usage.js'
 import type { GlmLoginAttempt } from './auth/zcode.js'
 import { ChatSubscriptionAdapter } from './providers/chat-subscription.js'
 import type { ChatSubscriptionDiscovered, ChatSubscriptionSession } from './providers/chat-subscription.js'
@@ -353,9 +352,12 @@ const DEFAULT_MODELS: Record<ProviderId, ModelEntry[]> = {
     { id: 'glm-5.3-flash', name: 'GLM-5.3 Flash', contextWindow: 1_000_000, maxTokens: 128_000,
       inputModalities: ['text', 'image'] },
   ],
-  // Qwen subscription catalog; live discovery replaces this list.
+  // 千问AI平台 has no GET /models; this is the documented text catalog.
   qwen: [
-    { id: 'qwen3.8-max', name: 'Qwen3.8 Max' },
+    { id: 'qwen3.8-max', name: 'Qwen3.8 Max', contextWindow: 1_000_000, maxTokens: 131_072 },
+    { id: 'qwen3.8-flash', name: 'Qwen3.8 Flash', contextWindow: 1_000_000, maxTokens: 131_072 },
+    { id: 'qwen3.7-plus', name: 'Qwen3.7 Plus', contextWindow: 1_000_000, maxTokens: 131_072 },
+    { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', contextWindow: 1_000_000, maxTokens: 393_216 },
   ],
 }
 
@@ -567,7 +569,8 @@ export class SubscriptionsAuthController implements AuthController {
         return {
           key,
           isDefault: index === 0,
-          expiresAt: session.expiresAt,
+          // A static platform key has no real expiry; do not show a fake one.
+          ...provider === 'qwen' ? {} : { expiresAt: session.expiresAt },
           ...account === undefined ? {} : { account },
           ...plan === undefined ? {} : { plan },
         }
@@ -610,14 +613,18 @@ export class SubscriptionsAuthController implements AuthController {
       this.completions.set('claude', this.complete('claude', attempt, this.claim('claude')))
       return { authorizeUrl: attempt.authorizeUrl }
     }
-    if (provider === 'kimi' || provider === 'qwen') {
+    if (provider === 'kimi') {
       // Device flow: the UI shows the user code while the background task
       // polls the provider's OAuth host for the token pair.
-      const spec = provider === 'kimi' ? await kimiDeviceFlow() : qwenDeviceFlow()
-      const attempt = await this.deviceFlows.start(provider, spec)
+      const attempt = await this.deviceFlows.start(provider, await kimiDeviceFlow())
       this.beginFinalizing(provider)
-      void this.completeChatDevice(provider, attempt)
+      void this.completeKimiDevice(attempt)
       return { authorizeUrl: attempt.verificationUrl, userCode: attempt.userCode }
+    }
+    if (provider === 'qwen') {
+      // 千问AI平台 has no OAuth for model calls; the Settings card asks for
+      // the platform API key instead of starting a browser flow.
+      throw new BadRequest('Qwen 千问AI平台 is authenticated with an API key; save it in Settings → Subscriptions')
     }
     if (provider === 'glm') {
       // ZCode server-mediated flow: the browser completes against the station's
@@ -726,12 +733,13 @@ export class SubscriptionsAuthController implements AuthController {
     }
   }
 
-  /** Drive one Kimi/Qwen device grant to a stored session. */
-  private async completeChatDevice(provider: ProviderId, attempt: DeviceAttempt): Promise<void> {
+  /** Drive one Kimi device grant to a stored session. */
+  private async completeKimiDevice(attempt: DeviceAttempt): Promise<void> {
+    const provider = 'kimi'
     const claim = this.claim(provider)
     try {
       const tokens = await attempt.waitTokens()
-      const session = provider === 'kimi' ? completeKimiLogin(tokens) : await completeQwenLogin(tokens)
+      const session = completeKimiLogin(tokens)
       if (this.claims.get(provider) !== claim) return
       await this.persist(provider, session)
       this.lastError.delete(provider)
@@ -744,6 +752,24 @@ export class SubscriptionsAuthController implements AuthController {
     } finally {
       this.endFinalizing(provider)
     }
+  }
+
+  /**
+   * Store one provider API key as a non-expiring session (Qwen 千问AI平台).
+   * @throws BadRequest when the provider or the key is not one this route accepts.
+   */
+  async saveKey(provider: ProviderId, key: string): Promise<void> {
+    if (provider !== 'qwen') throw new BadRequest('API-key login is only available for qwen')
+    let session: QwenSession
+    try {
+      session = qwenSessionFromKey(key)
+    } catch (error) {
+      throw new BadRequest(error instanceof Error ? error.message : String(error))
+    }
+    this.claim(provider)
+    await this.persist(provider, session)
+    this.lastError.delete(provider)
+    this.onAuthChanged(provider, accountKeyOf(provider, session))
   }
 
   /** Drive one ZCode login through provisioning to a stored GLM session. */
@@ -913,6 +939,19 @@ export function apply(ctx: Context, config: Config): void {
   const overridden = new Set<ProviderId>(
     PROVIDER_IDS.filter(provider => (config.models?.[provider]?.length ?? 0) > 0),
   )
+  // 0.9.14 stored a chat.qwen.ai OAuth session for this route. Qwen 千问AI平台
+  // is a different product (API key, different gateway), so those sessions can
+  // no longer authenticate anything: drop them once instead of showing a card
+  // whose requests are guaranteed to fail.
+  void (async () => {
+    try {
+      for (const { key, session } of await listAccounts('qwen')) {
+        if ((session as QwenSession).baseURL === undefined) await deleteAccountSession('qwen', key)
+      }
+    } catch {
+      // A broken store is surfaced by the status call; cleanup is best-effort.
+    }
+  })()
   const flows = new OAuthFlowManager()
   const deviceFlows = new DeviceFlowManager()
   const onWarn = (message: string): void => {
@@ -1238,6 +1277,8 @@ export function apply(ctx: Context, config: Config): void {
           resolveAttachments,
           pool: () => poolAdapter,
         })
+        usageFetchers.kimi = async (account, signal) =>
+          fetchKimiUsage(await tokens.session(account), proxiedFetch, signal)
         adapters.set('kimi', adapter)
         handles.set('kimi', register('kimi', adapter))
         break
@@ -1273,6 +1314,8 @@ export function apply(ctx: Context, config: Config): void {
           resolveAttachments,
           pool: () => poolAdapter,
         })
+        usageFetchers.glm = async (account, signal) =>
+          fetchGlmUsage(await tokens.session(account), proxiedFetch, signal)
         adapters.set('glm', adapter)
         handles.set('glm', register('glm', adapter))
         break
@@ -1280,9 +1323,10 @@ export function apply(ctx: Context, config: Config): void {
       case 'qwen': {
         const tokens = new AccountTokenManager<QwenSession>({
           provider: 'qwen',
-          displayName: 'Qwen Code',
+          displayName: 'Qwen 千问AI平台',
           makeOptions: () => ({
-            preemptMs: QWEN_PREEMPT_MS,
+            // A static key never refreshes; the manager only needs a no-op.
+            preemptMs: 60_000,
             refresh: refreshQwen,
             isPermanent: isQwenPermanentRefreshError,
           }),
@@ -1292,18 +1336,10 @@ export function apply(ctx: Context, config: Config): void {
         const adapter = new ChatSubscriptionAdapter({
           definition: {
             id: 'qwen',
-            name: 'Qwen Code',
-            label: 'Qwen Code',
-            endpoint: `${QWEN_API_BASE}/chat/completions`,
+            name: 'Qwen 千问AI平台',
+            label: 'Qwen 千问AI平台',
+            endpoint: session => `${(session as QwenSession).baseURL ?? QWEN_STANDARD_BASE}/chat/completions`,
             headers: () => ({ 'user-agent': QWEN_USER_AGENT }),
-            discover: async (session, fetchFn, signal) => (await fetchQwenModels(
-              session as QwenSession, fetchFn, signal,
-            )).map(model => ({
-              id: model.id,
-              name: model.name,
-              ...model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow },
-              inputModalities: model.inputModalities,
-            }) satisfies ChatSubscriptionDiscovered),
           },
           tokens: tokens as unknown as AccountTokenManager<ChatSubscriptionSession>,
           models: catalog.qwen,

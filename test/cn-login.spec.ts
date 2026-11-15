@@ -21,11 +21,11 @@ import {
   refreshKimi,
 } from '../src/auth/kimi.js'
 import {
-  completeQwenLogin,
-  isQwenPermanentRefreshError,
-  QWEN_API_BASE,
+  parseQwenApiKey,
+  QWEN_STANDARD_BASE,
+  QWEN_TOKEN_PLAN_BASE,
   QWEN_USER_AGENT,
-  qwenDeviceFlow,
+  qwenSessionFromKey,
   refreshQwen,
 } from '../src/auth/qwen.js'
 import { isGlmPermanentRefreshError, mintKey, refreshGlm, startGlmLogin } from '../src/auth/zcode.js'
@@ -133,52 +133,27 @@ test('kimi: 401 and invalid_grant are permanent refresh failures', async () => {
   assert.equal(isKimiPermanentRefreshError(error), true)
 })
 
-const QWEN_DEVICE = 'https://auth.qwen.ai/api/oauth/device/code'
-const QWEN_TOKEN = 'https://auth.qwen.ai/api/oauth/token'
-const QWEN_USERINFO = 'https://auth.qwen.ai/api/oauth/userinfo'
-
-test('qwen: device flow requests the subscription scope and a QwenCode user agent', () => {
-  const flow = qwenDeviceFlow()
-  assert.equal(flow.deviceCodeUrl, QWEN_DEVICE)
-  assert.equal(flow.tokenUrl, QWEN_TOKEN)
-  assert.equal(flow.scope, 'model:invoke profile:read')
-  assert.equal(flow.headers?.['user-agent'], QWEN_USER_AGENT)
-  assert.equal(QWEN_API_BASE, 'https://api.qwen.ai/compatible-mode/v1')
+test('qwen-platform: the key product type selects the endpoint', () => {
+  assert.deepEqual(parseQwenApiKey('sk-sp-abc123'), {
+    key: 'sk-sp-abc123', baseURL: QWEN_TOKEN_PLAN_BASE, plan: 'Token Plan',
+  })
+  assert.equal(parseQwenApiKey('sk-ws-abc123').baseURL, QWEN_STANDARD_BASE)
+  assert.equal(parseQwenApiKey('sk-abc123').baseURL, QWEN_STANDARD_BASE)
+  assert.equal(parseQwenApiKey('  sk-sp-trimmed  ').key, 'sk-sp-trimmed')
+  assert.throws(() => parseQwenApiKey('nope'), /sk-sp-/)
+  assert.throws(() => parseQwenApiKey('sk-sp-\nheader'), /Invalid Qwen API key/)
+  assert.match(QWEN_USER_AGENT, /^QwenCode\//)
 })
 
-test('qwen: login reads userinfo for the display account and tier', async () => {
-  const { fetchFn, calls } = stubFetch({
-    [QWEN_USERINFO]: [{ status: 200, body: { sub: 'u1', name: 'Qwen User', email: 'q@example.com', member_type: 'pro' } }],
-  })
-  const session = await completeQwenLogin(
-    { accessToken: 'at-1', refreshToken: 'rt-1', expiresIn: 3600 },
-    fetchFn,
-  )
-  assert.equal(session.account, 'q@example.com')
-  assert.equal(session.plan, 'pro')
-  assert.equal(accountKeyOf('qwen', session), 'q@example.com')
-  assert.equal((calls[0]?.init?.headers as Record<string, string>).authorization, 'Bearer at-1')
-  await assert.rejects(
-    () => completeQwenLogin({ accessToken: 'at' }),
-    /no refresh token/,
-  )
-})
-
-test('qwen: refresh rotates the pair and invalid_grant is permanent', async () => {
-  const { fetchFn, calls } = stubFetch({
-    [QWEN_TOKEN]: [
-      { status: 200, body: { access_token: 'at-2', refresh_token: 'rt-2', expires_in: 120 } },
-      { status: 400, body: { error: 'invalid_grant' } },
-    ],
-  })
-  const before: QwenSession = { accessToken: 'at', refreshToken: 'rt', expiresAt: 1, plan: 'plus' }
-  const next = await refreshQwen(before, fetchFn)
-  assert.equal(next.refreshToken, 'rt-2')
-  assert.equal(next.plan, 'plus')
-  const error = await refreshQwen(before, fetchFn).catch(value => value)
-  assert.equal(isQwenPermanentRefreshError(error), true)
-  const body = new URLSearchParams(String(calls[0]?.init?.body))
-  assert.equal(body.get('grant_type'), 'refresh_token')
+test('qwen-platform: a saved key becomes a non-expiring, plan-labelled session', async () => {
+  const session = qwenSessionFromKey('sk-sp-key')
+  assert.equal(session.accessToken, 'sk-sp-key')
+  assert.equal(session.refreshToken, 'sk-sp-key')
+  assert.equal(session.plan, 'Token Plan')
+  assert.equal(session.baseURL, QWEN_TOKEN_PLAN_BASE)
+  assert.equal(accountKeyOf('qwen', session), 'Token Plan')
+  assert.ok(session.expiresAt > Date.now() + 90 * 365 * 24 * 60 * 60_000)
+  assert.equal(await refreshQwen(session), session)
 })
 
 const ZCODE_INIT = 'https://zcode.z.ai/api/v1/oauth/cli/init'
@@ -387,7 +362,7 @@ test('host integration: the three routes register and stay catalog-empty until l
     await new Promise(resolve => setTimeout(resolve, 50))
     const providers = llm.listProviders()
     assert.deepEqual(providers.map(provider => provider.id), ['kimi', 'glm', 'qwen'])
-    assert.deepEqual(providers.map(provider => provider.name), ['Kimi Code', 'GLM Coding Plan', 'Qwen Code'])
+    assert.deepEqual(providers.map(provider => provider.name), ['Kimi Code', 'GLM Coding Plan', 'Qwen 千问AI平台'])
     // No account yet: a subscription route advertises nothing rather than a
     // catalog the user cannot call.
     assert.deepEqual(await llm.listModels('kimi'), [])

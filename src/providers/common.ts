@@ -525,6 +525,13 @@ export interface CreditBalance {
   balance?: string
   /** True when the backend says credit spending itself is blocked. */
   overageLimitReached?: boolean
+  /**
+   * What `balance` counts: provider credits (Codex, Qwen Token Plan) or real
+   * money (Kimi Extra Usage). Absent means credits, preserving prior callers.
+   */
+  unit?: 'credit' | 'currency'
+  /** ISO 4217 code when `unit` is currency and the provider names one. */
+  currency?: string
 }
 
 /** Subscription usage of one provider, as served by the `usage` RPC endpoint. */

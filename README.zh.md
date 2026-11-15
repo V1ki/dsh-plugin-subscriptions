@@ -81,13 +81,13 @@ Antigravity 用量优先读取 `retrieveUserQuotaSummary`，只展示服务端�
 | `antigravity` | Google Antigravity | 从 Antigravity `v1internal:fetchAvailableModels` 实时获取;请求使用 `generateContent` / `streamGenerateContent`,支持文本、图片、流式推理与工具调用转换 |
 | `kimi` | Kimi Code(Moonshot) | 从 `api.kimi.com/coding/v1/models` 实时获取;登录走 `auth.kimi.com` 的 OAuth 设备码 |
 | `glm` | 智谱 GLM Coding Plan | 内置 `glm-5.3` / `glm-5.3-flash`;用 ZCode 浏览器授权自动签发套餐 Key。`glm.station` 选 `bigmodel`(国内,默认)或 `zai`(国际) |
-| `qwen` | Qwen Code(chat.qwen.ai Plus/Pro) | 从 `api.qwen.ai/compatible-mode/v1/models` 实时获取;OAuth 设备码登录。**不是**阿里云百炼 Coding Plan |
+| `qwen` | Qwen 千问AI平台(Token Plan / 按量计费) | 内置文档模型清单(平台没有 `GET /models`);在 `platform.qianwenai.com/home/api-keys` 生成 Key 后粘贴,`sk-sp-` 走 Token Plan 端点,`sk-ws-`/`sk-` 走按量计费。**不是**阿里云百炼 Coding Plan |
 
-这三家国内订阅都用浏览器登录,不需要粘贴 Key:Kimi 和 Qwen 使用各自官方 CLI 的公开 OAuth 设备码客户端(界面会显示验证码),GLM 走官方 ZCode 授权链路并自动签发账号的 `zcode-api-key`。凭据与其它路由共用同一份存储、刷新与多账号逻辑。GLM 的授权链路和 Kimi 的客户端身份不属于官方文档承诺的第三方接入方式,可能随服务端调整而变化;端点、拒绝语义和 bigmodel 计费注意项见[国内订阅说明](docs/cn-subscriptions.md)。
+Kimi 和 GLM 用浏览器登录,不需要粘贴 Key:Kimi 使用官方 CLI 的公开 OAuth 设备码(界面显示验证码),GLM 走官方 ZCode 授权链路并自动签发账号的 `zcode-api-key`。Qwen 千问AI平台的模型调用没有 OAuth,卡片里粘贴一次平台 API Key(不写入插件配置),插件按 Key 产品类型自动选择端点。凭据与其它路由共用同一份存储、刷新与多账号逻辑。GLM 的授权链路和 Kimi 的客户端身份不属于官方文档承诺的第三方接入方式,可能随服务端调整而变化;端点、拒绝语义、用量来源和 bigmodel 计费注意项见[国内订阅说明](docs/cn-subscriptions.md)。
 
 只有已登录的 provider 才会出现在会话模型选择器里;登录/退出后列表自动刷新。支持视觉的模型会声明 `['text', 'image']` 输入模态,图片内容会被翻译成各 provider 的 wire 格式。
 
-已登录的卡片还会显示**订阅用量**——按限额窗口(5 小时会话窗、每周窗,以及计划包含的按模型每周窗)展示已用百分比、进度条和重置时间,并带刷新按钮。Codex 用量来自 `chatgpt.com/backend-api/wham/usage`(同时报告计划类型),Claude 用量来自 `api.anthropic.com/api/oauth/usage`,Grok 用量来自 Grok Build CLI 代理的 `cli-chat-proxy.grok.com/v1/billing`(即 CLI `/usage` 面板的数据源,报告共享每周额度和订阅档位)。Antigravity 从 `retrieveUserQuotaSummary` 显示共享限额，按 Gemini、Claude/GPT 与 Gemini 4 Argon 展示剩余百分比和重置时间；`loadCodeAssist` 提供订阅档位与积分。摘要不可用时仅回退到可选模型的原始限额。Copilot 没有用量接口,其卡片不显示用量区块。
+已登录的卡片还会显示**订阅用量**——按限额窗口(5 小时会话窗、每周窗,以及计划包含的按模型每周窗)展示已用百分比、进度条和重置时间,并带刷新按钮。Codex 用量来自 `chatgpt.com/backend-api/wham/usage`(同时报告计划类型),Claude 用量来自 `api.anthropic.com/api/oauth/usage`,Grok 用量来自 Grok Build CLI 代理的 `cli-chat-proxy.grok.com/v1/billing`(即 CLI `/usage` 面板的数据源,报告共享每周额度和订阅档位)。Antigravity 从 `retrieveUserQuotaSummary` 显示共享限额，按 Gemini、Claude/GPT 与 Gemini 4 Argon 展示剩余百分比和重置时间；`loadCodeAssist` 提供订阅档位与积分。摘要不可用时仅回退到可选模型的原始限额。Copilot 没有用量接口,其卡片不显示用量区块。Kimi Code 的用量来自 `api.kimi.com/coding/v1/usages`(5 小时窗口、旧套餐的每周窗口、共享月度池和 Extra Usage 钱包);GLM 读取 `{站点}/api/monitor/usage/quota/limit` 和重置卡列表,因此卡片会像 Codex 一样显示窗口条、重置时间和可用重置次数。Qwen 千问AI平台的推理 Key 读不到额度(平台只对控制台登录会话开放),卡片会直接说明,不虚构数字。
 
 随 provider 启用自动注册的工具:
 

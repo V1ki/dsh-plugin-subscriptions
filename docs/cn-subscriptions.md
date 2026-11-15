@@ -1,19 +1,19 @@
 # 国内订阅登录（Kimi Code / GLM / Qwen Code）
 
-本 fork 在原有五家 OAuth 订阅之外，新增三个**用登录而不是粘贴 API Key** 接入的国内订阅路由：
+本 fork 在原有五家 OAuth 订阅之外，新增三个国内订阅路由：
 
-| 路由 | 订阅产品 | 登录方式 | 推理端点 |
+| 路由 | 订阅产品 | 接入方式 | 推理端点 |
 |---|---|---|---|
 | `kimi` | Kimi Code（Moonshot 会员编程套餐） | 官方 CLI 公共客户端的 OAuth 设备码（RFC 8628） | `https://api.kimi.com/coding/v1/chat/completions` |
 | `glm` | 智谱 GLM Coding Plan（国内 bigmodel / 国际 z.ai） | ZCode 官方客户端的浏览器授权 + 套餐 Key 自动签发 | `https://open.bigmodel.cn/api/coding/paas/v4`（国内）/ `https://api.z.ai/api/coding/paas/v4`（国际） |
-| `qwen` | Qwen Code（chat.qwen.ai Plus/Pro 订阅） | Qwen Code 官方客户端 OAuth 设备码 | `https://api.qwen.ai/compatible-mode/v1` |
+| `qwen` | Qwen 千问AI平台（Token Plan / 按量计费） | 平台 API Key（该平台没有 OAuth，Key 只粘贴一次） | `https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1`（`sk-sp-`）/ `https://maas.qianwenaiapi.com/compatible-mode/v1`（`sk-ws-`/`sk-`） |
 
 三者共用上游的账号存储、刷新、多账号和模型池：
 
 - 凭据写入 `~/.dsh/plugins/subscriptions/auth.json`（0600），与原有订阅同一份文件、同一套刷新/失效逻辑。
 - 设置 → 订阅 里每张卡都有登录、账号管理、设为默认、退出；登录中会显示设备码或等待浏览器完成。
 - 登录成功前模型选择器不显示该路由；登录后立即出现。同一账号重新登录会原地更新，不产生重复账号。
-- 本版本不提供这三家的额度查询（它们没有公开的、可供第三方调用的用量接口），用量区显示“不支持”，不会按 token 数虚构余量。
+- Kimi 和 GLM 的额度、重置时间与余额已经接入设置页（见下文“用量与余额”）；Qwen 千问AI平台的推理 Key 读不到额度，卡片会明确说明原因。
 
 ## Kimi Code
 
@@ -58,14 +58,28 @@ GLM 的 Coding Plan 没有对第三方开放的 OAuth 应用，但官方 ZCode �
 - 如果账号没有带项目的机构（没有生效中的 Coding Plan），登录会明确报“no organization with a coding-plan project”，不会写入假凭据。
 - 套餐 Key 长期有效，插件按 30 天重新签发一次；如果被撤销，重新登录即可。
 
-## Qwen Code（不是百炼 Coding Plan）
+## Qwen 千问AI平台（Token Plan / 按量计费）
 
-`qwen` 路由登录的是 **Qwen 账号订阅**（chat.qwen.ai Plus/Pro），端点是 `https://api.qwen.ai/compatible-mode/v1`。它**不是**阿里云百炼 Coding Plan：
+`qwen` 路由接的是 **千问AI平台**（`platform.qianwenai.com`）的 API Key，不是 chat.qwen.ai 的 Qwen 账号订阅，也不是百炼 Coding Plan：
 
-- 百炼 Coding Plan 只接受套餐专属 `sk-sp-` Key，没有对第三方工具的 OAuth；Qwen 账号 token 打不通 `coding.dashscope.aliyuncs.com`。
-- 所以本路由命名为 `Qwen Code`，不冒充百炼。需要百炼时请继续使用官方客户端或按量 API Key 的接入方式。
+- 该平台**没有对模型调用开放的 OAuth**，第三方工具只能用 API Key；插件因此把 Key 保存为不过期的凭据，登录按钮换成卡片里的 Key 输入框。
+- Key 产品类型决定端点：`sk-sp-` = Token Plan（月度 credits，专用端点），`sk-ws-` / `sk-` = 按量计费（通用端点）。粘贴后插件自动识别，不需要手选。
+- OpenAI 兼容端点**没有 `GET /models`**，所以模型目录是内置的文档清单（`qwen3.8-max`、`qwen3.8-flash`、`qwen3.7-plus`、`deepseek-v4-pro`），可以在配置里覆盖。
+- 注意 `sk-sp-` 前缀同样用于阿里云百炼/ModelStudio 的套餐 Key；本路由只按千问AI平台的端点发送，百炼 Key 在这里会鉴权失败。百炼 Coding Plan 仍只有 `sk-sp-` Key，没有 OAuth。
 
-流程：`POST https://auth.qwen.ai/api/oauth/device/code`（表单，scope `model:invoke profile:read`）→ 浏览器确认 → 轮询 `POST /api/oauth/token` → `GET /api/oauth/userinfo` 读取邮箱与会员档位。刷新同样轮换 refresh token。模型目录读 `GET /compatible-mode/v1/models`，失败时使用 `qwen3.8-max`。请求必须带 `QwenCode/<version> (<platform>; <arch>)` User-Agent，否则网关会先拦成 WAF 页面。
+## 用量与余额
+
+设置页的用量区对 Kimi 和 GLM 显示与 Codex/Antigravity 相同的窗口条：已用百分比、窗口长度、重置时间；有余额的显示余额，有重置卡的显示可用次数。
+
+| 提供方 | 数据源 | 显示内容 |
+|---|---|---|
+| Kimi | `GET https://api.kimi.com/coding/v1/usages`（Bearer access token） | 5 小时窗口、旧套餐的每周窗口、共享月度池与其 Code 份额、`/me` 的套餐名；Extra Usage 钱包余额按固定点 ÷1e6 换算成货币 |
+| GLM | `GET {站点}/api/monitor/usage/quota/limit` + `GET {站点}/api/biz/customer-package-reset/list`（铸造的套餐 Key） | 5 小时 credits、每周 credits、MCP 月度窗口、套餐档位；可用重置卡数量与到期时间 |
+| Qwen | 无（需控制台登录会话，见下） | 卡片明确提示“推理 Key 无法读取额度” |
+
+**GLM 重置卡**：官方文档说 API-KEY 用户通常不会收到重置卡，所以“可用 0 次”是正常状态；插件只读取并展示，不在 DSH 内执行“使用重置卡”的写操作。
+
+**Qwen 余额/额度**：千问AI平台只把账户额度暴露给控制台登录会话（官方 CLI 的 device flow + console 网关），推理 Key 本身没有任何公开的额度接口。插件不会用本地 token 数伪造余额。如果以后需要，可以再接官方 CLI 的登录态来读取。
 
 ## 安全与数据
 
@@ -76,7 +90,7 @@ GLM 的 Coding Plan 没有对第三方开放的 OAuth 应用，但官方 ZCode �
 
 ## 验证清单
 
-自动化测试覆盖：设备码请求形状、token 轮换与账户键、ZCode init/poll/ready、业务 Key 查找/创建/复制、错误信封、取消、30 天重签、设置页宿主注册。未执行真实账号登录与真实套餐调用——那需要你在本机用自己的订阅完成一次浏览器授权。
+自动化测试覆盖：设备码请求形状、token 轮换与账户键、ZCode init/poll/ready、业务 Key 查找/创建/复制、错误信封、取消、30 天重签、Kimi/GLM 用量窗口与重置卡解析、设置页宿主注册。未执行真实账号登录与真实套餐调用——那需要你在本机用自己的订阅完成一次浏览器授权。
 
 ## 安装
 
@@ -92,7 +106,8 @@ Git 安装会现场执行仓库的 `prepare` 构建（tsdown 编译 Host 与 Cli
 
 ## 已知限制
 
-- 三家都没有公开的订阅用量接口，卡片不显示额度百分比；也不按 token 估算余量。
+- Qwen 千问AI平台的推理 Key 没有公开额度接口，卡片只能提示原因；Kimi/GLM 的额度可用。
+- Kimi 没有“重置卡”概念，只有按时间重置的窗口；GLM 有重置卡但通常不会发给 API-KEY 用户。
 - 不提供推理档位切换（GLM/Kimi/Qwen 各自的思考参数没有稳定的第三方文档），模型使用服务端默认思考行为。
 - GLM 的授权链路、Kimi 的客户端身份都属于官方未承诺的第三方接入方式；服务端策略变化可能导致登录失败。失败时会明确报错，不会静默回退到按量计费端点。
 - 未做真实账号的端到端验收：登录、套餐扣费和模型可用性需要你在自己的订阅上验证一次。
