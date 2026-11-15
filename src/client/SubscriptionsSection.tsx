@@ -194,6 +194,25 @@ const MANUAL_CALLBACK_PROVIDERS: ReadonlySet<SubscriptionProvider> = new Set([
   'codex', 'claude', 'grok', 'antigravity',
 ])
 
+/** Which provider cards are expanded; a display-only preference. */
+const EXPANDED_CARDS_KEY = 'dsh.subscriptions.expandedProviders'
+
+function readExpandedCards(): Partial<Record<SubscriptionProvider, boolean>> {
+  if (typeof window === 'undefined') return {}
+  try {
+    const parsed: unknown = JSON.parse(window.localStorage.getItem(EXPANDED_CARDS_KEY) ?? '{}')
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
+    const result: Partial<Record<SubscriptionProvider, boolean>> = {}
+    for (const { id } of PROVIDERS) {
+      if ((parsed as Record<string, unknown>)[id] === true) result[id] = true
+    }
+    return result
+  } catch {
+    // Blocked storage keeps every card collapsed.
+    return {}
+  }
+}
+
 /** Human text of an action failure, SubscriptionsAuthError or not. */
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -239,6 +258,10 @@ const styles: Record<string, CSSProperties> = {
   },
   separator: { borderTop: '0.5px solid var(--dsw-alias-border-l2)' },
   cardHeader: { display: 'flex', alignItems: 'center', gap: 8 },
+  cardHeaderButton: {
+    width: '100%', padding: 0, border: 'none', background: 'none',
+    color: 'inherit', font: 'inherit', textAlign: 'left', cursor: 'pointer',
+  },
   dot: { width: 8, height: 8, borderRadius: '50%', flexShrink: 0 },
   name: { fontWeight: 500, fontSize: 14, lineHeight: '22px', color: 'var(--dsw-alias-label-primary)' },
   statusLine: { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
@@ -508,6 +531,11 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   })
   /** Qwen 千问AI平台 inference key draft; saved through the saveKey endpoint. */
   const [qwenKeyDraft, setQwenKeyDraft] = useState('')
+  /**
+   * Provider cards start collapsed so the page lists every provider at a
+   * glance; a card forced open while busy still shows the login controls.
+   */
+  const [expandedCards, setExpandedCards] = useState<Partial<Record<SubscriptionProvider, boolean>>>(readExpandedCards)
   /** Pending device-flow codes (copilot), shown while the attempt polls. */
   const [deviceCodes, setDeviceCodes] = useState<Partial<Record<SubscriptionProvider, { userCode: string; verificationUrl: string }>>>({})
   const [copiedCode, setCopiedCode] = useState<SubscriptionProvider | undefined>(undefined)
@@ -643,6 +671,15 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       if (mountedRef.current) setUsageLoading(prev => ({ ...prev, [key]: false }))
     }
   }, [rpc])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    try {
+      window.localStorage.setItem(EXPANDED_CARDS_KEY, JSON.stringify(expandedCards))
+    } catch {
+      // A blocked storage keeps the in-memory choice for this page only.
+    }
+  }, [expandedCards])
 
   // Synchronize existing telemetry without polling providers or invoking routing.
   useEffect(() => {
@@ -942,19 +979,46 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
         const busy = status?.busy === true
         const deviceCode = deviceCodes[id]
         const accounts = status?.accounts ?? []
+        // Busy cards stay open so the device code / cancel controls are visible.
+        const isExpanded = busy || expandedCards[id] === true
         return (
           <div key={id} style={styles.card}>
-            <div style={styles.cardHeader}>
+            <button
+              type="button"
+              style={{ ...styles.cardHeader, ...styles.cardHeaderButton }}
+              aria-expanded={isExpanded}
+              aria-label={`${status?.displayName || name} — ${t(isExpanded ? 'collapseProvider' : 'expandProvider')}`}
+              onClick={() => {
+                setExpandedCards(prev => ({ ...prev, [id]: prev[id] !== true }))
+              }}
+            >
               <span style={{ ...styles.dot, background: dotColor(status) }} />
               <span style={styles.name}>{status?.displayName || name}</span>
               {status?.displayName && <small style={styles.statusLine}>{name}</small>}
               <ClientVersionTag clientVersion={status?.clientVersion} t={t} />
-            </div>
+              <svg
+                aria-hidden="true"
+                width="12"
+                height="12"
+                viewBox="0 0 16 16"
+                style={{
+                  marginLeft: 'auto',
+                  flexShrink: 0,
+                  color: 'var(--dsw-alias-label-tertiary)',
+                  transform: isExpanded ? 'rotate(90deg)' : 'none',
+                  transition: 'transform 120ms',
+                }}
+              >
+                <path d="m6 3 5 5-5 5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
             <p style={styles.statusLine}>{statusText(t, status)}</p>
             {status?.detail !== undefined && status.detail !== '' && (
               <p style={styles.statusLine}>{status.detail}</p>
             )}
             {errors[id] !== undefined && <p style={styles.errorLine}>{errors[id]}</p>}
+            {isExpanded && (
+              <>
             {accounts.map((account) => {
               const usageKey = `${id}:${account.key}`
               const usage = usages[usageKey]
@@ -1191,6 +1255,8 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                   </button>
                 </div>
               </details>
+            )}
+              </>
             )}
           </div>
         )
