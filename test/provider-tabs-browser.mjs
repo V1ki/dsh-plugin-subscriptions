@@ -48,7 +48,7 @@ try {
     assert.equal(await page.getByText('Proxy', { exact: true }).isVisible(), true)
     assert.equal(await page.getByRole('button', { name: 'Configure…' }).isVisible(), true)
   }
-  const expected = ['Alpha', 'Zulu', 'GitHub Copilot', 'Google Antigravity', 'Grok (X Premium)']
+  const expected = ['Alpha', 'Zulu', 'GitHub Copilot', 'Google Antigravity', 'Grok (X Premium)', 'Qwen']
   const page = await setup()
   await page.evaluate(() => window.releaseStatus())
   await tab(page, 'Alpha').waitFor()
@@ -67,7 +67,7 @@ try {
   await settingsVisible(page)
   await panel.getByRole('button', { name: 'Log in', exact: true }).click()
   await page.waitForFunction(() => document.querySelector('[role=tab]')?.textContent?.includes('Alpha') && document.querySelectorAll('[role=tab]')[1]?.textContent?.includes('Grok'))
-  assert.deepEqual(await names(page), ['Alpha', 'Grok (X Premium)', 'Zulu', 'GitHub Copilot', 'Google Antigravity'])
+  assert.deepEqual(await names(page), ['Alpha', 'Grok (X Premium)', 'Zulu', 'GitHub Copilot', 'Google Antigravity', 'Qwen'])
   panel = await selected(page, 'Grok (X Premium)')
   await panel.getByText('grok@example.test').waitFor()
   page.once('dialog', dialog => dialog.accept())
@@ -77,6 +77,26 @@ try {
   await selected(page, 'Grok (X Premium)')
   await settingsVisible(page)
   await page.close()
+
+  // A delayed pre-login status must not clear a later device flow; rapid clicks start only one login.
+  const race = await setup()
+  await race.evaluate(() => { window.holdLogin = true; window.firstStatusOverride = { copilot: { busy: false, accounts: [] } } })
+  await tab(race, 'GitHub Copilot').click()
+  const racePanel = await selected(race, 'GitHub Copilot')
+  await racePanel.getByRole('button', { name: 'Log in', exact: true }).click()
+  await race.waitForFunction(() => !!window.releaseLogin)
+  assert.equal(await racePanel.getByRole('button', { name: 'Log in', exact: true }).isDisabled(), true)
+  await race.evaluate(() => {
+    const button = [...document.querySelectorAll('button')].find(el => el.textContent.trim() === 'Log in' && !el.closest('[hidden]'))
+    button?.click()
+    window.releaseLogin()
+  })
+  await racePanel.getByText('ABCD-1234').waitFor()
+  await race.evaluate(() => window.releaseStatus())
+  await race.waitForFunction(() => window.statusCalls >= 2, null, { timeout: 6000 })
+  assert.equal(await racePanel.getByText('ABCD-1234').isVisible(), true)
+  assert.equal(await race.evaluate(() => window.loginCalls), 1)
+  await race.close()
 
   // An explicit pre-status selection must beat the default chosen from the response.
   const early = await setup()
@@ -104,8 +124,8 @@ try {
   assert.equal(await tab(narrow, 'Alpha').evaluate(el => el === document.activeElement), true, 'selected tab accepts keyboard focus')
   assert.equal(await narrow.getByRole('tab').evaluateAll(els => els.filter(el => el.tabIndex === 0).length), 1)
   await narrow.keyboard.press('End')
-  await selected(narrow, 'Grok (X Premium)')
-  assert.equal(await tab(narrow, 'Grok (X Premium)').evaluate(el => el === document.activeElement), true)
+  await selected(narrow, 'Qwen')
+  assert.equal(await tab(narrow, 'Qwen').evaluate(el => el === document.activeElement), true)
   const geometry = await list.evaluate(el => {
     const selected = el.querySelector('[role="tab"][aria-selected="true"]')
     const strip = el.getBoundingClientRect(), item = selected.getBoundingClientRect()
@@ -116,13 +136,58 @@ try {
   await narrow.keyboard.press('ArrowRight')
   await selected(narrow, 'Alpha')
   await narrow.keyboard.press('ArrowLeft')
-  await selected(narrow, 'Grok (X Premium)')
+  await selected(narrow, 'Qwen')
   await narrow.keyboard.press('Home')
   await selected(narrow, 'Alpha')
   await narrow.keyboard.press('ArrowRight')
   await selected(narrow, 'Zulu')
   await settingsVisible(narrow)
   await narrow.close()
+  // Old backend omits qwen. Adding a second account must keep polling and retain the code until settled.
+  const second = await setup()
+  await second.evaluate(() => {
+    window.providers.copilot.accounts = [{ key: 'first', account: 'first@example.test', isDefault: true }]
+    window.releaseStatus()
+  })
+  await tab(second, 'GitHub Copilot').click()
+  const secondPanel = await selected(second, 'GitHub Copilot')
+  await secondPanel.getByRole('button', { name: 'Add account', exact: true }).click()
+  await secondPanel.getByText('ABCD-1234').waitFor()
+  await second.waitForFunction(() => window.statusCalls >= 2)
+  assert.equal(await secondPanel.getByText('ABCD-1234').isVisible(), true)
+  await second.evaluate(() => { window.failCancel = true })
+  await secondPanel.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await secondPanel.getByText('cancel failed').waitFor()
+  await second.evaluate(() => { window.statusMode = 'missing' })
+  const afterCancelCalls = await second.evaluate(() => window.statusCalls)
+  await second.waitForFunction(count => window.statusCalls > count, afterCancelCalls, { timeout: 6000 })
+  assert.equal(await secondPanel.getByText('ABCD-1234').isVisible(), true)
+  assert.equal(await secondPanel.getByText('cancel failed').isVisible(), true)
+  await second.evaluate(() => { window.statusMode = 'error' })
+  await secondPanel.getByText('status temporarily unavailable').waitFor({ timeout: 6000 })
+  assert.equal(await secondPanel.getByText('ABCD-1234').isVisible(), true)
+  await second.evaluate(() => {
+    window.statusMode = undefined
+    window.providers.copilot.busy = false
+    window.providers.copilot.accounts.push({ key: 'second', account: 'second@example.test', isDefault: false })
+  })
+  await secondPanel.getByText('second@example.test').waitFor({ timeout: 6000 })
+  assert.equal(await secondPanel.getByText('ABCD-1234').count(), 0)
+  await second.close()
+  // A resumed device attempt cannot recover its code from status: offer cancel/restart, not manual callback.
+  for (const provider of ['qwen', 'copilot']) {
+    const resumed = await setup()
+    await resumed.evaluate(provider => {
+      window.providers[provider] = { busy: true, accounts: [] }
+      window.releaseStatus()
+    }, provider)
+    await tab(resumed, provider === 'qwen' ? 'Qwen' : 'GitHub Copilot').click()
+    const resumedPanel = await selected(resumed, provider === 'qwen' ? 'Qwen' : 'GitHub Copilot')
+    await resumedPanel.getByText('The verification code is unavailable after reloading. Cancel this attempt, then start login again.').waitFor()
+    assert.equal(await resumedPanel.getByRole('button', { name: 'Cancel', exact: true }).isVisible(), true)
+    assert.equal(await resumedPanel.getByText('Browser flow not working? Paste the callback URL or code').count(), 0)
+    await resumed.close()
+  }
   assert.deepEqual(errors, [])
   console.log('Provider tabs browser checks passed')
 } finally {

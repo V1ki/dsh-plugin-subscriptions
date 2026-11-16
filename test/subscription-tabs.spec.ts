@@ -13,21 +13,30 @@ const ids = (statuses: Parameters<typeof sortedSubscriptionProviders>[0]) =>
   sortedSubscriptionProviders(statuses).map(provider => provider.id)
 
 test('tabs are alphabetic when no account is connected', () => {
-  assert.deepEqual(ids({}), ['claude', 'codex', 'copilot', 'antigravity', 'grok'])
+  assert.deepEqual(ids({}), ['claude', 'codex', 'copilot', 'antigravity', 'grok', 'qwen'])
 })
 
 test('connected tabs precede disconnected tabs and sort by displayed name', () => {
   assert.deepEqual(ids({
     grok: connected(), copilot: connected('Alpha'), claude: disconnected('Zulu'), codex: disconnected(),
-  }), ['copilot', 'grok', 'codex', 'antigravity', 'claude'])
+  }), ['copilot', 'grok', 'codex', 'antigravity', 'qwen', 'claude'])
 })
 
 test('busy without an account remains disconnected; an empty alias uses the brand name', () => {
   assert.deepEqual(ids({ grok: { ...disconnected(''), busy: true }, antigravity: connected() }),
-    ['antigravity', 'claude', 'codex', 'copilot', 'grok'])
+    ['antigravity', 'claude', 'codex', 'copilot', 'grok', 'qwen'])
+})
+
+test('Qwen appears among connected providers and respects its alias', () => {
+  assert.equal(ids({ qwen: connected('Aardvark') })[0], 'qwen')
 })
 
 test('tab list has localized accessible labels', () => {
   assert.ok(en.providerTabs)
   assert.ok(zh.providerTabs)
+  for (const locale of [en, zh]) {
+    assert.ok(locale.deviceCodeUnavailable)
+    assert.doesNotMatch(locale.deviceCodePrompt, /GitHub/i)
+    assert.doesNotMatch(locale.deviceCodeOpenPage, /GitHub/i)
+  }
 })

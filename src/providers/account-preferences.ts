@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, PreparedAdapterCall, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { ProviderId } from '../auth/store.js'
@@ -26,6 +27,15 @@ export function parseAccountModelId(id: string): { account: string; model: strin
 export function accountAllowsPool(preferences: AccountPreferences | undefined, model: string): boolean {
   return preferences?.poolEnabled !== false && (preferences?.poolModels?.includes(model) ?? true)
 }
+/** Discovery diagnostics belong to one routing attempt, including across pool failover. */
+interface DiscoveryTrace { failures: unknown[]; usableMember: boolean }
+const discoveryTrace = new AsyncLocalStorage<DiscoveryTrace>()
+
+function discoveryFailure(failures: readonly unknown[]): unknown {
+  // A denied catalog is actionable and must not be hidden by another timeout.
+  return failures.find(error => error instanceof LlmError && error.failure.status === 403) ?? failures[0]
+}
+
 interface Options {
   provider: ProviderId
   adapter: AccountAwareAdapter
@@ -50,14 +60,25 @@ export class AccountPreferencesAdapter extends LlmAdapter {
     return accounts && Object.hasOwn(accounts, account) ? accounts[account] : undefined
   }
   private async models(account: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]> {
-    const models = await withAbortSignal(() => withTimeout(
-      signal => this.options.adapter.listOwnModels(this.options.provider, account, signal, true),
-      this.options.discoveryTimeoutMs ?? DISCOVERY_TIMEOUT_MS,
-    ), signal)
-    if (models !== undefined) return models
-    // Discovery timed out: the catalog this account listed last time beats
-    // "no models", which would fail the turn with "No eligible account".
-    return await withAbortSignal(async () => this.options.adapter.lastKnownOwnModels?.(this.options.provider, account), signal) ?? []
+    try {
+      const models = await withAbortSignal(() => withTimeout(
+        signal => this.options.adapter.listOwnModels(this.options.provider, account, signal, true),
+        this.options.discoveryTimeoutMs ?? DISCOVERY_TIMEOUT_MS,
+      ), signal)
+      if (models !== undefined) return models
+      // Discovery timed out: a previously authorized catalog may still be used.
+      // lastKnownOwnModels can itself reject after an authentication failure.
+      const known = await withAbortSignal(async () => this.options.adapter.lastKnownOwnModels?.(this.options.provider, account), signal)
+      if (known !== undefined) return known
+      if (this.options.provider === 'qwen') throw new LlmError('Qwen model discovery timed out', 'TIMEOUT')
+      return []
+    } catch (error: unknown) {
+      if (this.options.provider === 'qwen') {
+        signal?.throwIfAborted()
+        discoveryTrace.getStore()?.failures.push(error)
+      }
+      throw error
+    }
   }
   private async requireAccount(account: string, model: string, independent: boolean, signal?: AbortSignal): Promise<void> {
     if (!(await withAbortSignal(this.options.accounts, signal)).some(entry => entry.key === account)
@@ -67,10 +88,22 @@ export class AccountPreferencesAdapter extends LlmAdapter {
     }
   }
   private async fallback(model: string, signal?: AbortSignal): Promise<string> {
+    if (this.options.provider !== 'qwen') {
+      for (const { key } of await withAbortSignal(this.options.accounts, signal)) {
+        if (!accountAllowsPool(this.preference(key), model)) continue
+        try { await this.requireAccount(key, model, false, signal); return key } catch { signal?.throwIfAborted() }
+      }
+      throw new LlmError(`No eligible account for ${this.options.provider}/${model}`, 'NO_ADAPTER')
+    }
+    const trace: DiscoveryTrace = { failures: [], usableMember: false }
     for (const { key } of await withAbortSignal(this.options.accounts, signal)) {
       if (!accountAllowsPool(this.preference(key), model)) continue
-      try { await this.requireAccount(key, model, false, signal); return key } catch { signal?.throwIfAborted() }
+      try {
+        await discoveryTrace.run(trace, () => this.requireAccount(key, model, false, signal))
+        return key
+      } catch { signal?.throwIfAborted() }
     }
+    if (trace.failures.length > 0) throw discoveryFailure(trace.failures)
     throw new LlmError(`No eligible account for ${this.options.provider}/${model}`, 'NO_ADAPTER')
   }
   /** Pool-only facade: explicit families/tiers must obey the same policy as auto pools. */
@@ -83,6 +116,7 @@ export class AccountPreferencesAdapter extends LlmAdapter {
       await this.requireAccount(key, model, false, signal)
       return key
     }
+    const isQwen = this.options.provider === 'qwen'
     return new Proxy(raw, { get: (target, property) => {
       if (property === 'streamAccount') return async function* (options: GenerateOptions, account: string) {
         let key: string
@@ -92,18 +126,49 @@ export class AccountPreferencesAdapter extends LlmAdapter {
           // pool treats TRANSPORT as switch-without-cooldown; raw is never called.
           throw new LlmError('Pool member unavailable under account preferences', 'TRANSPORT', { cause })
         }
+        const trace = discoveryTrace.getStore()
+        if (trace !== undefined) trace.usableMember = true
         yield* raw.streamAccount(options, key)
       }
-      if (property === 'resolveOwnModel') return async (provider: string, model: string, account?: string) =>
-        raw.resolveOwnModel(provider, model, await keyFor(account, model))
+      if (property === 'resolveOwnModel' && !isQwen) return async (provider: string, model: string, account?: string) => {
+        const resolved = await raw.resolveOwnModel(provider, model, await keyFor(account, model))
+        const trace = discoveryTrace.getStore()
+        if (trace !== undefined) trace.usableMember = true
+        return resolved
+      }
+      if (property === 'resolveOwnModel') return async (provider: string, model: string, account?: string) => {
+        const key = await keyFor(account, model)
+        let result: LlmResolvedModelInfo
+        try { result = await raw.resolveOwnModel(provider, model, key) } catch (error: unknown) {
+          const trace = discoveryTrace.getStore()
+          // The wrapper may recheck the catalog between keyFor and resolution.
+          if (trace !== undefined && error instanceof LlmError
+            && ['AUTH', 'MISSING_CREDENTIAL', 'INVALID_CREDENTIAL'].includes(error.code)) trace.failures.push(error)
+          throw error
+        }
+        const trace = discoveryTrace.getStore()
+        if (trace !== undefined) trace.usableMember = true
+        return result
+      }
       const value = Reflect.get(target, property)
       return typeof value === 'function' ? value.bind(target) : value
     } })
   }
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
     const result = new Map<string, LlmModelInfo>()
-    const catalogs = await Promise.all((await this.options.accounts()).map(async account => ({ ...account, models: await this.models(account.key).catch(() => []) })))
-    for (const { key, label, models } of catalogs) {
+    const catalogs = await Promise.all((await this.options.accounts()).map(async account => {
+      try { return { ...account, models: await this.models(account.key) } }
+      catch (error: unknown) { return { ...account, error } }
+    }))
+    const failed = catalogs.filter(catalog => 'error' in catalog)
+    // Other providers historically swallow discovery errors; Qwen reports the
+    // real failure only when no account answered, even if the answer was empty.
+    if (this.options.provider === 'qwen' && failed.length > 0 && failed.length === catalogs.length) {
+      throw discoveryFailure(failed.map(catalog => catalog.error))
+    }
+    for (const catalog of catalogs) {
+      const { key, label } = catalog
+      const models = 'models' in catalog ? catalog.models : []
       const preferences = this.preference(key)
       for (const model of models) {
         if (model.id.startsWith(ACCOUNT_MODEL_PREFIX)) continue
@@ -131,8 +196,16 @@ export class AccountPreferencesAdapter extends LlmAdapter {
     const independent = parseAccountModelId(id)
     const pool = this.options.pool()
     if (!independent && pool && await withAbortSignal(() => pool.owns(this.options.provider, id), signal)) {
-      const prepared = await pool.prepareCall(provider, id, signal)
-      return { ...prepared, model: this.present(id, prepared.model) }
+      if (this.options.provider !== 'qwen') {
+        const prepared = await pool.prepareCall(provider, id, signal)
+        return { ...prepared, model: this.present(id, prepared.model) }
+      }
+      const trace: DiscoveryTrace = { failures: [], usableMember: false }
+      let prepared: PreparedAdapterCall
+      try { prepared = await discoveryTrace.run(trace, () => pool.prepareCall(provider, id, signal)) }
+      catch (error: unknown) { this.throwPoolFailure(error, trace, signal) }
+      return { ...prepared, model: this.present(id, prepared.model),
+        stream: options => this.streamPool(prepared.stream(options), options.signal) }
     }
     const account = independent?.account ?? await this.fallback(id, signal)
     const model = independent?.model ?? id
@@ -151,6 +224,29 @@ export class AccountPreferencesAdapter extends LlmAdapter {
       },
     }
   }
+  /** Only unwrap Qwen discovery when no pool member could actually be used. */
+  private throwPoolFailure(error: unknown, trace: DiscoveryTrace, signal?: AbortSignal): never {
+    signal?.throwIfAborted()
+    if (this.options.provider === 'qwen' && !trace.usableMember && trace.failures.length > 0) throw discoveryFailure(trace.failures)
+    throw error
+  }
+  /** Keep one async context through each iterator step; concurrent calls cannot share failures. */
+  private async *streamPool(stream: AsyncIterable<StreamChunk>, signal?: AbortSignal): AsyncIterable<StreamChunk> {
+    const trace: DiscoveryTrace = { failures: [], usableMember: false }
+    const iterator = stream[Symbol.asyncIterator]()
+    let done = false
+    try {
+      while (true) {
+        const next = await discoveryTrace.run(trace, () => iterator.next())
+        if (next.done) { done = true; return }
+        yield next.value
+      }
+    } catch (error: unknown) {
+      this.throwPoolFailure(error, trace, signal)
+    } finally {
+      if (!done) { try { await discoveryTrace.run(trace, () => iterator.return?.()) } catch { /* preserve the original outcome */ } }
+    }
+  }
   /** Presentation only: routing still uses the original model id. */
   private present(id: string, info: LlmResolvedModelInfo): LlmResolvedModelInfo {
     return { ...info, name: this.options.settings.modelName(this.options.provider, id, info.name) }
@@ -165,7 +261,8 @@ export class AccountPreferencesAdapter extends LlmAdapter {
     }
     const pool = this.options.pool()
     if (pool && await withAbortSignal(() => pool.owns(this.options.provider, options.model), options.signal)) {
-      yield* pool.stream(options)
+      if (this.options.provider === 'qwen') yield* this.streamPool(pool.stream(options), options.signal)
+      else yield* pool.stream(options)
       return
     }
     const account = await this.fallback(options.model, options.signal)

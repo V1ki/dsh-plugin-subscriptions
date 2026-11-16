@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-Use your **ChatGPT (Codex)**, **Claude**, **Grok (X Premium)**, **GitHub Copilot**, and **Google Antigravity** subscriptions as LLM providers in [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) — no API keys. Codex, Grok, and Antigravity log in via OAuth in the dsh web UI (Settings → Subscriptions), while Copilot uses the GitHub OAuth device flow; Claude imports credentials from an existing Claude Code session when there is one (macOS Keychain or `~/.claude/.credentials.json`) and otherwise falls back to the same browser OAuth flow, so the Claude Code CLI is not required. Tokens live at `~/.dsh/plugins/subscriptions/auth.json` (mode 0600) and refresh automatically.
+Use your **ChatGPT (Codex)**, **Claude**, **Grok (X Premium)**, **GitHub Copilot**, **Google Antigravity**, and **Qwen Plus/Pro** subscriptions as LLM providers in [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) — no API keys. Codex, Grok, and Antigravity log in via OAuth in the dsh web UI (Settings → Subscriptions), while Copilot uses the GitHub OAuth device flow; Claude imports credentials from an existing Claude Code session when there is one (macOS Keychain or `~/.claude/.credentials.json`) and otherwise falls back to the same browser OAuth flow, so the Claude Code CLI is not required. Tokens live at `~/.dsh/plugins/subscriptions/auth.json` (mode 0600) and refresh automatically.
 
 ## Subscription and model display names
 
@@ -17,6 +17,16 @@ Antigravity now advertises one picker entry per effort group, using the same nat
 Group defaults prefer High, then Medium, then Low when no valid saved preference exists. Existing concrete model IDs remain callable. Account pools retain their existing conservative intersection of members' efforts. Refresh the model list after installing so older caches acquire roster metadata. Without roster metadata, legacy/internal filtering is best effort; exact parity with the official client requires checking the live account. See [verification notes](docs/issue180-testing.md).
 
 Antigravity usage keeps explicitly reported shared limits from `retrieveUserQuotaSummary`. The Gemini group includes Argon; native two-group summaries report weekly and five-hour windows for Gemini and Claude/GPT. Account-wide shared quotas remain visible independently of model picker visibility. Settings and the composer dialog show remaining percentages with horizontal bars, without duplicating effort variants. Missing shared groups can supplement uncovered model quotas from `fetchAvailableModels`; a reset timestamp alone never establishes a cadence. Supplemental failures retain valid summaries; cancellation propagates.
+
+## Qwen subscription (draft)
+
+Connect a Plus or Pro account at **Settings → Subscriptions → Qwen**. Open the verification page and confirm that the displayed device code matches before authorizing. The plugin stores the subscription's OAuth token pair locally and renews it as needed; no API key is required. Qwen's legacy free OAuth allowance was discontinued and is not used by this integration. QwenCloud and Alibaba ModelStudio API keys are separate products.
+
+Qwen model IDs are discovered from the signed-in account rather than a built-in model list. If discovery fails before a successful load, the plugin cannot show a model catalog. There is no server-provided subscription-usage readout. Logout removes the local session and attempts remote revocation; if remote revocation fails, local logout still applies and the error is reported.
+
+This integration has automated mock coverage but has not yet been validated against a real Qwen subscription. The current login requires a Plus/Pro membership during authorization; if the membership check fails, retrying authorization is necessary. The official client's purchase/check-again flow is not implemented here. The picker exposes off/low/medium/high; xhigh/max aliases are not available. Gateway errors intentionally omit upstream text to avoid exposing credentials. OAuth Retry-After cooldowns are not persisted across requests/restarts.
+
+Credential rotation coalesces only within one token manager; store mutations are serialized only within one process. Separate plugin instances or DSH processes sharing the same auth file can race; use one instance at a time. A logout concurrent with an upstream rotation may revoke the old token rather than an already-issued new token; verify and revoke active sessions in the Qwen account if required. Cancellation after the credential write has started reports that it can no longer cancel the login.
 
 ## Demo
 
@@ -79,6 +89,7 @@ The `video_generate` tool plays the generated clip inline:
 | `grok`   | X Premium (xAI)   | live catalog from `api.x.ai/v1/models` (chat models only); reasoning efforts from the Grok CLI catalog (`cli-chat-proxy.grok.com/v1/models`) |
 | `copilot` | GitHub Copilot   | live catalog from `api.githubcopilot.com/models` (chat models on both wires, with per-model vision flags and reasoning efforts); login uses the OAuth device flow (enter the shown code at `github.com/login/device`) |
 | `antigravity` | Google Antigravity | live catalog from Antigravity `v1internal:fetchAvailableModels`; requests use `generateContent` / `streamGenerateContent` with text, image, streaming reasoning, and tool-call conversion |
+| `qwen` | Qwen Plus/Pro subscription | live catalog from the Qwen subscription gateway; device OAuth and OpenAI-compatible streaming chat completions |
 
 Only logged-in providers appear in the session model picker; the lists above refresh on login/logout. Vision-capable models declare `['text', 'image']` input modalities, and image content is translated to each provider's wire format.
 

@@ -41,7 +41,7 @@ const POLL_INTERVAL_MS = 2000
 const MODEL_FILTER_THRESHOLD = 8
 
 /** Subscription provider ids, fixed by the node half's OAuth adapters. */
-export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity'
+export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity' | 'qwen'
 
 /** One logged-in account as answered by the `status` endpoint. */
 export interface AccountStatus {
@@ -60,6 +60,8 @@ export interface ProviderStatus {
   busy: boolean
   accounts: AccountStatus[]
   detail?: string
+  /** Status lookup failed; busy and accounts are not authoritative. */
+  statusUnavailable?: true
   /** The CLI version the route presents (Codex, Claude), and where it came from. */
   clientVersion?: { version: string; source: ClientVersionSource }
 }
@@ -75,7 +77,7 @@ const CLIENT_VERSION_SOURCES: Record<ClientVersionSource, SubscriptionsKey> = {
 
 /** `status` endpoint value: the node half owns this shape. */
 interface StatusResponse {
-  providers: Record<SubscriptionProvider, ProviderStatus>
+  providers: Partial<Record<SubscriptionProvider, ProviderStatus>>
 }
 
 /** Purchased Codex credit balance. Not a usage-limit reset card. */
@@ -177,6 +179,7 @@ const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [
   { id: 'grok', name: 'Grok (X Premium)' },
   { id: 'copilot', name: 'GitHub Copilot' },
   { id: 'antigravity', name: 'Google Antigravity' },
+  { id: 'qwen', name: 'Qwen' },
 ]
 
 /** Sort the visible provider names within connected and disconnected groups. */
@@ -511,8 +514,9 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const sortedProviders = sortedSubscriptionProviders(statuses)
   const activeProvider = selectedProvider ?? sortedProviders[0].id
   const [errors, setErrors] = useState<Partial<Record<SubscriptionProvider, string>>>({})
+  const [statusError, setStatusError] = useState<string>()
   const [manualDrafts, setManualDrafts] = useState<Record<SubscriptionProvider, string>>({
-    codex: '', claude: '', grok: '', copilot: '', antigravity: '',
+    codex: '', claude: '', grok: '', copilot: '', antigravity: '', qwen: '',
   })
   /** Pending device-flow codes (copilot), shown while the attempt polls. */
   const [deviceCodes, setDeviceCodes] = useState<Partial<Record<SubscriptionProvider, { userCode: string; verificationUrl: string }>>>({})
@@ -534,6 +538,9 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const resetInflight = useRef(false)
   const mountedRef = useRef(true)
   const pollersRef = useRef(new Map<SubscriptionProvider, ReturnType<typeof setInterval>>())
+  const refreshGeneration = useRef(0)
+  const loginInflight = useRef(new Set<SubscriptionProvider>())
+  const [pendingLogins, setPendingLogins] = useState<Partial<Record<SubscriptionProvider, boolean>>>({})
   /** Accounts with a `usage` call in flight; guards the auto-fetch effect against re-entry. */
   const usageInflightRef = useRef(new Set<string>())
   /** Proxy config as last answered by `proxyGet`/`proxySet`. */
@@ -573,6 +580,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   /** Refetch every provider's status; stop a provider's poller once its attempt settles. */
   const refresh = useCallback(async (): Promise<void> => {
     if (rpc === undefined) return
+    const generation = ++refreshGeneration.current
     let response: StatusResponse
     try {
       response = await callSubscriptionsAuth<StatusResponse>(rpc, 'status', {})
@@ -581,20 +589,31 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       // the action paths report their own errors. But staying silent turns a
       // persistent failure into an endless "Checking…" — show it instead.
       const message = error instanceof Error ? error.message : String(error)
-      for (const { id } of PROVIDERS) setProviderError(id, message)
+      if (mountedRef.current && generation === refreshGeneration.current) setStatusError(message)
       return
     }
-    if (!mountedRef.current) return
+    if (!mountedRef.current || generation !== refreshGeneration.current) return
     const focused = document.activeElement
     const provider = focused instanceof HTMLElement ? focused.closest<HTMLElement>('[data-subscription-provider]')?.dataset.subscriptionProvider as SubscriptionProvider | undefined : undefined
     focusToRestore.current = focused instanceof HTMLElement && provider ? { element: focused, provider } : null
-    setStatuses(response.providers)
+    // A missing or unavailable status does not prove that a login has settled.
+    setStatuses(previous => {
+      const next = { ...response.providers }
+      for (const { id } of PROVIDERS) {
+        const status = response.providers[id]
+        if (pollersRef.current.has(id) && (!status || status.statusUnavailable === true)) {
+          const prior = previous[id]
+          if (prior) next[id] = { ...prior, ...(status?.detail ? { detail: status.detail } : {}), busy: true }
+        }
+      }
+      return next
+    })
     setSelectedProvider(current => current ?? sortedSubscriptionProviders(response.providers)[0].id)
     // The poll recovered: drop any error line a previous failed poll left.
-    for (const { id } of PROVIDERS) setProviderError(id, undefined)
+    setStatusError(undefined)
     for (const { id } of PROVIDERS) {
       const status = response.providers[id]
-      if (status.accounts.length > 0 || !status.busy) {
+      if (status && !status.busy && !status.statusUnavailable) {
         stopPolling(id)
         // The attempt settled (success, timeout, or cancel): drop the code card.
         setDeviceCodes((prev) => {
@@ -605,7 +624,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
         })
       }
     }
-  }, [rpc, stopPolling, setProviderError])
+  }, [rpc, stopPolling])
 
   const startPolling = useCallback((provider: SubscriptionProvider): void => {
     if (pollersRef.current.has(provider)) return
@@ -627,6 +646,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     })
     return () => {
       mountedRef.current = false
+      refreshGeneration.current++
       for (const poller of pollersRef.current.values()) clearInterval(poller)
       pollersRef.current.clear()
     }
@@ -726,13 +746,17 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   }, [statuses, usages, usageErrors, loadUsage])
 
   const login = useCallback(async (provider: SubscriptionProvider, method?: 'oauth' | 'keychain'): Promise<void> => {
-    if (rpc === undefined) return
+    if (rpc === undefined || loginInflight.current.has(provider)) return
+    loginInflight.current.add(provider)
+    setPendingLogins(prev => ({ ...prev, [provider]: true }))
     setProviderError(provider, undefined)
     try {
       const response = await callSubscriptionsAuth<LoginResponse>(rpc, 'login', {
         provider,
         ...method === undefined ? {} : { method },
       })
+      // Any status started before this login response can describe the old attempt.
+      refreshGeneration.current++
       if (typeof response.authorizeUrl === 'string' && response.authorizeUrl === '') {
         // Instant login (e.g. imported from Claude Code credentials)
         await refresh()
@@ -757,19 +781,22 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       startPolling(provider)
     } catch (error) {
       setProviderError(provider, messageOf(error))
+    } finally {
+      loginInflight.current.delete(provider)
+      if (mountedRef.current) setPendingLogins(prev => ({ ...prev, [provider]: false }))
     }
-  }, [rpc, t, setProviderError, startPolling])
+  }, [rpc, t, setProviderError, startPolling, refresh])
 
   const cancel = useCallback(async (provider: SubscriptionProvider): Promise<void> => {
     if (rpc === undefined) return
-    stopPolling(provider)
+    setProviderError(provider, undefined)
     try {
       await callSubscriptionsAuth<{ ok: true }>(rpc, 'cancel', { provider })
     } catch (error) {
       setProviderError(provider, messageOf(error))
     }
     await refresh()
-  }, [rpc, stopPolling, setProviderError, refresh])
+  }, [rpc, setProviderError, refresh])
 
   const submitManual = useCallback(async (provider: SubscriptionProvider): Promise<void> => {
     if (rpc === undefined) return
@@ -920,6 +947,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       {sortedProviders.map(({ id, name }) => {
         const status = statuses[id]
         const busy = status?.busy === true
+        const loginPending = pendingLogins[id] === true
         const deviceCode = deviceCodes[id]
         const accounts = status?.accounts ?? []
         return (
@@ -936,6 +964,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
             {status?.detail !== undefined && status.detail !== '' && (
               <p style={styles.statusLine}>{status.detail}</p>
             )}
+            {statusError !== undefined && <p style={styles.errorLine}>{statusError}</p>}
             {errors[id] !== undefined && <p style={styles.errorLine}>{errors[id]}</p>}
             {accounts.map((account) => {
               const usageKey = `${id}:${account.key}`
@@ -1076,22 +1105,22 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
             })}
             <div style={styles.actions}>
               {!busy && accounts.length === 0 && (
-                <button type="button" onClick={() => { void login(id) }}>
+                <button type="button" disabled={loginPending} onClick={() => { void login(id) }}>
                   {t('login')}
                 </button>
               )}
               {!busy && accounts.length > 0 && id === 'claude' && (
                 <>
-                  <button type="button" onClick={() => { void login(id, 'oauth') }}>
+                  <button type="button" disabled={loginPending} onClick={() => { void login(id, 'oauth') }}>
                     {t('addAccountOAuth')}
                   </button>
-                  <button type="button" onClick={() => { void login(id, 'keychain') }}>
+                  <button type="button" disabled={loginPending} onClick={() => { void login(id, 'keychain') }}>
                     {t('addAccountKeychain')}
                   </button>
                 </>
               )}
               {!busy && accounts.length > 0 && id !== 'claude' && (
-                <button type="button" onClick={() => { void login(id) }}>
+                <button type="button" disabled={loginPending} onClick={() => { void login(id) }}>
                   {t('addAccount')}
                 </button>
               )}
@@ -1128,7 +1157,10 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 </div>
               </div>
             )}
-            {busy && deviceCode === undefined && (
+            {busy && deviceCode === undefined && (id === 'qwen' || id === 'copilot') && (
+              <p style={styles.statusLine}>{t('deviceCodeUnavailable')}</p>
+            )}
+            {busy && deviceCode === undefined && id !== 'qwen' && id !== 'copilot' && (
               <details style={styles.manual}>
                 <summary>{t('manualSummary')}</summary>
                 <div style={styles.manualRow}>

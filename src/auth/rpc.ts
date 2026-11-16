@@ -97,6 +97,8 @@ export interface AccountStatus {
 
 /** Login state of one provider, as rendered by the Settings page. */
 export interface ProviderStatus {
+  /** True when status could not be read; busy/accounts are not authoritative. */
+  statusUnavailable?: boolean
   /** Saved picker visibility, attached by the status RPC from local preferences. */
   visibleModels?: string[]
   displayName?: string
@@ -547,6 +549,7 @@ async function dispatch(
         async provider => [provider, await controller.status(provider).catch((error: unknown) => ({
           busy: false,
           accounts: [],
+          statusUnavailable: true,
           detail: error instanceof Error ? error.message : String(error),
         }) satisfies ProviderStatus)] as const,
       ))

@@ -19,13 +19,25 @@ let statusCalls = 0
 const rpc = { call: async (_channel: string, method: string, payload: any) => {
   const endpoint = method.split('.').at(-1)
   if (endpoint === 'status') {
-    if (++statusCalls === 1) await firstStatus
-    return { ok: true, value: { providers: structuredClone(state.providers) } }
+    state.statusCalls = ++statusCalls
+    if (statusCalls === 1) await firstStatus
+    const providers = structuredClone(state.providers)
+    if (statusCalls === 1 && state.firstStatusOverride) Object.assign(providers, state.firstStatusOverride)
+    if (state.statusMode === 'missing') delete providers.copilot
+    if (state.statusMode === 'error') providers.copilot = { busy: false, accounts: [], detail: 'status temporarily unavailable', statusUnavailable: true }
+    return { ok: true, value: { providers } }
   }
   if (endpoint === 'login') {
+    state.loginCalls = (state.loginCalls ?? 0) + 1
+    if (state.holdLogin) await new Promise<void>(resolve => { state.releaseLogin = resolve })
+    if (payload.provider === 'copilot') {
+      state.providers.copilot.busy = true
+      return { ok: true, value: { authorizeUrl: 'https://example.test/device', userCode: 'ABCD-1234' } }
+    }
     state.providers[payload.provider].accounts = [account(payload.provider)]
     return { ok: true, value: { authorizeUrl: '' } }
   }
+  if (endpoint === 'cancel' && state.failCancel) return { ok: false, error: { code: 'internal', message: 'cancel failed', details: {} } }
   if (endpoint === 'logout') {
     state.providers[payload.provider].accounts = []
     return { ok: true, value: {} }

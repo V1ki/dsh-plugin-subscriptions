@@ -211,12 +211,16 @@ test('provider ordering stays independent from model-window filtering', () => {
 test('non-subscription selections retain only the last subscription and its model scope', () => {
   const codex = { provider: 'codex', model: 'gpt-test' }
   const anti = { provider: 'antigravity', model: 'gemini-model-59' }
+  const qwen = { provider: 'qwen', model: 'qwen-test' }
   const api = { provider: 'deepseek', model: 'deepseek-chat' }
   assert.equal(retainSubscriptionSelection(undefined, api), undefined)
   assert.equal(retainSubscriptionSelection(undefined, undefined), undefined)
   assert.equal(retainSubscriptionSelection(undefined, codex), codex)
   assert.equal(retainSubscriptionSelection(codex, api), codex)
   assert.equal(retainSubscriptionSelection(codex, anti), anti)
+  assert.equal(retainSubscriptionSelection(anti, qwen), qwen)
+  assert.equal(retainSubscriptionSelection(qwen, api), qwen)
+  assert.deepEqual(collapsedDisplays([display('qwen')], qwen.provider).map(d => d.provider), ['qwen'])
   assert.equal(retainSubscriptionSelection(anti, api), anti)
   assert.equal(retainSubscriptionSelection(anti, undefined), anti)
   assert.deepEqual(collapsedDisplays([display('codex'), display()], retainSubscriptionSelection(anti, api)?.provider).map(d => d.provider), ['antigravity'])

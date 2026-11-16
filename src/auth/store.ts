@@ -21,10 +21,10 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { parseJsonText } from '../json-text.js'
 
 /** Provider routes this plugin can serve. */
-export type ProviderId = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity'
+export type ProviderId = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity' | 'qwen'
 
 /** Every provider route, in display order. */
-export const PROVIDER_IDS: readonly ProviderId[] = ['codex', 'claude', 'grok', 'copilot', 'antigravity']
+export const PROVIDER_IDS: readonly ProviderId[] = ['codex', 'claude', 'grok', 'copilot', 'antigravity', 'qwen']
 
 /** Stored ChatGPT/Codex subscription session. */
 export interface CodexSession {
@@ -105,6 +105,18 @@ export interface AntigravitySession {
   scopes?: string
 }
 
+/** Stored Qwen Code subscription session. */
+export interface QwenSession {
+  accessToken: string
+  refreshToken: string
+  /** Epoch milliseconds at which the access token expires. */
+  expiresAt: number
+  /** Display account, when available. */
+  account?: string
+  /** Subscription tier, when available. */
+  plan?: string
+}
+
 /** One provider's accounts: account key → session, plus the default account. */
 export interface ProviderAccounts<S> {
   /** Key of the account direct (non-pool) routes serve; the first login wins. */
@@ -121,10 +133,11 @@ export interface SessionMap {
   grok?: ProviderAccounts<GrokSession>
   copilot?: ProviderAccounts<CopilotSession>
   antigravity?: ProviderAccounts<AntigravitySession>
+  qwen?: ProviderAccounts<QwenSession>
 }
 
 /** Any stored session, for provider-agnostic plumbing. */
-export type StoredSession = CodexSession | ClaudeSession | GrokSession | CopilotSession | AntigravitySession
+export type StoredSession = CodexSession | ClaudeSession | GrokSession | CopilotSession | AntigravitySession | QwenSession
 
 /** The session type one provider stores. */
 export type SessionOf<K extends ProviderId> = NonNullable<SessionMap[K]>['accounts'][string]
@@ -170,6 +183,8 @@ export function accountKeyOf(provider: ProviderId, session: StoredSession): stri
       return (session as AntigravitySession).account ?? tokenHash(session.refreshToken)
     case 'copilot':
       return (session as CopilotSession).account ?? tokenHash(session.refreshToken)
+    case 'qwen':
+      return (session as QwenSession).account ?? tokenHash(session.refreshToken)
   }
 }
 
@@ -546,6 +561,103 @@ export async function saveAccountSession<K extends ProviderId>(
       accounts: { ...entry?.accounts, [account]: session },
     } satisfies ProviderAccounts<SessionOf<K>>
     await writeStore(store, path)
+  })
+}
+
+/**
+ * Persist a Qwen refresh only while the account still has the token it started
+ * with. A concurrent logout cannot be undone by an in-flight refresh, and a
+ * newer login or refresh cannot be overwritten. All store mutations in this
+ * process share the same path-scoped queue.
+ *
+ * @returns The newly saved session, the current session if its token changed,
+ * or undefined if the account no longer exists.
+ */
+export async function compareAndSaveQwenAccount(
+  account: string,
+  expectedRefreshToken: string,
+  next: QwenSession,
+  path = authFilePath(),
+): Promise<QwenSession | undefined> {
+  return serialize(path, async () => {
+    const store = await loadStore(path)
+    const entry = store.qwen
+    if (entry === undefined) return undefined
+    const key = resolveAccount(entry, account)
+    if (!Object.hasOwn(entry.accounts, key)) return undefined
+    const current = entry.accounts[key]
+    if (current.refreshToken !== expectedRefreshToken) return current
+    assertSessionShape('qwen', key, next)
+    store.qwen = { ...entry, accounts: { ...entry.accounts, [key]: next } }
+    await writeStore(store, path)
+    return next
+  })
+}
+
+/**
+ * Remove a Qwen account only while it still has the token that failed. This
+ * prevents a late invalid_grant response from deleting a newer login.
+ *
+ * @returns true if the account was removed; false if missing or replaced.
+ */
+export async function compareAndDeleteQwenAccount(
+  account: string,
+  expectedRefreshToken: string,
+  path = authFilePath(),
+): Promise<boolean> {
+  return serialize(path, async () => {
+    const store = await loadStore(path)
+    const entry = store.qwen
+    if (entry === undefined) return false
+    const key = resolveAccount(entry, account)
+    if (!Object.hasOwn(entry.accounts, key) || entry.accounts[key].refreshToken !== expectedRefreshToken) return false
+    const accounts = { ...entry.accounts }
+    delete accounts[key]
+    if (Object.keys(accounts).length === 0) {
+      delete store.qwen
+    } else {
+      store.qwen = {
+        ...entry,
+        ...(entry.default === key ? { default: Object.keys(accounts)[0] } : {}),
+        accounts,
+      }
+    }
+    await writeStore(store, path)
+    return true
+  })
+}
+
+/**
+ * Remove a Qwen account and return the exact session removed for revocation.
+ * The read and deletion share the same path-scoped in-process queue as login
+ * and refresh, so token rotation cannot race between them.
+ *
+ * @returns The removed session, or undefined if the account is already absent.
+ */
+export async function deleteAndReturnQwenAccount(
+  account: string,
+  path = authFilePath(),
+): Promise<QwenSession | undefined> {
+  return serialize(path, async () => {
+    const store = await loadStore(path)
+    const entry = store.qwen
+    if (entry === undefined) return undefined
+    const key = resolveAccount(entry, account)
+    if (!Object.hasOwn(entry.accounts, key)) return undefined
+    const removed = entry.accounts[key]
+    const accounts = { ...entry.accounts }
+    delete accounts[key]
+    if (Object.keys(accounts).length === 0) {
+      delete store.qwen
+    } else {
+      store.qwen = {
+        ...entry,
+        ...(entry.default === key ? { default: Object.keys(accounts)[0] } : {}),
+        accounts,
+      }
+    }
+    await writeStore(store, path)
+    return removed
   })
 }
 
