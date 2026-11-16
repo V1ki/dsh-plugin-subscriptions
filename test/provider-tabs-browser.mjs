@@ -19,11 +19,12 @@ const code = result.output.find(file => file.type === 'chunk').code
 const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE } : {}) })
 try {
   const errors = []
-  async function setup(width = 900) {
+  async function setup(width = 900, badge = false) {
     const page = await browser.newPage({ viewport: { width, height: 900 } })
     page.setDefaultTimeout(5000)
     page.on('pageerror', error => errors.push(error.message))
     await page.setContent('<meta charset="utf-8"><style>body{margin:0;font:14px system-ui}</style><div id="root"></div>')
+    if (badge) await page.evaluate(() => { window.enableBadge = true })
     await page.addScriptTag({ content: code })
     await page.getByRole('tablist').waitFor()
     return page
@@ -143,7 +144,7 @@ try {
   await selected(narrow, 'Zulu')
   await settingsVisible(narrow)
   await narrow.close()
-  // Old backend omits qwen. Adding a second account must keep polling and retain the code until settled.
+  // Adding a second account must keep polling and retain the code until settled.
   const second = await setup()
   await second.evaluate(() => {
     window.providers.copilot.accounts = [{ key: 'first', account: 'first@example.test', isDefault: true }]
@@ -175,19 +176,58 @@ try {
   assert.equal(await secondPanel.getByText('ABCD-1234').count(), 0)
   await second.close()
   // A resumed device attempt cannot recover its code from status: offer cancel/restart, not manual callback.
-  for (const provider of ['qwen', 'copilot']) {
+  for (const provider of ['qwen-subscription', 'copilot']) {
     const resumed = await setup()
     await resumed.evaluate(provider => {
       window.providers[provider] = { busy: true, accounts: [] }
       window.releaseStatus()
     }, provider)
-    await tab(resumed, provider === 'qwen' ? 'Qwen' : 'GitHub Copilot').click()
-    const resumedPanel = await selected(resumed, provider === 'qwen' ? 'Qwen' : 'GitHub Copilot')
+    await tab(resumed, provider === 'qwen-subscription' ? 'Qwen' : 'GitHub Copilot').click()
+    const resumedPanel = await selected(resumed, provider === 'qwen-subscription' ? 'Qwen' : 'GitHub Copilot')
     await resumedPanel.getByText('The verification code is unavailable after reloading. Cancel this attempt, then start login again.').waitFor()
     assert.equal(await resumedPanel.getByRole('button', { name: 'Cancel', exact: true }).isVisible(), true)
     assert.equal(await resumedPanel.getByText('Browser flow not working? Paste the callback URL or code').count(), 0)
     await resumed.close()
   }
+  // Qwen subscription uses a distinct route for status, login, cancel and settings.
+  const qwen = await setup()
+  await qwen.evaluate(() => window.releaseStatus())
+  await tab(qwen, 'Alpha').waitFor()
+  await tab(qwen, 'Qwen').click()
+  const qwenPanel = await selected(qwen, 'Qwen')
+  assert.equal(await qwenPanel.getAttribute('data-subscription-provider'), 'qwen-subscription')
+  await qwenPanel.getByRole('button', { name: 'Manage', exact: true }).click()
+  const manage = qwen.getByRole('dialog', { name: 'Manage Qwen' })
+  await manage.waitFor()
+  await qwen.waitForFunction(() => window.calls.some(call => call.endpoint === 'providerSettings' && call.payload.provider === 'qwen-subscription'))
+  await manage.getByRole('button', { name: 'Close', exact: true }).click()
+  await qwenPanel.getByRole('button', { name: 'Log in', exact: true }).click()
+  await qwenPanel.getByText('ABCD-1234').waitFor()
+  assert.equal(await qwenPanel.getByText('Browser flow not working? Paste the callback URL or code').count(), 0)
+  await qwenPanel.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await qwen.waitForFunction(() => window.calls.some(call => call.endpoint === 'cancel' && call.payload.provider === 'qwen-subscription'))
+  await qwenPanel.getByRole('button', { name: 'Log in', exact: true }).waitFor()
+  const providerCalls = await qwen.evaluate(() => window.calls.filter(call => call.payload?.provider).map(call => call.payload.provider))
+  assert.ok(providerCalls.includes('qwen-subscription'))
+  assert.ok(!providerCalls.includes('qwen'), 'never send the API provider id for a subscription')
+  await qwen.close()
+
+  // An unrelated API route must not select Qwen subscription quota or its account.
+  const badgePage = await setup(900, true)
+  await badgePage.evaluate(() => window.releaseStatus())
+  await badgePage.waitForFunction(() => window.modelReads >= 2 && window.calls.some(call => call.endpoint === 'usage' && call.payload.provider === 'qwen-subscription'), null, { timeout: 6000 })
+  const badge = badgePage.locator('.dsh-subscription-usage-pill')
+  assert.equal(await badge.count(), 0, 'the API route qwen is not a subscription')
+  await badgePage.evaluate(() => { window.selection = { provider: 'qwen-subscription', model: 'qwen-test' } })
+  await badge.waitFor({ timeout: 6000 })
+  assert.match(await badge.innerText(), /^Qwen /)
+  await badge.click()
+  const badgeDialog = badgePage.getByRole('dialog', { name: 'Subscription usage' })
+  await badgeDialog.waitFor()
+  assert.match(await badgeDialog.locator('section').first().innerText(), /^Qwen/)
+  assert.ok((await badgePage.evaluate(() => window.calls.filter(call => call.endpoint === 'usage').map(call => call.payload.provider))).includes('qwen-subscription'))
+  await badgePage.close()
+
   assert.deepEqual(errors, [])
   console.log('Provider tabs browser checks passed')
 } finally {

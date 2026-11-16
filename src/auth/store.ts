@@ -14,6 +14,7 @@
  */
 
 import { createHash } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import { decodeJwtPayload } from './jwt.js'
 import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
@@ -21,10 +22,10 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { parseJsonText } from '../json-text.js'
 
 /** Provider routes this plugin can serve. */
-export type ProviderId = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity' | 'qwen'
+export type ProviderId = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity' | 'qwen-subscription'
 
 /** Every provider route, in display order. */
-export const PROVIDER_IDS: readonly ProviderId[] = ['codex', 'claude', 'grok', 'copilot', 'antigravity', 'qwen']
+export const PROVIDER_IDS: readonly ProviderId[] = ['codex', 'claude', 'grok', 'copilot', 'antigravity', 'qwen-subscription']
 
 /** Stored ChatGPT/Codex subscription session. */
 export interface CodexSession {
@@ -133,7 +134,7 @@ export interface SessionMap {
   grok?: ProviderAccounts<GrokSession>
   copilot?: ProviderAccounts<CopilotSession>
   antigravity?: ProviderAccounts<AntigravitySession>
-  qwen?: ProviderAccounts<QwenSession>
+  'qwen-subscription'?: ProviderAccounts<QwenSession>
 }
 
 /** Any stored session, for provider-agnostic plumbing. */
@@ -183,7 +184,7 @@ export function accountKeyOf(provider: ProviderId, session: StoredSession): stri
       return (session as AntigravitySession).account ?? tokenHash(session.refreshToken)
     case 'copilot':
       return (session as CopilotSession).account ?? tokenHash(session.refreshToken)
-    case 'qwen':
+    case 'qwen-subscription':
       return (session as QwenSession).account ?? tokenHash(session.refreshToken)
   }
 }
@@ -381,9 +382,14 @@ function parseStore(text: string, path: string): SessionMap {
     throw new Error(`subscriptions auth store at ${path} must be a JSON object keyed by provider; fix or delete the file`)
   }
   const raw = parsed as Record<string, unknown>
-  const store: SessionMap = {}
-  for (const provider of PROVIDER_IDS) {
-    const entry = raw[provider]
+  // Preserve unknown providers verbatim when another provider is updated.
+  const store = { ...raw } as SessionMap
+  let legacyQwen: ProviderAccounts<QwenSession> | undefined
+  const providers = [...PROVIDER_IDS, 'qwen' as const]
+  for (const rawProvider of providers) {
+    const provider: ProviderId = rawProvider === 'qwen' ? 'qwen-subscription' : rawProvider
+    if (rawProvider !== 'qwen') delete (store as Record<string, unknown>)[provider]
+    const entry = raw[rawProvider]
     if (entry === undefined) continue
     if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
       console.warn(`subscriptions auth store: entry "${provider}" is not an object; skipped`)
@@ -398,7 +404,9 @@ function parseStore(text: string, path: string): SessionMap {
       }
       const session = record as unknown as StoredSession
       const key = provider === 'codex' ? (session as CodexSession).accountId : accountKeyOf(provider, session)
-      ;(store as Record<string, unknown>)[provider] = { default: key, accounts: { [key]: session } }
+      const wrapped = { default: key, accounts: { [key]: session } }
+      if (rawProvider === 'qwen') legacyQwen = wrapped as ProviderAccounts<QwenSession>
+      else (store as Record<string, unknown>)[provider] = wrapped
       continue
     }
     const accounts = record.accounts
@@ -413,7 +421,7 @@ function parseStore(text: string, path: string): SessionMap {
     const kept: Record<string, StoredSession> = {}
     for (const [account, session] of Object.entries(accounts)) {
       if (isValidSessionShape(session)) {
-        kept[account] = session as StoredSession
+        Object.defineProperty(kept, account, { value: session, enumerable: true, writable: true, configurable: true })
       } else {
         console.warn(
           `subscriptions auth store: entry "${provider}/${account}" has no usable accessToken/refreshToken/expiresAt; skipped`,
@@ -421,13 +429,73 @@ function parseStore(text: string, path: string): SessionMap {
       }
     }
     if (Object.keys(kept).length === 0) continue
-    const validDefault = record.default === undefined || record.default in kept
+    const validDefault = record.default === undefined || Object.hasOwn(kept, record.default)
       ? record.default as string | undefined
       : Object.keys(kept)[0]
-    ;(store as Record<string, unknown>)[provider] = { ...record, default: validDefault, accounts: kept }
+    const normalized = { ...record, default: validDefault, accounts: kept }
+    if (rawProvider === 'qwen') legacyQwen = normalized as ProviderAccounts<QwenSession>
+    else (store as Record<string, unknown>)[provider] = normalized
+  }
+  if (legacyQwen !== undefined) {
+    store['qwen-subscription'] = mergeLegacyQwen(store['qwen-subscription'], legacyQwen)
+    delete (store as Record<string, unknown>).qwen
   }
   if (store.codex !== undefined) migrateCodex(store.codex)
   return store
+}
+
+/**
+ * Merge the plugin's old Qwen entry into its renamed route. Never overwrite a
+ * distinct credential when both shapes coexist. Current keys/default/aliases
+ * win; a colliding legacy account gets a deterministic non-secret spare key.
+ * The old key is removed on the next atomic write, so logout cannot resurrect it.
+ */
+function mergeLegacyQwen(
+  current: ProviderAccounts<QwenSession> | undefined,
+  legacy: ProviderAccounts<QwenSession>,
+): ProviderAccounts<QwenSession> {
+  if (current === undefined) return legacy
+  const accounts = { ...current.accounts }
+  const aliases = { ...current.aliases }
+  const reserved = new Set([
+    ...Object.keys(current.accounts), ...Object.keys(legacy.accounts),
+    ...Object.keys(current.aliases ?? {}), ...Object.keys(legacy.aliases ?? {}),
+  ])
+  const renamed = new Map<string, string>()
+  for (const [key, session] of Object.entries(legacy.accounts)) {
+    let destination = key
+    if (Object.hasOwn(accounts, key)) {
+      if (isDeepStrictEqual(accounts[key], session)) { renamed.set(key, key); continue }
+      const base = key + ' (legacy qwen)'
+      destination = base
+      let suffix = 2
+      while (reserved.has(destination)) destination = base + ' ' + suffix++
+      reserved.add(destination)
+    } else if (Object.hasOwn(current.aliases ?? {}, key)) {
+      // A current alias has priority too; do not shadow its existing target.
+      const base = key + ' (legacy qwen)'
+      destination = base
+      let suffix = 2
+      while (reserved.has(destination)) destination = base + ' ' + suffix++
+      reserved.add(destination)
+    }
+    Object.defineProperty(accounts, destination, { value: session, enumerable: true, writable: true, configurable: true })
+    renamed.set(key, destination)
+  }
+  // Resolve old aliases through the old entry before mapping any renamed key.
+  // Conflicting current aliases or account keys always keep their old meaning.
+  for (const [alias, target] of Object.entries(legacy.aliases ?? {})) {
+    if (Object.hasOwn(current.aliases ?? {}, alias) || Object.hasOwn(current.accounts, alias)) continue
+    const resolved = resolveAccount(legacy, target)
+    const mapped = renamed.get(resolved)
+    if (mapped !== undefined) Object.defineProperty(aliases, alias, { value: mapped, enumerable: true, writable: true, configurable: true })
+  }
+  const defaultKey = current.default ?? (legacy.default === undefined ? undefined : renamed.get(legacy.default))
+  return {
+    ...legacy, ...current, accounts,
+    ...(defaultKey === undefined ? {} : { default: defaultKey }),
+    ...(Object.keys(aliases).length === 0 ? {} : { aliases }),
+  }
 }
 
 /** Whether a value carries the fields every stored session needs (non-empty tokens). */
@@ -546,6 +614,20 @@ export async function saveAccountSession<K extends ProviderId>(
   return serialize(path, async () => {
     const store = await loadStore(path)
     const entry = store[provider] as ProviderAccounts<SessionOf<K>> | undefined
+    if (provider === 'qwen-subscription' && entry !== undefined) {
+      // Two credentials can share a display identity after a legacy/new merge.
+      // Relogin cannot safely choose which one to replace until resolved by the user.
+      const identity = accountKeyOf('qwen-subscription', session as unknown as QwenSession)
+      const matches = Object.entries(entry.accounts).filter(([, stored]) => accountKeyOf('qwen-subscription', stored as unknown as QwenSession) === identity)
+      if (matches.length > 1) throw new Error('Qwen account identity is ambiguous; log out the duplicate account before logging in again')
+      if (account === identity && matches.length === 1) {
+        const resolved = resolveAccount(entry, account)
+        if (Object.hasOwn(entry.accounts, resolved) && resolved !== matches[0][0]) {
+          throw new Error('Qwen account identity conflicts with an existing account; resolve the duplicate before logging in again')
+        }
+        account = matches[0][0]
+      }
+    }
     if (entry !== undefined) {
       account = resolveAccount(entry, account)
       if (provider === 'codex') {
@@ -581,14 +663,14 @@ export async function compareAndSaveQwenAccount(
 ): Promise<QwenSession | undefined> {
   return serialize(path, async () => {
     const store = await loadStore(path)
-    const entry = store.qwen
+    const entry = store['qwen-subscription']
     if (entry === undefined) return undefined
     const key = resolveAccount(entry, account)
     if (!Object.hasOwn(entry.accounts, key)) return undefined
     const current = entry.accounts[key]
     if (current.refreshToken !== expectedRefreshToken) return current
-    assertSessionShape('qwen', key, next)
-    store.qwen = { ...entry, accounts: { ...entry.accounts, [key]: next } }
+    assertSessionShape('qwen-subscription', key, next)
+    store['qwen-subscription'] = { ...entry, accounts: { ...entry.accounts, [key]: next } }
     await writeStore(store, path)
     return next
   })
@@ -607,16 +689,16 @@ export async function compareAndDeleteQwenAccount(
 ): Promise<boolean> {
   return serialize(path, async () => {
     const store = await loadStore(path)
-    const entry = store.qwen
+    const entry = store['qwen-subscription']
     if (entry === undefined) return false
     const key = resolveAccount(entry, account)
     if (!Object.hasOwn(entry.accounts, key) || entry.accounts[key].refreshToken !== expectedRefreshToken) return false
     const accounts = { ...entry.accounts }
     delete accounts[key]
     if (Object.keys(accounts).length === 0) {
-      delete store.qwen
+      delete store['qwen-subscription']
     } else {
-      store.qwen = {
+      store['qwen-subscription'] = {
         ...entry,
         ...(entry.default === key ? { default: Object.keys(accounts)[0] } : {}),
         accounts,
@@ -640,7 +722,7 @@ export async function deleteAndReturnQwenAccount(
 ): Promise<QwenSession | undefined> {
   return serialize(path, async () => {
     const store = await loadStore(path)
-    const entry = store.qwen
+    const entry = store['qwen-subscription']
     if (entry === undefined) return undefined
     const key = resolveAccount(entry, account)
     if (!Object.hasOwn(entry.accounts, key)) return undefined
@@ -648,9 +730,9 @@ export async function deleteAndReturnQwenAccount(
     const accounts = { ...entry.accounts }
     delete accounts[key]
     if (Object.keys(accounts).length === 0) {
-      delete store.qwen
+      delete store['qwen-subscription']
     } else {
-      store.qwen = {
+      store['qwen-subscription'] = {
         ...entry,
         ...(entry.default === key ? { default: Object.keys(accounts)[0] } : {}),
         accounts,

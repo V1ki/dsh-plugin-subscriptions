@@ -156,7 +156,7 @@ export class AccountTokenManager<S extends TimedSession> {
       get: account => getAccountSession(provider, account) as Promise<S | undefined>,
       save: (account, session) => saveAccountSession(provider, account, session as never),
       remove: account => deleteAccountSession(provider, account),
-      ...provider === 'qwen' ? {
+      ...provider === 'qwen-subscription' ? {
         compareAndSave: (account: string, expected: string, next: S) =>
           compareAndSaveQwenAccount(account, expected, next as import('../auth/store.js').QwenSession) as Promise<S | undefined>,
         compareAndDelete: (account: string, expected: string) => compareAndDeleteQwenAccount(account, expected),

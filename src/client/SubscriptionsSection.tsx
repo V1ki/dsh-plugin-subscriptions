@@ -41,7 +41,7 @@ const POLL_INTERVAL_MS = 2000
 const MODEL_FILTER_THRESHOLD = 8
 
 /** Subscription provider ids, fixed by the node half's OAuth adapters. */
-export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity' | 'qwen'
+export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity' | 'qwen-subscription'
 
 /** One logged-in account as answered by the `status` endpoint. */
 export interface AccountStatus {
@@ -154,7 +154,7 @@ export interface ProxyTestResult {
 /** `login` endpoint value: the URL the user completes OAuth at. */
 interface LoginResponse {
   authorizeUrl: string
-  /** Device-flow providers (copilot): the code the user types at authorizeUrl. */
+  /** Device-flow providers (Copilot, Qwen): the code the user types at authorizeUrl. */
   userCode?: string
 }
 
@@ -179,7 +179,7 @@ const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [
   { id: 'grok', name: 'Grok (X Premium)' },
   { id: 'copilot', name: 'GitHub Copilot' },
   { id: 'antigravity', name: 'Google Antigravity' },
-  { id: 'qwen', name: 'Qwen' },
+  { id: 'qwen-subscription', name: 'Qwen' },
 ]
 
 /** Sort the visible provider names within connected and disconnected groups. */
@@ -516,9 +516,9 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [errors, setErrors] = useState<Partial<Record<SubscriptionProvider, string>>>({})
   const [statusError, setStatusError] = useState<string>()
   const [manualDrafts, setManualDrafts] = useState<Record<SubscriptionProvider, string>>({
-    codex: '', claude: '', grok: '', copilot: '', antigravity: '', qwen: '',
+    codex: '', claude: '', grok: '', copilot: '', antigravity: '', 'qwen-subscription': '',
   })
-  /** Pending device-flow codes (copilot), shown while the attempt polls. */
+  /** Pending device-flow codes (Copilot, Qwen), shown while the attempt polls. */
   const [deviceCodes, setDeviceCodes] = useState<Partial<Record<SubscriptionProvider, { userCode: string; verificationUrl: string }>>>({})
   const [copiedCode, setCopiedCode] = useState<SubscriptionProvider | undefined>(undefined)
   /** Usage snapshots keyed `${provider}:${accountKey}` — every account tracks its own windows. */
@@ -1157,10 +1157,10 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 </div>
               </div>
             )}
-            {busy && deviceCode === undefined && (id === 'qwen' || id === 'copilot') && (
+            {busy && deviceCode === undefined && (id === 'qwen-subscription' || id === 'copilot') && (
               <p style={styles.statusLine}>{t('deviceCodeUnavailable')}</p>
             )}
-            {busy && deviceCode === undefined && id !== 'qwen' && id !== 'copilot' && (
+            {busy && deviceCode === undefined && id !== 'qwen-subscription' && id !== 'copilot' && (
               <details style={styles.manual}>
                 <summary>{t('manualSummary')}</summary>
                 <div style={styles.manualRow}>

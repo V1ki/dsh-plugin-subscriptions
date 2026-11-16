@@ -16,7 +16,7 @@ function harness(refresh?: (account: string, current: QwenSession) => Promise<Qw
   const stored = new Map<string, QwenSession>([['a', session('a-token')], ['b', session('b-token')]])
   const refreshes: string[] = []
   const tokens = new AccountTokenManager<QwenSession>({
-    provider: 'qwen', displayName: 'Qwen',
+    provider: 'qwen-subscription', displayName: 'Qwen',
     makeOptions: account => ({
       preemptMs: 60_000,
       refresh: async current => {
@@ -51,7 +51,7 @@ function harness(refresh?: (account: string, current: QwenSession) => Promise<Qw
 const json = (data: unknown, status = 200): Response => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } })
 const data = (...models: { id: string; input_modalities?: string[]; context_window_tokens?: number }[]): Response => json({ data: models })
 const okStream = (): Response => new Response('data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n\ndata: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
-const OPTIONS: GenerateOptions = { provider: 'qwen', model: 'shared', messages: [] }
+const OPTIONS: GenerateOptions = { provider: 'qwen-subscription', model: 'shared', messages: [] }
 const bearer = (init?: RequestInit): string | null => new Headers(init?.headers).get('authorization')
 async function collect(stream: AsyncIterable<StreamChunk>): Promise<StreamChunk[]> {
   const chunks: StreamChunk[] = []
@@ -74,11 +74,11 @@ test('catalogs and capability metadata are isolated by account and union default
       : data({ id: 'shared', context_window_tokens: 40, input_modalities: ['text', 'image'] }, { id: 'only-b', context_window_tokens: 80 })
   }
   const adapter = new QwenAccountAdapter({ tokens: h.tokens, streamIdleTimeoutMs: 1000, fetchFn })
-  assert.deepEqual((await adapter.listOwnModels('qwen')).map(m => m.id), ['shared', 'only-a', 'only-b'])
-  assert.equal((await adapter.resolveOwnModel('qwen', 'shared', 'old-a')).context?.contextWindow, 100)
-  assert.equal((await adapter.resolveOwnModel('qwen', 'shared', 'b')).context?.contextWindow, 40)
-  assert.equal((await adapter.resolveOwnModel('qwen', 'only-b')).context?.contextWindow, 80)
-  await assert.rejects(adapter.resolveOwnModel('qwen', 'only-b', 'a'), /unavailable/)
+  assert.deepEqual((await adapter.listOwnModels('qwen-subscription')).map(m => m.id), ['shared', 'only-a', 'only-b'])
+  assert.equal((await adapter.resolveOwnModel('qwen-subscription', 'shared', 'old-a')).context?.contextWindow, 100)
+  assert.equal((await adapter.resolveOwnModel('qwen-subscription', 'shared', 'b')).context?.contextWindow, 40)
+  assert.equal((await adapter.resolveOwnModel('qwen-subscription', 'only-b')).context?.contextWindow, 80)
+  await assert.rejects(adapter.resolveOwnModel('qwen-subscription', 'only-b', 'a'), /unavailable/)
   assert.equal(calls.length, 2, 'preferCached does not refetch during resolution')
   assert.deepEqual((await adapter.listOwnModels('another-route', 'b', undefined, true)).map(m => m.provider), ['another-route', 'another-route'])
 })
@@ -90,15 +90,15 @@ test('account invalidation drops only its catalog, including through a known ali
     return token === 'Bearer a-token' ? data({ id: 'a-' + aVersion }) : data({ id: 'b' })
   }
   const adapter = new QwenAccountAdapter({ tokens: h.tokens, streamIdleTimeoutMs: 1000, fetchFn })
-  await adapter.listOwnModels('qwen')
-  await adapter.listOwnModels('qwen', 'old-a', undefined, true)
+  await adapter.listOwnModels('qwen-subscription')
+  await adapter.listOwnModels('qwen-subscription', 'old-a', undefined, true)
   aVersion = 2; adapter.clearAccountCatalog('old-a')
-  assert.equal(await adapter.lastKnownOwnModels('qwen', 'a'), undefined)
-  assert.deepEqual((await adapter.listOwnModels('qwen', 'b', undefined, true)).map(m => m.id), ['b'])
-  assert.deepEqual((await adapter.listOwnModels('qwen', 'a', undefined, true)).map(m => m.id), ['a-2'])
+  assert.equal(await adapter.lastKnownOwnModels('qwen-subscription', 'a'), undefined)
+  assert.deepEqual((await adapter.listOwnModels('qwen-subscription', 'b', undefined, true)).map(m => m.id), ['b'])
+  assert.deepEqual((await adapter.listOwnModels('qwen-subscription', 'a', undefined, true)).map(m => m.id), ['a-2'])
   assert.deepEqual(calls, ['Bearer a-token', 'Bearer b-token', 'Bearer a-token'])
   adapter.clearAccountCatalog()
-  assert.equal(await adapter.lastKnownOwnModels('qwen', 'b'), undefined)
+  assert.equal(await adapter.lastKnownOwnModels('qwen-subscription', 'b'), undefined)
 })
 
 test('forced catalog refresh retains fallback and bypasses preferCached', async () => {
@@ -108,28 +108,28 @@ test('forced catalog refresh retains fallback and bypasses preferCached', async 
     return state === 'live' ? data({ id: 'model' }) : json({}, state === 'down' ? 503 : 403)
   }
   const adapter = new QwenAccountAdapter({ tokens: h.tokens, streamIdleTimeoutMs: 1000, fetchFn })
-  await adapter.listOwnModels('qwen', 'a')
+  await adapter.listOwnModels('qwen-subscription', 'a')
   state = 'down'; adapter.invalidateAccountCatalog('a')
-  assert.deepEqual((await adapter.lastKnownOwnModels('qwen', 'a'))?.map(m => m.id), ['model'])
-  assert.deepEqual((await adapter.listOwnModels('qwen', 'a', undefined, true)).map(m => m.id), ['model'])
+  assert.deepEqual((await adapter.lastKnownOwnModels('qwen-subscription', 'a'))?.map(m => m.id), ['model'])
+  assert.deepEqual((await adapter.listOwnModels('qwen-subscription', 'a', undefined, true)).map(m => m.id), ['model'])
   assert.equal(calls, 2)
   state = 'denied'
   // A 503 fallback must not mark the forced refresh complete.
-  await assert.rejects(adapter.listOwnModels('qwen', 'a', undefined, true), /403/)
-  await assert.rejects(adapter.lastKnownOwnModels('qwen', 'a'), /403/)
+  await assert.rejects(adapter.listOwnModels('qwen-subscription', 'a', undefined, true), /403/)
+  await assert.rejects(adapter.lastKnownOwnModels('qwen-subscription', 'a'), /403/)
 })
 
 test('invalidation during in-flight discovery cannot restore obsolete catalog', async () => {
   const h = harness(); const started = deferred<void>(); const pending = deferred<Response>(); let count = 0
   const fetchFn: typeof fetch = async () => { count++; if (count === 1) { started.resolve(); return pending.promise }; return data({ id: 'fresh' }) }
   const adapter = new QwenAccountAdapter({ tokens: h.tokens, streamIdleTimeoutMs: 1000, fetchFn })
-  const old = adapter.listOwnModels('qwen', 'a')
+  const old = adapter.listOwnModels('qwen-subscription', 'a')
   await started.promise
   adapter.clearAccountCatalog('a')
-  assert.deepEqual((await adapter.listOwnModels('qwen', 'a')).map(m => m.id), ['fresh'])
+  assert.deepEqual((await adapter.listOwnModels('qwen-subscription', 'a')).map(m => m.id), ['fresh'])
   pending.resolve(data({ id: 'old' }))
   assert.deepEqual(await old, [])
-  assert.deepEqual((await adapter.lastKnownOwnModels('qwen', 'a'))?.map(m => m.id), ['fresh'])
+  assert.deepEqual((await adapter.lastKnownOwnModels('qwen-subscription', 'a'))?.map(m => m.id), ['fresh'])
 })
 
 test('capability-only catalog changes notify the pool', async () => {
@@ -138,13 +138,13 @@ test('capability-only catalog changes notify the pool', async () => {
   const adapter = new QwenAccountAdapter({
     tokens: h.tokens, streamIdleTimeoutMs: 1000, fetchFn, onCatalogChanged: () => { changes++ },
   })
-  await adapter.listOwnModels('qwen', 'a')
+  await adapter.listOwnModels('qwen-subscription', 'a')
   assert.equal(changes, 1)
   contextWindow = 40
   adapter.invalidateAccountCatalog('a')
-  await adapter.listOwnModels('qwen', 'a', undefined, true)
+  await adapter.listOwnModels('qwen-subscription', 'a', undefined, true)
   assert.equal(changes, 2)
-  assert.equal((await adapter.resolveOwnModel('qwen', 'shared', 'a')).context?.contextWindow, 40)
+  assert.equal((await adapter.resolveOwnModel('qwen-subscription', 'shared', 'a')).context?.contextWindow, 40)
 })
 
 test('forced refresh during active discovery triggers another request', async () => {
@@ -155,15 +155,15 @@ test('forced refresh during active discovery triggers another request', async ()
     return data({ id: calls === 1 ? 'original' : 'fresh' })
   }
   const adapter = new QwenAccountAdapter({ tokens: h.tokens, streamIdleTimeoutMs: 1000, fetchFn })
-  await adapter.listOwnModels('qwen', 'a')
-  const old = adapter.listOwnModels('qwen', 'a')
+  await adapter.listOwnModels('qwen-subscription', 'a')
+  const old = adapter.listOwnModels('qwen-subscription', 'a')
   await started.promise; adapter.invalidateAccountCatalog('a')
-  const fresh = adapter.listOwnModels('qwen', 'a', undefined, true)
-  assert.deepEqual((await adapter.lastKnownOwnModels('qwen', 'a'))?.map(m => m.id), ['original'])
+  const fresh = adapter.listOwnModels('qwen-subscription', 'a', undefined, true)
+  assert.deepEqual((await adapter.lastKnownOwnModels('qwen-subscription', 'a'))?.map(m => m.id), ['original'])
   gate.resolve(data({ id: 'outdated' }))
   assert.deepEqual((await old).map(m => m.id), ['fresh'])
   assert.deepEqual((await fresh).map(m => m.id), ['fresh'])
-  assert.deepEqual((await adapter.lastKnownOwnModels('qwen', 'a'))?.map(m => m.id), ['fresh'])
+  assert.deepEqual((await adapter.lastKnownOwnModels('qwen-subscription', 'a'))?.map(m => m.id), ['fresh'])
   assert.equal(calls, 3)
 })
 
@@ -245,15 +245,15 @@ test('AUTH invalidates cached catalog and propagates; a healthy account still li
   }
   let changes = 0
   const adapter = new QwenAccountAdapter({ tokens: h.tokens, streamIdleTimeoutMs: 1000, fetchFn, onCatalogChanged: () => { changes++ } })
-  await adapter.listOwnModels('qwen', 'a'); deny = true
+  await adapter.listOwnModels('qwen-subscription', 'a'); deny = true
   assert.equal(changes, 1)
-  await assert.rejects(adapter.listOwnModels('qwen', 'a'), /403/)
+  await assert.rejects(adapter.listOwnModels('qwen-subscription', 'a'), /403/)
   assert.equal(changes, 2, 'a rejected cached catalog invalidates the pool snapshot')
-  await assert.rejects(adapter.lastKnownOwnModels('qwen', 'a'), /403/)
-  assert.deepEqual((await adapter.listOwnModels('qwen')).map(m => m.id), ['public'])
+  await assert.rejects(adapter.lastKnownOwnModels('qwen-subscription', 'a'), /403/)
+  assert.deepEqual((await adapter.listOwnModels('qwen-subscription')).map(m => m.id), ['public'])
   h.stored.delete('b')
-  await assert.rejects(adapter.listOwnModels('qwen'), /403/)
-  await assert.rejects(adapter.resolveModel('qwen', 'private'), /403/)
+  await assert.rejects(adapter.listOwnModels('qwen-subscription'), /403/)
+  await assert.rejects(adapter.resolveModel('qwen-subscription', 'private'), /403/)
 })
 
 test('pool delegates resolution/stream, keeps per-member capabilities and fails over', async () => {
@@ -266,13 +266,13 @@ test('pool delegates resolution/stream, keeps per-member capabilities and fails 
   }
   let pool: PoolAdapter | undefined
   const adapter = new QwenAccountAdapter({ tokens: h.tokens, streamIdleTimeoutMs: 1000, fetchFn, pool: () => pool })
-  const catalogs = await Promise.all(['a', 'b'].map(async account => ({ account, models: await adapter.listOwnModels('qwen', account) })))
+  const catalogs = await Promise.all(['a', 'b'].map(async account => ({ account, models: await adapter.listOwnModels('qwen-subscription', account) })))
   pool = new PoolAdapter({
-    adapters: { qwen: adapter }, health: new PoolHealthRegistry(), usage: new PoolUsageTracker(() => undefined),
+    adapters: { 'qwen-subscription': adapter }, health: new PoolHealthRegistry(), usage: new PoolUsageTracker(() => undefined),
     strategy: 'priority', switchMargin: 2, defaultAccount: async () => 'a',
-    families: async () => buildAccountPools({ qwen: { catalogs } }), tiers: {}, onWarn: () => {},
+    families: async () => buildAccountPools({ 'qwen-subscription': { catalogs } }), tiers: {}, onWarn: () => {},
   })
-  assert.equal((await adapter.resolveModel('qwen', 'shared')).context?.contextWindow, 40)
+  assert.equal((await adapter.resolveModel('qwen-subscription', 'shared')).context?.contextWindow, 40)
   assert.ok((await collect(adapter.stream(OPTIONS))).some(c => c.type === 'text-delta'))
   assert.deepEqual(streams, ['Bearer a-token', 'Bearer b-token'])
 })
@@ -288,7 +288,7 @@ test('wrapper exposes and applies the configured default reasoning effort', asyn
     tokens: h.tokens, streamIdleTimeoutMs: 1000, fetchFn,
     defaultEffortOf: model => model === 'shared' ? 'high' : undefined,
   })
-  const resolved = await adapter.resolveOwnModel('qwen', 'shared', 'a')
+  const resolved = await adapter.resolveOwnModel('qwen-subscription', 'shared', 'a')
   assert.equal(resolved.reasoning?.defaultEffort, 'high')
   assert.ok(resolved.reasoning?.efforts.some(effort => effort.id === 'high'))
   await collect(adapter.streamAccount(OPTIONS, 'a'))
@@ -302,9 +302,9 @@ test('a stalled account times out without blocking a healthy account', async () 
   const adapter = new QwenAccountAdapter({ tokens: h.tokens, streamIdleTimeoutMs: 1000, fetchFn, discoveryTimeoutMs: 20 })
   // AbortSignal.timeout timers are unref'ed; keep the event loop alive briefly.
   const keepAlive = setTimeout(() => {}, 2000)
-  try { assert.deepEqual((await adapter.listOwnModels('qwen')).map(m => m.id), ['healthy']) }
+  try { assert.deepEqual((await adapter.listOwnModels('qwen-subscription')).map(m => m.id), ['healthy']) }
   finally { clearTimeout(keepAlive); stalled.resolve(data({ id: 'late' })) }
-  assert.equal(await adapter.lastKnownOwnModels('qwen', 'a'), undefined)
+  assert.equal(await adapter.lastKnownOwnModels('qwen-subscription', 'a'), undefined)
 })
 
 test('cancelling resolveModel aborts discovery and cannot publish late results', async () => {
@@ -312,13 +312,13 @@ test('cancelling resolveModel aborts discovery and cannot publish late results',
   const started = deferred<AbortSignal>(); const gate = deferred<Response>()
   const fetchFn: typeof fetch = async (_url, init) => { started.resolve(init!.signal!); return gate.promise }
   const adapter = new QwenAccountAdapter({ tokens: h.tokens, streamIdleTimeoutMs: 1000, fetchFn })
-  const controller = new AbortController(); const pending = adapter.resolveModel('qwen', 'shared', controller.signal)
+  const controller = new AbortController(); const pending = adapter.resolveModel('qwen-subscription', 'shared', controller.signal)
   const fetchSignal = await started.promise
   controller.abort(new Error('resolve cancelled'))
   await assert.rejects(pending, /resolve cancelled/)
   assert.equal(fetchSignal.aborted, true)
   gate.resolve(data({ id: 'shared' }))
-  assert.equal(await adapter.lastKnownOwnModels('qwen', 'a'), undefined)
+  assert.equal(await adapter.lastKnownOwnModels('qwen-subscription', 'a'), undefined)
 })
 
 test('cancelled catalog request settles without accepting a late response', async () => {
@@ -329,11 +329,11 @@ test('cancelled catalog request settles without accepting a late response', asyn
     return data({ id: calls === 1 ? 'known' : 'fresh' })
   }
   const adapter = new QwenAccountAdapter({ tokens: h.tokens, streamIdleTimeoutMs: 1000, fetchFn })
-  await adapter.listOwnModels('qwen', 'a')
-  const controller = new AbortController(); const pending = adapter.listOwnModels('qwen', 'a', controller.signal)
+  await adapter.listOwnModels('qwen-subscription', 'a')
+  const controller = new AbortController(); const pending = adapter.listOwnModels('qwen-subscription', 'a', controller.signal)
   await started.promise; controller.abort(new Error('cancelled'))
   await assert.rejects(pending, /cancelled/)
   gate.resolve(data({ id: 'late' }))
-  assert.deepEqual((await adapter.lastKnownOwnModels('qwen', 'a'))?.map(m => m.id), ['known'])
-  assert.deepEqual((await adapter.listOwnModels('qwen', 'a')).map(m => m.id), ['fresh'])
+  assert.deepEqual((await adapter.lastKnownOwnModels('qwen-subscription', 'a'))?.map(m => m.id), ['known'])
+  assert.deepEqual((await adapter.listOwnModels('qwen-subscription', 'a')).map(m => m.id), ['fresh'])
 })

@@ -20,6 +20,8 @@ Antigravity usage keeps explicitly reported shared limits from `retrieveUserQuot
 
 ## Qwen subscription (draft)
 
+The subscription route is `qwen-subscription`, distinct from the host API provider `qwen`. This prevents a duplicate route from blocking activation of other API model providers.
+
 Connect a Plus or Pro account at **Settings → Subscriptions → Qwen**. Open the verification page and confirm that the displayed device code matches before authorizing. The plugin stores the subscription's OAuth token pair locally and renews it as needed; no API key is required. Qwen's legacy free OAuth allowance was discontinued and is not used by this integration. QwenCloud and Alibaba ModelStudio API keys are separate products.
 
 Qwen model IDs are discovered from the signed-in account rather than a built-in model list. If discovery fails before a successful load, the plugin cannot show a model catalog. There is no server-provided subscription-usage readout. Logout removes the local session and attempts remote revocation; if remote revocation fails, local logout still applies and the error is reported.
@@ -89,7 +91,7 @@ The `video_generate` tool plays the generated clip inline:
 | `grok`   | X Premium (xAI)   | live catalog from `api.x.ai/v1/models` (chat models only); reasoning efforts from the Grok CLI catalog (`cli-chat-proxy.grok.com/v1/models`) |
 | `copilot` | GitHub Copilot   | live catalog from `api.githubcopilot.com/models` (chat models on both wires, with per-model vision flags and reasoning efforts); login uses the OAuth device flow (enter the shown code at `github.com/login/device`) |
 | `antigravity` | Google Antigravity | live catalog from Antigravity `v1internal:fetchAvailableModels`; requests use `generateContent` / `streamGenerateContent` with text, image, streaming reasoning, and tool-call conversion |
-| `qwen` | Qwen Plus/Pro subscription | live catalog from the Qwen subscription gateway; device OAuth and OpenAI-compatible streaming chat completions |
+| `qwen-subscription` | Qwen Plus/Pro subscription | live catalog from the Qwen subscription gateway; device OAuth and OpenAI-compatible streaming chat completions |
 
 Only logged-in providers appear in the session model picker; the lists above refresh on login/logout. Vision-capable models declare `['text', 'image']` input modalities, and image content is translated to each provider's wire format.
 

@@ -75,7 +75,10 @@ function sanitizeDefaults(value: unknown): { defaults: ModelDefaults; dropped: s
   const result: Partial<Record<ProviderId, ModelDefaultMap>> = {}
   const dropped: string[] = []
   for (const provider of PROVIDER_IDS) {
-    const section = sanitizeProvider(record[provider], dropped)
+    // The early draft used qwen, which collides with the host API provider.
+    // Preserve its plugin-local defaults unless the new route already has its own.
+    const section = sanitizeProvider(provider === 'qwen-subscription'
+      ? record[provider] ?? record.qwen : record[provider], dropped)
     if (section !== undefined) result[provider] = section
   }
   return { defaults: Object.freeze(result), dropped }

@@ -211,7 +211,8 @@ test('provider ordering stays independent from model-window filtering', () => {
 test('non-subscription selections retain only the last subscription and its model scope', () => {
   const codex = { provider: 'codex', model: 'gpt-test' }
   const anti = { provider: 'antigravity', model: 'gemini-model-59' }
-  const qwen = { provider: 'qwen', model: 'qwen-test' }
+  const qwen = { provider: 'qwen-subscription', model: 'qwen-test' }
+  const qwenApi = { provider: 'qwen', model: 'qwen-test' }
   const api = { provider: 'deepseek', model: 'deepseek-chat' }
   assert.equal(retainSubscriptionSelection(undefined, api), undefined)
   assert.equal(retainSubscriptionSelection(undefined, undefined), undefined)
@@ -220,7 +221,11 @@ test('non-subscription selections retain only the last subscription and its mode
   assert.equal(retainSubscriptionSelection(codex, anti), anti)
   assert.equal(retainSubscriptionSelection(anti, qwen), qwen)
   assert.equal(retainSubscriptionSelection(qwen, api), qwen)
-  assert.deepEqual(collapsedDisplays([display('qwen')], qwen.provider).map(d => d.provider), ['qwen'])
+  const qwenDisplay = display('qwen-subscription')
+  assert.deepEqual(collapsedDisplays([qwenDisplay], qwen.provider), [qwenDisplay])
+  assert.deepEqual(collapsedDisplays([qwenDisplay], qwenApi.provider), [])
+  assert.equal(retainSubscriptionSelection(undefined, qwenApi), undefined, 'the unrelated Qwen API route is not a subscription')
+  assert.equal(retainSubscriptionSelection(codex, qwenApi), codex)
   assert.equal(retainSubscriptionSelection(anti, api), anti)
   assert.equal(retainSubscriptionSelection(anti, undefined), anti)
   assert.deepEqual(collapsedDisplays([display('codex'), display()], retainSubscriptionSelection(anti, api)?.provider).map(d => d.provider), ['antigravity'])

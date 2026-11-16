@@ -26,20 +26,20 @@ function gate<T>() {
 async function fixture(refresh: (session: QwenSession) => Promise<QwenSession>, initial = session('old', -1)) {
   const dir = await mkdtemp(join(tmpdir(), 'qwen-cas-races-'))
   const path = join(dir, 'auth.json')
-  await saveAccountSession('qwen', key, initial, path)
+  await saveAccountSession('qwen-subscription', key, initial, path)
   const notifications: string[] = []
   const makeTokens = () => new AccountTokenManager<QwenSession>({
-    provider: 'qwen', displayName: 'Qwen',
+    provider: 'qwen-subscription', displayName: 'Qwen',
     makeOptions: () => ({ preemptMs: 60_000, refresh, isPermanent: isQwenPermanentRefreshError }),
     onAccountRemoved: account => { notifications.push(account) },
     io: {
-      list: () => listAccounts('qwen', path),
-      get: account => getAccountSession('qwen', account, path),
-      save: (account, next) => saveAccountSession('qwen', account, next, path),
-      remove: account => deleteAccountSession('qwen', account, path),
+      list: () => listAccounts('qwen-subscription', path),
+      get: account => getAccountSession('qwen-subscription', account, path),
+      save: (account, next) => saveAccountSession('qwen-subscription', account, next, path),
+      remove: account => deleteAccountSession('qwen-subscription', account, path),
       compareAndSave: (account, expected, next) => compareAndSaveQwenAccount(account, expected, next, path),
       compareAndDelete: (account, expected) => compareAndDeleteQwenAccount(account, expected, path),
-      resolve: account => resolveAccountKey('qwen', account, path),
+      resolve: account => resolveAccountKey('qwen-subscription', account, path),
     },
   })
   return { path, tokens: makeTokens(), makeTokens, notifications, close: () => rm(dir, { recursive: true, force: true }) }
@@ -54,10 +54,10 @@ test('successful refresh cannot resurrect a logged-out Qwen account', async () =
   try {
     const pending = f.tokens.session(key)
     await entered.promise
-    await deleteAccountSession('qwen', key, f.path)
+    await deleteAccountSession('qwen-subscription', key, f.path)
     finish.resolve(session('rotated'))
     await assert.rejects(pending, hasCode('MISSING_CREDENTIAL'))
-    assert.equal(await getAccountSession('qwen', key, f.path), undefined)
+    assert.equal(await getAccountSession('qwen-subscription', key, f.path), undefined)
     assert.deepEqual(f.notifications, [])
   } finally { await f.close() }
 })
@@ -69,10 +69,10 @@ test('successful refresh never overwrites a concurrent Qwen login', async () => 
     const pending = f.tokens.session(key)
     await entered.promise
     const login = session('new-login')
-    await saveAccountSession('qwen', key, login, f.path)
+    await saveAccountSession('qwen-subscription', key, login, f.path)
     finish.resolve(session('obsolete-rotation'))
     assert.deepEqual(await pending, login)
-    assert.deepEqual(await getAccountSession('qwen', key, f.path), login)
+    assert.deepEqual(await getAccountSession('qwen-subscription', key, f.path), login)
   } finally { await f.close() }
 })
 
@@ -83,10 +83,10 @@ test('late invalid_grant cannot delete a new login; only successful removal noti
     const pending = f.tokens.session(key)
     await entered.promise
     const login = session('new-login')
-    await saveAccountSession('qwen', key, login, f.path)
+    await saveAccountSession('qwen-subscription', key, login, f.path)
     finish.reject(new QwenOAuthError('invalid_grant', 400))
     assert.deepEqual(await pending, login)
-    assert.deepEqual(await getAccountSession('qwen', key, f.path), login)
+    assert.deepEqual(await getAccountSession('qwen-subscription', key, f.path), login)
     assert.deepEqual(f.notifications, [])
   } finally { await f.close() }
 })
@@ -97,14 +97,14 @@ test('invalid_grant coalesces waiters, removes only the revoked account and noti
   const f = await fixture(async () => { calls++; entered.resolve(); return finish.promise })
   try {
     const other = { ...session('bob'), account: 'bob' }
-    await saveAccountSession('qwen', 'bob', other, f.path)
+    await saveAccountSession('qwen-subscription', 'bob', other, f.path)
     const a = f.tokens.session(key), b = f.tokens.session(key)
     await entered.promise
     finish.reject(new QwenOAuthError('invalid_grant', 400))
     await Promise.all([assert.rejects(a, hasCode('INVALID_CREDENTIAL')), assert.rejects(b, hasCode('INVALID_CREDENTIAL'))])
     assert.equal(calls, 1)
-    assert.equal(await getAccountSession('qwen', key, f.path), undefined)
-    assert.deepEqual(await getAccountSession('qwen', 'bob', f.path), other)
+    assert.equal(await getAccountSession('qwen-subscription', key, f.path), undefined)
+    assert.deepEqual(await getAccountSession('qwen-subscription', 'bob', f.path), other)
     assert.deepEqual(f.notifications, [key])
   } finally { await f.close() }
 })
@@ -118,12 +118,12 @@ test('transient failure after logout or relogin cannot return the old still-vali
       const pending = f.tokens.session(key)
       await entered.promise
       const login = session('new-login')
-      if (logout) await deleteAccountSession('qwen', key, f.path)
-      else await saveAccountSession('qwen', key, login, f.path)
+      if (logout) await deleteAccountSession('qwen-subscription', key, f.path)
+      else await saveAccountSession('qwen-subscription', key, login, f.path)
       finish.reject(new LlmError('rate limited', 'RATE_LIMIT', { status: 429, providerRetryAfterMs: 1000 }))
       if (logout) await assert.rejects(pending, hasCode('MISSING_CREDENTIAL'))
       else assert.deepEqual(await pending, login)
-      assert.deepEqual(await getAccountSession('qwen', key, f.path), logout ? undefined : login)
+      assert.deepEqual(await getAccountSession('qwen-subscription', key, f.path), logout ? undefined : login)
       assert.deepEqual(f.notifications, [])
     } finally { await f.close() }
   }
@@ -136,7 +136,7 @@ test('forced refresh preserves RATE_LIMIT while proactive refresh may use a vali
   try {
     assert.deepEqual(await f.tokens.session(key), old)
     await assert.rejects(f.tokens.session(key, true), (error: unknown) => error === failure)
-    assert.deepEqual(await getAccountSession('qwen', key, f.path), old)
+    assert.deepEqual(await getAccountSession('qwen-subscription', key, f.path), old)
     assert.deepEqual(f.notifications, [])
   } finally { await f.close() }
 })
@@ -145,10 +145,10 @@ test('a delayed 401 does not force rotation of a newer token', async () => {
   let calls = 0
   const f = await fixture(async current => { calls++; return session(current.accessToken + '-rotated') }, session('new-login'))
   try {
-    const current = await getAccountSession('qwen', key, f.path)
+    const current = await getAccountSession('qwen-subscription', key, f.path)
     assert.deepEqual(await f.tokens.sessionAfterRejected(key, 'old-access'), current)
     assert.equal(calls, 0)
-    assert.deepEqual(await getAccountSession('qwen', key, f.path), current)
+    assert.deepEqual(await getAccountSession('qwen-subscription', key, f.path), current)
   } finally { await f.close() }
 })
 
@@ -163,14 +163,14 @@ test('CAS conflict re-evaluates an expired new login instead of serving it', asy
   try {
     const pending = f.tokens.session(key)
     await entered.promise
-    await saveAccountSession('qwen', key, session('new-login', -1), f.path)
+    await saveAccountSession('qwen-subscription', key, session('new-login', -1), f.path)
     finish.resolve(session('old-rotation'))
     const current = session('new-login-refreshed')
     const actual = await pending
     assert.equal(actual.accessToken, current.accessToken)
     assert.equal(actual.refreshToken, current.refreshToken)
     assert.equal(calls, 2)
-    assert.deepEqual(await getAccountSession('qwen', key, f.path), actual)
+    assert.deepEqual(await getAccountSession('qwen-subscription', key, f.path), actual)
   } finally { await f.close() }
 })
 
@@ -187,11 +187,11 @@ test('CAS conflict re-evaluates a still-rejected access token with a new refresh
     const pending = f.tokens.sessionAfterRejected(key, old.accessToken)
     await entered.promise
     const login = { ...session('new-login'), accessToken: old.accessToken }
-    await saveAccountSession('qwen', key, login, f.path)
+    await saveAccountSession('qwen-subscription', key, login, f.path)
     finish.resolve(session('old-rotation'))
     assert.equal((await pending).accessToken, 'new-login-refreshed-access')
     assert.equal(calls, 2)
-    assert.equal((await getAccountSession('qwen', key, f.path))?.accessToken, 'new-login-refreshed-access')
+    assert.equal((await getAccountSession('qwen-subscription', key, f.path))?.accessToken, 'new-login-refreshed-access')
   } finally { await f.close() }
 })
 
@@ -214,7 +214,7 @@ test('independent managers cannot overwrite a newer completed refresh', async ()
     assert.deepEqual(await pendingSecond, winner)
     first.resolve(session('late'))
     assert.deepEqual(await pendingFirst, winner)
-    assert.deepEqual(await getAccountSession('qwen', key, f.path), winner)
+    assert.deepEqual(await getAccountSession('qwen-subscription', key, f.path), winner)
     assert.equal(calls, 2)
   } finally { await f.close() }
 })

@@ -130,7 +130,7 @@ async function withController(count: number, run: (ctx: {
     )
     const pending: ReturnType<SubscriptionsAuthController['login']>[] = []
     const login = () => {
-      const attempt = controller.login('qwen')
+      const attempt = controller.login('qwen-subscription')
       // Attach a handler immediately: a test may inspect another stage before awaiting it.
       void attempt.catch(() => undefined)
       pending.push(attempt)
@@ -139,16 +139,16 @@ async function withController(count: number, run: (ctx: {
     try {
       await run({ oauth, controller, changes, login })
     } finally {
-      await controller.cancel('qwen')
+      await controller.cancel('qwen-subscription')
       oauth.releaseAll()
       await Promise.allSettled(pending)
-      await controller.settled('qwen')
+      await controller.settled('qwen-subscription')
     }
   })
 }
 
 const expectBusy = async (controller: SubscriptionsAuthController, expected: boolean) => {
-  const status = await controller.status('qwen')
+  const status = await controller.status('qwen-subscription')
   assert.equal(status.busy, expected)
   assertNoSecrets(status)
   return status
@@ -179,9 +179,9 @@ test('Qwen Plus login persists its identity, reports busy in each phase, and nev
     assert.equal(new Headers(infoRequest.headers).get('authorization'), 'Bearer ' + ACCESS)
     assert.deepEqual((await expectBusy(controller, true)).accounts, [])
     oauth.profiles[0]!.respond(profile)
-    await controller.settled('qwen')
+    await controller.settled('qwen-subscription')
 
-    const [stored] = await listAccounts('qwen')
+    const [stored] = await listAccounts('qwen-subscription')
     assert.ok(stored)
     assert.equal(stored.key, SUBJECT)
     assert.deepEqual(stored.session, {
@@ -192,7 +192,7 @@ test('Qwen Plus login persists its identity, reports busy in each phase, and nev
     assert.equal((await stat(authFilePath())).mode & 0o777, 0o600)
     const status = await expectBusy(controller, false)
     assert.deepEqual(status.accounts, [{ key: SUBJECT, isDefault: true, expiresAt: stored.session.expiresAt, account: SUBJECT, plan: 'Plus' }])
-    assert.deepEqual(changes, [{ provider: 'qwen', account: SUBJECT }])
+    assert.deepEqual(changes, [{ provider: 'qwen-subscription', account: SUBJECT }])
   })
 })
 
@@ -203,11 +203,11 @@ test('Qwen rejects an unsupported subscription plan without storing tokens', asy
     assertNoSecrets(await attempt)
     await oauth.polls[0]!.entered; oauth.polls[0]!.respond(tokens)
     await oauth.profiles[0]!.entered; oauth.profiles[0]!.respond({ ...profile, member_type: 'Free' })
-    await controller.settled('qwen')
+    await controller.settled('qwen-subscription')
     const status = await expectBusy(controller, false)
     assert.deepEqual(status.accounts, [])
     assert.match(status.detail ?? '', /Plus or Pro/)
-    assert.deepEqual(await listAccounts('qwen'), [])
+    assert.deepEqual(await listAccounts('qwen-subscription'), [])
     assert.deepEqual(changes, [])
   })
 })
@@ -222,15 +222,15 @@ test('cancelling Qwen during userInfo discards even an abort-ignoring late respo
     assert.ok(request.signal)
     assert.equal(request.signal.aborted, false)
     await expectBusy(controller, true)
-    await controller.cancel('qwen')
+    await controller.cancel('qwen-subscription')
     assert.equal(request.signal.aborted, true, 'cancel propagates to the active profile request')
     // The HTTP mock intentionally ignores abort. A late successful profile must not be persisted.
     oauth.profiles[0]!.respond(profile)
-    await controller.settled('qwen')
+    await controller.settled('qwen-subscription')
     const status = await expectBusy(controller, false)
     assert.deepEqual(status.accounts, [])
     assert.equal(status.detail, undefined, 'cancellation is not reported as a login failure')
-    assert.deepEqual(await listAccounts('qwen'), [])
+    assert.deepEqual(await listAccounts('qwen-subscription'), [])
     assert.deepEqual(changes, [])
   })
 })
@@ -246,10 +246,10 @@ test('Qwen rejects a concurrent start without superseding the in-flight login', 
     assertNoSecrets(await first)
     await oauth.polls[0]!.entered; oauth.polls[0]!.respond(tokens)
     await oauth.profiles[0]!.entered; oauth.profiles[0]!.respond(profile)
-    await controller.settled('qwen')
+    await controller.settled('qwen-subscription')
     const status = await expectBusy(controller, false)
     assert.equal(status.accounts[0]?.key, SUBJECT)
-    assert.deepEqual(changes, [{ provider: 'qwen', account: SUBJECT }])
+    assert.deepEqual(changes, [{ provider: 'qwen-subscription', account: SUBJECT }])
   })
 })
 
@@ -259,14 +259,14 @@ test('cancel while requesting a Qwen device code prevents late polling and permi
     const request = await oauth.starts[0]!.entered
     assert.ok(request.signal)
     await expectBusy(controller, true)
-    await controller.cancel('qwen')
+    await controller.cancel('qwen-subscription')
     assert.equal(request.signal.aborted, true)
     // Even if the cancelled HTTP request still completes, it must not begin polling.
     oauth.starts[0]!.respond(grant)
     await assert.rejects(first, /login cancelled/)
     assert.deepEqual(oauth.counts(), { starts: 1, polls: 0, profiles: 0 })
     assert.deepEqual((await expectBusy(controller, false)).accounts, [])
-    assert.deepEqual(await listAccounts('qwen'), [])
+    assert.deepEqual(await listAccounts('qwen-subscription'), [])
 
     const second = login()
     await oauth.starts[1]!.entered
@@ -275,9 +275,9 @@ test('cancel while requesting a Qwen device code prevents late polling and permi
     assertNoSecrets(await second)
     await oauth.polls[0]!.entered; oauth.polls[0]!.respond(tokens)
     await oauth.profiles[0]!.entered; oauth.profiles[0]!.respond(profile)
-    await controller.settled('qwen')
+    await controller.settled('qwen-subscription')
     assert.equal((await expectBusy(controller, false)).accounts[0]?.key, SUBJECT)
-    assert.deepEqual(changes, [{ provider: 'qwen', account: SUBJECT }])
+    assert.deepEqual(changes, [{ provider: 'qwen-subscription', account: SUBJECT }])
   })
 })
 
@@ -306,12 +306,12 @@ test('Qwen refuses cancellation after the real store write is enqueued and commi
       await expectBusy(controller, true)
       // Once enqueued, cancellation must not report success: it cannot roll
       // back the write, and the account will become logged in after it settles.
-      await assert.rejects(controller.cancel('qwen'), /login is already being saved.*cannot (?:be cancell?ed|cancel)/i)
+      await assert.rejects(controller.cancel('qwen-subscription'), /login is already being saved.*cannot (?:be cancell?ed|cancel)/i)
       release.resolve()
-      await controller.settled('qwen')
-      assert.equal((await listAccounts('qwen'))[0]?.key, SUBJECT)
+      await controller.settled('qwen-subscription')
+      assert.equal((await listAccounts('qwen-subscription'))[0]?.key, SUBJECT)
       assert.equal((await expectBusy(controller, false)).accounts[0]?.key, SUBJECT)
-      assert.deepEqual(changes, [{ provider: 'qwen', account: SUBJECT }])
+      assert.deepEqual(changes, [{ provider: 'qwen-subscription', account: SUBJECT }])
     } finally {
       release.resolve()
     }
@@ -325,10 +325,10 @@ test('Qwen logout removes local credentials before a failed remote revocation an
     assertNoSecrets(await attempt)
     await oauth.polls[0]!.entered; oauth.polls[0]!.respond(tokens)
     await oauth.profiles[0]!.entered; oauth.profiles[0]!.respond(profile)
-    await controller.settled('qwen')
-    assert.equal((await listAccounts('qwen'))[0]?.key, SUBJECT)
+    await controller.settled('qwen-subscription')
+    assert.equal((await listAccounts('qwen-subscription'))[0]?.key, SUBJECT)
 
-    const logout = controller.logout('qwen', SUBJECT)
+    const logout = controller.logout('qwen-subscription', SUBJECT)
     // Install the rejection handler before releasing the failing HTTP request.
     const rejected = assert.rejects(logout, (error: unknown) => {
       assert.ok(error instanceof Error)
@@ -340,13 +340,13 @@ test('Qwen logout removes local credentials before a failed remote revocation an
     const form = new URLSearchParams(String(request.body))
     assert.equal(form.get('token'), REFRESH)
     assert.equal(form.get('token_type_hint'), 'refresh_token')
-    assert.deepEqual(await listAccounts('qwen'), [], 'local deletion precedes remote response')
+    assert.deepEqual(await listAccounts('qwen-subscription'), [], 'local deletion precedes remote response')
     assert.deepEqual((await expectBusy(controller, false)).accounts, [])
     oauth.revocation.reject(new Error('network failure while sending ' + REFRESH))
     await rejected
-    assert.deepEqual(await listAccounts('qwen'), [])
+    assert.deepEqual(await listAccounts('qwen-subscription'), [])
     assert.deepEqual((await expectBusy(controller, false)).accounts, [])
-    assert.deepEqual(changes, [{ provider: 'qwen', account: SUBJECT }, { provider: 'qwen', account: SUBJECT }])
+    assert.deepEqual(changes, [{ provider: 'qwen-subscription', account: SUBJECT }, { provider: 'qwen-subscription', account: SUBJECT }])
   })
 })
 
@@ -357,8 +357,8 @@ test('Qwen polling errors never expose an echoed device code in public status', 
     assertNoSecrets(await attempt)
     await oauth.polls[0]!.entered
     oauth.polls[0]!.respond({ error: 'invalid_device_code: ' + DEVICE }, 400)
-    await controller.settled('qwen')
-    const status = await controller.status('qwen')
+    await controller.settled('qwen-subscription')
+    const status = await controller.status('qwen-subscription')
     assert.equal(status.busy, false)
     assert.ok(status.detail)
     assertNoSecrets(status)
@@ -389,8 +389,8 @@ test('Qwen userInfo errors never expose an echoed access token in public status'
     await oauth.polls[0]!.entered; oauth.polls[0]!.respond(tokens)
     await oauth.profiles[0]!.entered
     oauth.profiles[0]!.respond({ error: 'invalid_token: ' + ACCESS }, 400)
-    await controller.settled('qwen')
-    const status = await controller.status('qwen')
+    await controller.settled('qwen-subscription')
+    const status = await controller.status('qwen-subscription')
     assert.equal(status.busy, false)
     assert.ok(status.detail)
     assertNoSecrets(status)

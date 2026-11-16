@@ -70,10 +70,10 @@ export class AccountPreferencesAdapter extends LlmAdapter {
       // lastKnownOwnModels can itself reject after an authentication failure.
       const known = await withAbortSignal(async () => this.options.adapter.lastKnownOwnModels?.(this.options.provider, account), signal)
       if (known !== undefined) return known
-      if (this.options.provider === 'qwen') throw new LlmError('Qwen model discovery timed out', 'TIMEOUT')
+      if (this.options.provider === 'qwen-subscription') throw new LlmError('Qwen model discovery timed out', 'TIMEOUT')
       return []
     } catch (error: unknown) {
-      if (this.options.provider === 'qwen') {
+      if (this.options.provider === 'qwen-subscription') {
         signal?.throwIfAborted()
         discoveryTrace.getStore()?.failures.push(error)
       }
@@ -88,7 +88,7 @@ export class AccountPreferencesAdapter extends LlmAdapter {
     }
   }
   private async fallback(model: string, signal?: AbortSignal): Promise<string> {
-    if (this.options.provider !== 'qwen') {
+    if (this.options.provider !== 'qwen-subscription') {
       for (const { key } of await withAbortSignal(this.options.accounts, signal)) {
         if (!accountAllowsPool(this.preference(key), model)) continue
         try { await this.requireAccount(key, model, false, signal); return key } catch { signal?.throwIfAborted() }
@@ -116,7 +116,7 @@ export class AccountPreferencesAdapter extends LlmAdapter {
       await this.requireAccount(key, model, false, signal)
       return key
     }
-    const isQwen = this.options.provider === 'qwen'
+    const isQwen = this.options.provider === 'qwen-subscription'
     return new Proxy(raw, { get: (target, property) => {
       if (property === 'streamAccount') return async function* (options: GenerateOptions, account: string) {
         let key: string
@@ -163,7 +163,7 @@ export class AccountPreferencesAdapter extends LlmAdapter {
     const failed = catalogs.filter(catalog => 'error' in catalog)
     // Other providers historically swallow discovery errors; Qwen reports the
     // real failure only when no account answered, even if the answer was empty.
-    if (this.options.provider === 'qwen' && failed.length > 0 && failed.length === catalogs.length) {
+    if (this.options.provider === 'qwen-subscription' && failed.length > 0 && failed.length === catalogs.length) {
       throw discoveryFailure(failed.map(catalog => catalog.error))
     }
     for (const catalog of catalogs) {
@@ -196,7 +196,7 @@ export class AccountPreferencesAdapter extends LlmAdapter {
     const independent = parseAccountModelId(id)
     const pool = this.options.pool()
     if (!independent && pool && await withAbortSignal(() => pool.owns(this.options.provider, id), signal)) {
-      if (this.options.provider !== 'qwen') {
+      if (this.options.provider !== 'qwen-subscription') {
         const prepared = await pool.prepareCall(provider, id, signal)
         return { ...prepared, model: this.present(id, prepared.model) }
       }
@@ -227,7 +227,7 @@ export class AccountPreferencesAdapter extends LlmAdapter {
   /** Only unwrap Qwen discovery when no pool member could actually be used. */
   private throwPoolFailure(error: unknown, trace: DiscoveryTrace, signal?: AbortSignal): never {
     signal?.throwIfAborted()
-    if (this.options.provider === 'qwen' && !trace.usableMember && trace.failures.length > 0) throw discoveryFailure(trace.failures)
+    if (this.options.provider === 'qwen-subscription' && !trace.usableMember && trace.failures.length > 0) throw discoveryFailure(trace.failures)
     throw error
   }
   /** Keep one async context through each iterator step; concurrent calls cannot share failures. */
@@ -261,7 +261,7 @@ export class AccountPreferencesAdapter extends LlmAdapter {
     }
     const pool = this.options.pool()
     if (pool && await withAbortSignal(() => pool.owns(this.options.provider, options.model), options.signal)) {
-      if (this.options.provider === 'qwen') yield* this.streamPool(pool.stream(options), options.signal)
+      if (this.options.provider === 'qwen-subscription') yield* this.streamPool(pool.stream(options), options.signal)
       else yield* pool.stream(options)
       return
     }

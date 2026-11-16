@@ -48,10 +48,10 @@ test('catalog and stream retry only rejected access token, reject redirects', as
     return new Response('data: {"choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}\n\ndata: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
   }) as typeof fetch
   const adapter = new QwenAdapter({ tokens: { async getAccessToken(_signal, rejectedToken) { rejected.push(rejectedToken); return rejectedToken ? 'new' : 'old' } }, fetchFn, streamIdleTimeoutMs: 10000 })
-  assert.equal((await adapter.listModels('qwen'))[0]!.id, 'qwen-model')
-  assert.equal((await adapter.resolveModel('qwen', 'qwen-model')).context?.contextWindow, 100000)
+  assert.equal((await adapter.listModels('qwen-subscription'))[0]!.id, 'qwen-model')
+  assert.equal((await adapter.resolveModel('qwen-subscription', 'qwen-model')).context?.contextWindow, 100000)
   assert.deepEqual(rejected, [undefined, 'old'])
-  const chunks = []; for await (const c of adapter.stream({ provider: 'qwen', model: 'qwen-model', messages: [] } as unknown as GenerateOptions)) chunks.push(c)
+  const chunks = []; for await (const c of adapter.stream({ provider: 'qwen-subscription', model: 'qwen-model', messages: [] } as unknown as GenerateOptions)) chunks.push(c)
   assert.ok(chunks.some(c => c.type === 'text-delta'))
   assert.equal(calls[0]!.url, QWEN_GATEWAY_URL + '/models')
   assert.ok(calls.every(c => c.init.redirect === 'error'))
@@ -68,16 +68,16 @@ test('catalog fallback is account-scoped, cancellable and excludes 403', async (
     return json({ data: [{ id: 'model-one' }] })
   }) as typeof fetch
   const adapter = new QwenAdapter({ tokens: { async getAccessToken() { return 'token' } }, fetchFn, streamIdleTimeoutMs: 10000 })
-  assert.equal((await adapter.listModels('qwen'))[0]!.id, 'model-one')
-  assert.equal((await adapter.resolveModel('qwen', 'model-one')).context, undefined)
-  await assert.rejects(adapter.resolveModel('qwen', 'unknown'), /not in the account catalog/)
-  mode = 'network'; assert.equal((await adapter.listModelsResult('qwen')).fallback, true)
-  mode = 'server'; assert.equal((await adapter.listModelsResult('qwen')).fallback, true)
-  mode = 'ok'; assert.equal((await adapter.listModelsResult('qwen')).fallback, false)
-  mode = 'forbidden'; await assert.rejects(adapter.listModels('qwen'), /403/)
+  assert.equal((await adapter.listModels('qwen-subscription'))[0]!.id, 'model-one')
+  assert.equal((await adapter.resolveModel('qwen-subscription', 'model-one')).context, undefined)
+  await assert.rejects(adapter.resolveModel('qwen-subscription', 'unknown'), /not in the account catalog/)
+  mode = 'network'; assert.equal((await adapter.listModelsResult('qwen-subscription')).fallback, true)
+  mode = 'server'; assert.equal((await adapter.listModelsResult('qwen-subscription')).fallback, true)
+  mode = 'ok'; assert.equal((await adapter.listModelsResult('qwen-subscription')).fallback, false)
+  mode = 'forbidden'; await assert.rejects(adapter.listModels('qwen-subscription'), /403/)
   const controller = new AbortController(); controller.abort(new Error('cancelled'))
-  mode = 'network'; await assert.rejects(adapter.listModels('qwen', controller.signal), /cancelled/)
-  adapter.clearCatalog(); await assert.rejects(adapter.listModels('qwen'), /network request failed/)
+  mode = 'network'; await assert.rejects(adapter.listModels('qwen-subscription', controller.signal), /cancelled/)
+  adapter.clearCatalog(); await assert.rejects(adapter.listModels('qwen-subscription'), /network request failed/)
 })
 
 test('stream translates reasoning and tool calls; 402 surfaces status', async () => {
@@ -87,7 +87,7 @@ test('stream translates reasoning and tool calls; 402 surfaces status', async ()
     'data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\ndata: [DONE]\n\n'
   )) as typeof fetch
   const adapter = new QwenAdapter({ tokens: { async getAccessToken() { return 'token' } }, fetchFn, streamIdleTimeoutMs: 10000 })
-  const options = { provider: 'qwen', model: 'm', messages: [] } as unknown as GenerateOptions
+  const options = { provider: 'qwen-subscription', model: 'm', messages: [] } as unknown as GenerateOptions
   const chunks = []; for await (const c of adapter.stream(options)) chunks.push(c)
   assert.ok(chunks.some(c => c.type === 'reasoning-delta' && c.text === 'think'))
   assert.ok(chunks.some(c => c.type === 'block-end' && c.block.type === 'tool-call'))
@@ -121,7 +121,7 @@ test('two turns replay reasoning alongside the matching assistant tool call', as
     return new Response('data: ' + JSON.stringify({ choices: [{ index: 0, delta, finish_reason: null }] }) + '\n\ndata: ' + JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: requests.length === 1 ? 'tool_calls' : 'stop' }] }) + '\n\ndata: [DONE]\n\n')
   }) as typeof fetch
   const adapter = new QwenAdapter({ tokens: { async getAccessToken() { return 'token' } }, fetchFn, streamIdleTimeoutMs: 10000 })
-  const first = { provider: 'qwen', model: 'm', messages: [] } as unknown as GenerateOptions
+  const first = { provider: 'qwen-subscription', model: 'm', messages: [] } as unknown as GenerateOptions
   const blocks = []; for await (const chunk of adapter.stream(first)) if (chunk.type === 'block-end') blocks.push(chunk.block)
   const second = { ...first, messages: [
     { role: 'assistant', content: blocks },
@@ -136,7 +136,7 @@ test('two turns replay reasoning alongside the matching assistant tool call', as
 })
 
 test('stream maps network, idle timeout, and user cancellation distinctly', async () => {
-  const options = { provider: 'qwen', model: 'm', messages: [] } as unknown as GenerateOptions
+  const options = { provider: 'qwen-subscription', model: 'm', messages: [] } as unknown as GenerateOptions
   const tokens = { async getAccessToken() { return 'token' } }
   const offline = new QwenAdapter({ tokens, streamIdleTimeoutMs: 10000, fetchFn: (async () => { throw new TypeError('offline') }) as typeof fetch })
   const consume = async (adapter: QwenAdapter, request: GenerateOptions) => { for await (const _ of adapter.stream(request)) {} }
@@ -179,7 +179,7 @@ test('gateway error bodies cannot leak tokens; quota and retry metadata survive'
     return new Response(JSON.stringify({ error: { message: secret } }), { status: 429, headers: { 'retry-after': '7' } })
   }) as typeof fetch
   const adapter = new QwenAdapter({ tokens: { async getAccessToken() { return secret } }, streamIdleTimeoutMs: 1000, fetchFn })
-  const options = { provider: 'qwen', model: 'm', messages: [] } as unknown as GenerateOptions
+  const options = { provider: 'qwen-subscription', model: 'm', messages: [] } as unknown as GenerateOptions
   const fail = async () => { for await (const _ of adapter.stream(options)) {} }
   await assert.rejects(fail, (error: unknown) => error instanceof Error && !error.message.includes(secret) && !error.message.includes('<html>') && 'code' in error && error.code === 'SERVER')
   mode = 1; await assert.rejects(fail, (error: unknown) => error instanceof Error && !error.message.includes(secret) && 'code' in error && error.code === 'QUOTA')
@@ -197,10 +197,10 @@ test('reasoning metadata and configured default control the wire', async () => {
     return new Response('data: {"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}\n\ndata: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
   }) as typeof fetch
   const adapter = new QwenAdapter({ tokens: { async getAccessToken() { return 'token' } }, streamIdleTimeoutMs: 1000, fetchFn, defaultEffortOf: () => 'off' })
-  const resolved = await adapter.resolveModel('qwen', 'm')
+  const resolved = await adapter.resolveModel('qwen-subscription', 'm')
   assert.deepEqual(resolved.reasoning?.efforts.map(e => e.id), ['off', 'low', 'medium', 'high'])
   assert.equal(resolved.reasoning?.defaultEffort, 'off')
-  for await (const _ of adapter.stream({ provider: 'qwen', model: 'm', messages: [] } as unknown as GenerateOptions)) {}
+  for await (const _ of adapter.stream({ provider: 'qwen-subscription', model: 'm', messages: [] } as unknown as GenerateOptions)) {}
   assert.equal(request.enable_thinking, false); assert.equal(request.thinking_budget, undefined)
 })
 
@@ -214,10 +214,10 @@ test('explicit gateway modalities remain explicit after host-compatible projecti
     { id: 'invalid', input_modalities: ['image', 'invalid'] },
   ]
   const adapter = new QwenAdapter({ tokens: { async getAccessToken() { return 'token' } }, fetchFn: (async () => json({ data: entries })) as typeof fetch, streamIdleTimeoutMs: 1000 })
-  const models = await adapter.listModels('qwen')
+  const models = await adapter.listModels('qwen-subscription')
   assert.deepEqual(models.map(m => m.inputModalities), [[], [], [], ['text'], ['text', 'image'], undefined])
-  assert.deepEqual((await adapter.resolveModel('qwen', 'audio')).inputModalities, [])
-  assert.deepEqual((await adapter.resolveModel('qwen', 'image')).inputModalities, ['text', 'image'])
+  assert.deepEqual((await adapter.resolveModel('qwen-subscription', 'audio')).inputModalities, [])
+  assert.deepEqual((await adapter.resolveModel('qwen-subscription', 'image')).inputModalities, ['text', 'image'])
 })
 
 test('temperature and stop preserve explicit zero and empty list without leaking prompt in errors', async () => {
@@ -227,7 +227,7 @@ test('temperature and stop preserve explicit zero and empty list without leaking
     request = JSON.parse(String(init?.body)) as Record<string, unknown>
     return json({ error: { message: secret } }, 400)
   }) as typeof fetch })
-  const options = { provider: 'qwen', model: 'm', messages: [{ role: 'user', content: [{ type: 'text', text: secret }] }], temperature: 0, stop: [] } as unknown as GenerateOptions
+  const options = { provider: 'qwen-subscription', model: 'm', messages: [{ role: 'user', content: [{ type: 'text', text: secret }] }], temperature: 0, stop: [] } as unknown as GenerateOptions
   await assert.rejects(async () => { for await (const _ of adapter.stream(options)) {} }, (error: unknown) => error instanceof Error && !error.message.includes(secret))
   assert.equal(request.temperature, 0)
   assert.deepEqual(request.stop, [])

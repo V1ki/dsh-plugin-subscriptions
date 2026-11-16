@@ -94,6 +94,20 @@ test('a malformed file reads as empty and is rewritten by the next save', async 
   assert.equal(defaultEffortOf('claude', 'claude-sonnet-5'), 'max')
 })
 
+test('legacy Qwen subscription defaults migrate without overwriting the new route', async () => {
+  await fresh()
+  writeFileSync(modelDefaultsFilePath(), JSON.stringify({ qwen: { old: 'high' }, codex: { model: 'low' } }), 'utf8')
+  await resetModelDefaultsForTests()
+  await loadModelDefaults()
+  assert.equal(defaultEffortOf('qwen-subscription', 'old'), 'high')
+  assert.equal(defaultEffortOf('codex', 'model'), 'low')
+  writeFileSync(modelDefaultsFilePath(), JSON.stringify({ qwen: { old: 'high' }, 'qwen-subscription': { newer: 'low' } }), 'utf8')
+  await resetModelDefaultsForTests()
+  await loadModelDefaults()
+  assert.equal(defaultEffortOf('qwen-subscription', 'newer'), 'low')
+  assert.equal(defaultEffortOf('qwen-subscription', 'old'), undefined)
+})
+
 test('a malformed entry is skipped, the rest of its section survives', async () => {
   await fresh()
   writeFileSync(modelDefaultsFilePath(), JSON.stringify({

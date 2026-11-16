@@ -12,7 +12,7 @@ export const PROVIDER_TOOLS = {
   grok: ['image_generate', 'video_generate', 'x_search'],
   copilot: [],
   antigravity: [],
-  qwen: [],
+  'qwen-subscription': [],
 } as const
 export type SubscriptionTool = 'image_generate' | 'video_generate' | 'x_search' | 'web_search'
 /** Mirrors `PromptCacheTtl` in translate/anthropic.ts; kept here so the client bundle needs no translate import. */
@@ -154,6 +154,18 @@ export function validatePreferences(provider: ProviderId, input: unknown): Provi
   return result
 }
 
+/** Merge per-account fields without losing unrelated legacy account preferences. */
+function mergeAccountPreferences(
+  legacy: Record<string, AccountPreferences> | undefined,
+  current: Record<string, AccountPreferences> | undefined,
+): Record<string, AccountPreferences> {
+  const merged = { ...legacy }
+  for (const [key, value] of Object.entries(current ?? {})) {
+    Object.defineProperty(merged, key, { value: { ...merged[key], ...value }, enumerable: true, writable: true, configurable: true })
+  }
+  return merged
+}
+
 /** Durable user preferences, independent of expiring discovery caches. */
 export class ProviderSettingsStore {
   private current: Document = { providers: {}, toolHistory: [] }
@@ -164,14 +176,33 @@ export class ProviderSettingsStore {
     this.path = path
     try {
       const raw = parseJsonText(readFileSync(path, 'utf8')) as Document
-      if (!raw.providers || !Array.isArray(raw.toolHistory)) throw new Error('invalid settings document')
+      if (!raw.providers || typeof raw.providers !== 'object' || Array.isArray(raw.providers) || !Array.isArray(raw.toolHistory)) throw new Error('invalid settings document')
+      // Preserve other providers and unknown document fields on the next save.
+      this.current = { ...raw, providers: { ...raw.providers }, toolHistory: [] }
+      const providers = raw.providers as Record<string, unknown>
       for (const provider of PROVIDER_IDS) {
-        if (Object.hasOwn(raw.providers, provider)) this.current.providers[provider] = validatePreferences(provider, raw.providers[provider])
+        if (Object.hasOwn(providers, provider)) this.current.providers[provider] = validatePreferences(provider, providers[provider])
+      }
+      if (Object.hasOwn(providers, 'qwen')) {
+        const legacy = validatePreferences('qwen-subscription', providers.qwen)
+        const current = this.current.providers['qwen-subscription']
+        if (current !== undefined) {
+          // Keep the exact former settings available for recovery in a coexistence
+          // conflict; it is not a provider route and is never applied again.
+          ;(this.current as unknown as Record<string, unknown>).legacyQwenPreferences ??= providers.qwen
+        }
+        this.current.providers['qwen-subscription'] = current === undefined ? legacy : {
+          ...legacy, ...current,
+          ...(legacy.modelDisplayNames || current.modelDisplayNames ? { modelDisplayNames: { ...legacy.modelDisplayNames, ...current.modelDisplayNames } } : {}),
+          ...(legacy.accounts || current.accounts ? { accounts: mergeAccountPreferences(legacy.accounts, current.accounts) } : {}),
+        }
+        delete (this.current.providers as Record<string, unknown>).qwen
       }
       this.current.toolHistory = raw.toolHistory.map(revision => {
-        if (!PROVIDER_IDS.includes(revision.provider) || !Number.isSafeInteger(revision.at) || revision.at < 0) throw new Error('invalid tool history')
-        const tools = validatePreferences(revision.provider, { tools: revision.tools }).tools ?? {}
-        return { at: revision.at, provider: revision.provider, tools }
+        const provider = (revision.provider as string) === 'qwen' ? 'qwen-subscription' : revision.provider
+        if (!PROVIDER_IDS.includes(provider) || !Number.isSafeInteger(revision.at) || revision.at < 0) throw new Error('invalid tool history')
+        const tools = validatePreferences(provider, { tools: revision.tools }).tools ?? {}
+        return { at: revision.at, provider, tools }
       }).sort((a, b) => a.at - b.at)
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error(`Cannot read provider settings at ${path}`, { cause: error })

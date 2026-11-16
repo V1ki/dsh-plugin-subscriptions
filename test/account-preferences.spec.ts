@@ -228,7 +228,7 @@ test('a timed-out discovery falls back to the account\'s last known catalog', as
 const forbidden = () => new LlmError('Qwen gateway error (HTTP 403)', 'AUTH', { status: 403 })
 const isForbidden = (error: unknown) => error instanceof LlmError && error.code === 'AUTH'
   && error.failure.status === 403 && /403/.test(error.message) && !/secret-token|secret-refresh/.test(error.message)
-const qwenOptions = (model = 'm:/模型'): GenerateOptions => ({ provider: 'qwen', model, messages: [] })
+const qwenOptions = (model = 'm:/模型'): GenerateOptions => ({ provider: 'qwen-subscription', model, messages: [] })
 async function drain(stream: AsyncIterable<StreamChunk>) { for await (const _ of stream) { /* drain */ } }
 
 test('Qwen catalog reports the real failure only when all accounts fail', async () => {
@@ -244,18 +244,18 @@ test('Qwen catalog reports the real failure only when all accounts fail', async 
       return mode === 'empty' ? [] : [{ provider, id: 'model-b', name: 'B' }]
     }
     const settings = new ProviderSettingsStore(join(dir, 'settings.json'))
-    const makeRoute = (provider: 'qwen' | 'codex') => new AccountPreferencesAdapter({
+    const makeRoute = (provider: 'qwen-subscription' | 'codex') => new AccountPreferencesAdapter({
       provider, adapter: raw, settings, accounts: async () => accounts.map(key => ({ key, label: key })), pool: () => undefined,
     })
-    const route = makeRoute('qwen')
-    await assert.rejects(route.listModels('qwen'), error => error === denied)
+    const route = makeRoute('qwen-subscription')
+    await assert.rejects(route.listModels('qwen-subscription'), error => error === denied)
     assert.deepEqual(await makeRoute('codex').listModels('codex'), [])
     mode = 'empty'
-    assert.deepEqual(await route.listModels('qwen'), [], 'an empty successful catalog is still a success')
+    assert.deepEqual(await route.listModels('qwen-subscription'), [], 'an empty successful catalog is still a success')
     mode = 'valid'
-    assert.deepEqual((await route.listModels('qwen')).map(model => model.id), ['model-b'])
+    assert.deepEqual((await route.listModels('qwen-subscription')).map(model => model.id), ['model-b'])
     accounts = []
-    assert.deepEqual(await route.listModels('qwen'), [], 'logged out is not a discovery failure')
+    assert.deepEqual(await route.listModels('qwen-subscription'), [], 'logged out is not a discovery failure')
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
 
@@ -272,18 +272,18 @@ test('Qwen fallback tries other accounts but returns discovery error when none c
     }
     const settings = new ProviderSettingsStore(join(dir, 'settings.json'))
     const accounts = async () => ['a', 'b'].map(key => ({ key, label: key }))
-    const route = new AccountPreferencesAdapter({ provider: 'qwen', adapter: raw, settings, accounts, pool: () => undefined })
+    const route = new AccountPreferencesAdapter({ provider: 'qwen-subscription', adapter: raw, settings, accounts, pool: () => undefined })
     await drain(route.stream(qwenOptions()))
     assert.ok(raw.calls.includes('stream:b:m:/模型'))
-    assert.equal((await route.resolveModel('qwen', 'm:/模型')).context?.contextWindow, 200)
+    assert.equal((await route.resolveModel('qwen-subscription', 'm:/模型')).context?.contextWindow, 200)
     b = 'other'
     await assert.rejects(drain(route.stream(qwenOptions())), error => error === denied)
-    await assert.rejects(route.prepareCall('qwen', 'm:/模型'), error => error === denied)
+    await assert.rejects(route.prepareCall('qwen-subscription', 'm:/模型'), error => error === denied)
     b = 'fail'
-    await assert.rejects(route.listModels('qwen'), error => error === denied)
-    await settings.set('qwen', { accounts: { a: { poolEnabled: false } } })
+    await assert.rejects(route.listModels('qwen-subscription'), error => error === denied)
+    await settings.set('qwen-subscription', { accounts: { a: { poolEnabled: false } } })
     await assert.rejects(drain(route.stream(qwenOptions())), (error: unknown) => error instanceof LlmError && error.code === 'SERVER')
-    await settings.set('qwen', { accounts: { a: { poolEnabled: false }, b: { poolEnabled: false } } })
+    await settings.set('qwen-subscription', { accounts: { a: { poolEnabled: false }, b: { poolEnabled: false } } })
     await assert.rejects(drain(route.stream(qwenOptions())), /No eligible account/)
     const codex = new AccountPreferencesAdapter({ provider: 'codex', adapter: raw, settings, accounts, pool: () => undefined })
     await assert.rejects(consume(codex, 'm:/模型'), /No eligible account/)
@@ -304,24 +304,24 @@ test('Qwen pools retain discovery failures without preventing account failover',
     }
     const settings = new ProviderSettingsStore(join(dir, 'settings.json'))
     let pool: PoolAdapter | undefined
-    const route = new AccountPreferencesAdapter({ provider: 'qwen', adapter: raw, settings,
+    const route = new AccountPreferencesAdapter({ provider: 'qwen-subscription', adapter: raw, settings,
       accounts: async () => ['a', 'b'].map(key => ({ key, label: key })), pool: () => pool })
-    pool = new PoolAdapter({ adapters: { qwen: route.poolMember() }, health: new PoolHealthRegistry(),
+    pool = new PoolAdapter({ adapters: { 'qwen-subscription': route.poolMember() }, health: new PoolHealthRegistry(),
       usage: new PoolUsageTracker(() => undefined), strategy: 'priority', switchMargin: 2, defaultAccount: async () => 'a',
-      families: async () => new Map([['qwen/m:/模型', { members: [
-        { provider: 'qwen', account: 'a', model: 'm:/模型' }, { provider: 'qwen', account: 'b', model: 'm:/模型' },
+      families: async () => new Map([['qwen-subscription/m:/模型', { members: [
+        { provider: 'qwen-subscription', account: 'a', model: 'm:/模型' }, { provider: 'qwen-subscription', account: 'b', model: 'm:/模型' },
       ] }]]), tiers: {}, onWarn: () => {} })
     await drain(route.stream(qwenOptions()))
     assert.ok(raw.calls.includes('stream:b:m:/模型'))
-    const prepared = await route.prepareCall('qwen', 'm:/模型')
+    const prepared = await route.prepareCall('qwen-subscription', 'm:/模型')
     assert.equal(prepared.model.context?.contextWindow, 200)
     await drain(prepared.stream(qwenOptions()))
     b = 'other'
-    await assert.rejects(route.prepareCall('qwen', 'm:/模型'), error => error === denied)
+    await assert.rejects(route.prepareCall('qwen-subscription', 'm:/模型'), error => error === denied)
     await assert.rejects(drain(route.stream(qwenOptions())), error => error === denied)
     await assert.rejects(drain(prepared.stream(qwenOptions())), /unavailable|exhausted/)
     b = 'fail'
-    await assert.rejects(route.prepareCall('qwen', 'm:/模型'), error => error === denied)
+    await assert.rejects(route.prepareCall('qwen-subscription', 'm:/模型'), error => error === denied)
     await assert.rejects(drain(route.stream(qwenOptions())), error => error === denied)
     await assert.rejects(drain(prepared.stream(qwenOptions())), (error: unknown) => error instanceof LlmError && error.code === 'SERVER')
     // Discovery of one account failing must not mask an actual stream failure
@@ -346,13 +346,13 @@ test('Qwen pool discovery traces are isolated between concurrent streams', async
     }
     const settings = new ProviderSettingsStore(join(dir, 'settings.json'))
     let pool: PoolAdapter | undefined
-    const route = new AccountPreferencesAdapter({ provider: 'qwen', adapter: raw, settings,
+    const route = new AccountPreferencesAdapter({ provider: 'qwen-subscription', adapter: raw, settings,
       accounts: async () => ['bad', 'good'].map(key => ({ key, label: key })), pool: () => pool })
-    pool = new PoolAdapter({ adapters: { qwen: route.poolMember() }, health: new PoolHealthRegistry(),
+    pool = new PoolAdapter({ adapters: { 'qwen-subscription': route.poolMember() }, health: new PoolHealthRegistry(),
       usage: new PoolUsageTracker(() => undefined), strategy: 'priority', switchMargin: 2, defaultAccount: async () => 'bad',
       families: async () => new Map([
-        ['qwen/bad-model', { members: [{ provider: 'qwen', account: 'bad', model: 'bad-model' }] }],
-        ['qwen/good-model', { members: [{ provider: 'qwen', account: 'good', model: 'good-model' }] }],
+        ['qwen-subscription/bad-model', { members: [{ provider: 'qwen-subscription', account: 'bad', model: 'bad-model' }] }],
+        ['qwen-subscription/good-model', { members: [{ provider: 'qwen-subscription', account: 'good', model: 'good-model' }] }],
       ]), tiers: {}, onWarn: () => {} })
     const failing = drain(route.stream(qwenOptions('bad-model'))).then(() => undefined, error => error)
     await entered
@@ -368,14 +368,14 @@ test('Qwen pool unwraps auth lost between listing and capability resolution', as
     const denied = forbidden()
     raw.resolveOwnModel = async () => { throw denied }
     let pool: PoolAdapter | undefined
-    const route = new AccountPreferencesAdapter({ provider: 'qwen', adapter: raw,
+    const route = new AccountPreferencesAdapter({ provider: 'qwen-subscription', adapter: raw,
       settings: new ProviderSettingsStore(join(dir, 'settings.json')),
       accounts: async () => [{ key: 'a', label: 'A' }], pool: () => pool })
-    pool = new PoolAdapter({ adapters: { qwen: route.poolMember() }, health: new PoolHealthRegistry(),
+    pool = new PoolAdapter({ adapters: { 'qwen-subscription': route.poolMember() }, health: new PoolHealthRegistry(),
       usage: new PoolUsageTracker(() => undefined), strategy: 'priority', switchMargin: 2, defaultAccount: async () => 'a',
-      families: async () => new Map([['qwen/m:/模型', { members: [{ provider: 'qwen', account: 'a', model: 'm:/模型' }] }]]),
+      families: async () => new Map([['qwen-subscription/m:/模型', { members: [{ provider: 'qwen-subscription', account: 'a', model: 'm:/模型' }] }]]),
       tiers: {}, onWarn: () => {} })
-    await assert.rejects(route.prepareCall('qwen', 'm:/模型'), error => error === denied)
+    await assert.rejects(route.prepareCall('qwen-subscription', 'm:/模型'), error => error === denied)
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
 
@@ -396,16 +396,16 @@ test('Qwen timeout falls back only to last-known catalogs that remain authorized
       }
     }
     const raw = new Hanging()
-    const route = new AccountPreferencesAdapter({ provider: 'qwen', adapter: raw,
+    const route = new AccountPreferencesAdapter({ provider: 'qwen-subscription', adapter: raw,
       settings: new ProviderSettingsStore(join(dir, 'settings.json')),
       accounts: async () => [{ key: 'a', label: 'A' }], pool: () => undefined, discoveryTimeoutMs: 10 })
-    assert.deepEqual((await route.listModels('qwen')).map(model => model.id), ['m:/模型'])
+    assert.deepEqual((await route.listModels('qwen-subscription')).map(model => model.id), ['m:/模型'])
     await drain(route.stream(qwenOptions()))
     fallback = 'rejected'
-    await assert.rejects(route.listModels('qwen'), error => error === denied)
+    await assert.rejects(route.listModels('qwen-subscription'), error => error === denied)
     await assert.rejects(drain(route.stream(qwenOptions())), error => error === denied)
     fallback = 'missing'
-    await assert.rejects(route.listModels('qwen'), (error: unknown) => error instanceof LlmError && error.code === 'TIMEOUT')
+    await assert.rejects(route.listModels('qwen-subscription'), (error: unknown) => error instanceof LlmError && error.code === 'TIMEOUT')
     await assert.rejects(drain(route.stream(qwenOptions())), (error: unknown) => error instanceof LlmError && error.code === 'TIMEOUT')
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
@@ -414,22 +414,22 @@ test('real Qwen wrapper denial invalidates cache and reaches the registered rout
   const dir = await mkdtemp(join(tmpdir(), 'qwen-route-cache-'))
   try {
     const session: QwenSession = { accessToken: 'secret-token', refreshToken: 'secret-refresh', expiresAt: Date.now() + 3_600_000 }
-    const tokens = new AccountTokenManager<QwenSession>({ provider: 'qwen', displayName: 'Qwen',
+    const tokens = new AccountTokenManager<QwenSession>({ provider: 'qwen-subscription', displayName: 'Qwen',
       makeOptions: () => ({ preemptMs: 60_000, refresh: async current => current, isPermanent: () => false }),
       io: { list: async () => [{ key: 'a', session }], get: async () => session, save: async () => {}, remove: async () => {} } })
     let deny = false
     const raw = new QwenAccountAdapter({ tokens, streamIdleTimeoutMs: 1000, fetchFn: async () => deny
       ? new Response('{}', { status: 403 })
       : new Response(JSON.stringify({ data: [{ id: 'model' }] }), { status: 200 }) })
-    const route = new AccountPreferencesAdapter({ provider: 'qwen', adapter: raw,
+    const route = new AccountPreferencesAdapter({ provider: 'qwen-subscription', adapter: raw,
       settings: new ProviderSettingsStore(join(dir, 'settings.json')),
       accounts: async () => [{ key: 'a', label: 'A' }], pool: () => undefined, discoveryTimeoutMs: 50 })
-    assert.deepEqual((await route.listModels('qwen')).map(model => model.id), ['model'])
+    assert.deepEqual((await route.listModels('qwen-subscription')).map(model => model.id), ['model'])
     deny = true
-    await assert.rejects(raw.listOwnModels('qwen', 'a'), isForbidden)
-    await assert.rejects(raw.lastKnownOwnModels('qwen', 'a'), isForbidden)
-    await assert.rejects(route.listModels('qwen'), isForbidden)
-    await assert.rejects(route.prepareCall('qwen', 'model'), isForbidden)
+    await assert.rejects(raw.listOwnModels('qwen-subscription', 'a'), isForbidden)
+    await assert.rejects(raw.lastKnownOwnModels('qwen-subscription', 'a'), isForbidden)
+    await assert.rejects(route.listModels('qwen-subscription'), isForbidden)
+    await assert.rejects(route.prepareCall('qwen-subscription', 'model'), isForbidden)
     await assert.rejects(drain(route.stream(qwenOptions('model'))), isForbidden)
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
