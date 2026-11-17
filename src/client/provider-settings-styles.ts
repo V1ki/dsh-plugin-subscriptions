@@ -187,6 +187,14 @@ ${formScope} summary:hover {
 /** Composer controls retain their own geometry, separate from settings forms. */
 export const subscriptionChromeCss = `
 .dsh-subscription-usage-pill { corner-shape: round; }
+/* The host's loading glyph is static; spin it the way the host's StateDot does. */
+.dsh-subscription-usage-pill[data-refresh-state="refreshing"] .dsh-subscription-usage-pill-icon {
+  animation: dsh-subscription-usage-spin 1.5s linear infinite;
+}
+@keyframes dsh-subscription-usage-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .dsh-subscription-usage-pill[data-refresh-state="refreshing"] .dsh-subscription-usage-pill-icon { animation: none; }
+}
 .dsh-subscription-usage-panel {
   --dsw-elevation-stroke-color: var(--dsw-alias-border-l1);
   backdrop-filter: var(--dsw-menu-backdrop-filter, none);

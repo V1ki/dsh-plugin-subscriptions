@@ -15,6 +15,11 @@ const SUBSCRIPTIONS_AUTH_PREFIX = 'subscriptions-auth.'
 /** Business error returned by a `subscriptions-auth` endpoint (error branch message). */
 export class SubscriptionsAuthError extends Error {}
 
+/** Readable message of a caught value: an Error's message, else its string form. */
+export function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
 /**
  * Call one `subscriptions-auth` endpoint and unwrap the business result.
  * Shared by the settings section, the composer Speed toggle, the usage
@@ -33,7 +38,7 @@ export async function callSubscriptionsAuth<T>(rpc: ConnectionHandle['rpc'], end
   } catch (error) {
     if (usageKey) failUsage(rpc, usageKey)
     // The transport rejected rather than answering; surface the same way.
-    throw new SubscriptionsAuthError(error instanceof Error ? error.message : String(error))
+    throw new SubscriptionsAuthError(messageOf(error))
   }
   if (!result.ok) {
     if (usageKey) failUsage(rpc, usageKey)

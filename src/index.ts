@@ -422,7 +422,7 @@ export class SubscriptionsAuthController implements AuthController {
     private readonly clientVersions: Partial<Record<ProviderId, () => Promise<CliVersion | undefined>>> = {},
     private readonly resetRedemption?: ResetRedemption,
     /**
-     * Runs on a manual (forced) usage refresh of one account. The plugin
+     * Runs on a forced usage refresh unless resetPoolHealth is false. The plugin
      * clears that account's pool cooldowns here: the Settings "Refresh"
      * button is the user's "retry now" — a stale cooldown left by a transient
      * failure must not outlive an explicit re-check (issue #139).
@@ -440,8 +440,8 @@ export class SubscriptionsAuthController implements AuthController {
     await this.resetRedemption.redeem(account, ticket, AbortSignal.any([signal, AbortSignal.timeout(20_000)]))
   }
 
-  usage(provider: ProviderId, account: string, signal: AbortSignal, force = false): Promise<ProviderUsage> {
-    if (force) this.onUsageForced?.(provider, account)
+  usage(provider: ProviderId, account: string, signal: AbortSignal, force = false, resetPoolHealth = true): Promise<ProviderUsage> {
+    if (force && resetPoolHealth) this.onUsageForced?.(provider, account)
     const fetcher = this.usageFetchers[provider]
     if (fetcher === undefined) return Promise.resolve({ supported: false })
     if (this.poolUsage === undefined) return fetcher(account, signal).then(snapshot => {
