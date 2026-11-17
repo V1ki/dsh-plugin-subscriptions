@@ -14,6 +14,37 @@ test('saved unavailable model IDs remain editable without inventing discovered m
     { id: 'gone', name: 'gone', unavailable: true },
   ])
 })
+test('Antigravity account editor maps legacy choices only to discovered family rows', () => {
+  const family = 'claude-sonnet-5-5'
+  const catalog = [{ id: family, name: 'Sonnet' }, { id: 'gemini-4-hydrogen', name: 'Hydrogen' }]
+  const preferences = { poolModels: [`${family}-low`, `${family}-high`, 'gemini-4-hydrogen-xhigh', 'gemini-3.8-flash-tiered', 'missing-high'] }
+  const original = structuredClone(preferences)
+  const selected = accountPoolSelection(preferences, catalog, 'antigravity')
+  assert.deepEqual([...selected], [family, 'gemini-4-hydrogen', 'gemini-3.8-flash-tiered', 'missing-high'])
+  assert.deepEqual(accountModelRows({ key: 'primary', label: 'Primary', models: catalog }, preferences, 'antigravity'), [
+    ...catalog.map(model => ({ ...model, unavailable: false })),
+    { id: 'gemini-3.8-flash-tiered', name: 'gemini-3.8-flash-tiered', unavailable: true },
+    { id: 'missing-high', name: 'missing-high', unavailable: true },
+  ])
+  selected.delete(family)
+  const saved = mergeAccountChanges({ accounts: { primary: preferences } }, { primary: { poolModels: [...selected] } })
+  assert.equal(accountPoolSelection(saved.accounts!.primary, catalog, 'antigravity').has(family), false, 'unchecking the family must not resurrect a hidden legacy selection')
+  assert.deepEqual(accountPoolSelection(preferences, [], 'antigravity'), new Set(preferences.poolModels), 'an unavailable catalog must not erase or migrate saved IDs')
+  assert.deepEqual(accountPoolSelection(preferences, catalog, 'codex'), new Set(preferences.poolModels))
+  assert.deepEqual(preferences, original)
+})
+
+test('Antigravity account editor preserves concrete manual catalogs and explicit exclusions', () => {
+  const family = 'claude-sonnet-5-5'
+  const concrete = { id: `${family}-low`, name: 'Sonnet Low' }
+  const account = { key: 'primary', label: 'Primary', models: [concrete, { id: family, name: 'Sonnet' }] }
+  const preferences = { poolModels: [concrete.id] }
+  assert.deepEqual([...accountPoolSelection(preferences, account.models, 'antigravity')], [concrete.id])
+  assert.deepEqual(accountModelRows(account, preferences, 'antigravity'), account.models.map(model => ({ ...model, unavailable: false })))
+  assert.deepEqual([...accountPoolSelection({}, account.models, 'antigravity')], account.models.map(model => model.id))
+  assert.deepEqual([...accountPoolSelection({ poolModels: [] }, account.models, 'antigravity')], [])
+})
+
 test('model editor saves latest accounts, not its old draft, including removal', () => {
   const draft = { visibleModels: ['a'], accounts: { personal: { alias: 'Old' } } }
   assert.deepEqual(mergeLatestAccounts(draft, { accounts: { personal: { alias: 'New', poolEnabled: false } } }), {

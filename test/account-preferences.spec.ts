@@ -1,7 +1,7 @@
 import './keep-alive.js'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { LlmAdapter, LlmError, LlmRuntime, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
@@ -12,6 +12,8 @@ import { ProviderSettingsStore, validatePreferences } from '../src/provider-sett
 import { PoolAdapter } from '../src/providers/pool.js'
 import { PoolHealthRegistry } from '../src/providers/pool-health.js'
 import { PoolUsageTracker } from '../src/providers/pool-usage.js'
+import { buildAccountPools } from '../src/providers/pool-family.js'
+import { groupAntigravityModels } from '../src/providers/antigravity-models.js'
 
 class Raw extends LlmAdapter {
   calls: string[] = []
@@ -97,6 +99,30 @@ test('revoking a prepared account refuses dispatch rather than bypassing prefere
   } finally { dispose(); await rm(dir, { recursive: true, force: true }) }
 })
 
+for (const gateAt of ['accounts', 'models'] as const) test(`independent-entry revocation during ${gateAt} lookup refuses dispatch`, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'account-independent-revoked-'))
+  let release!: () => void
+  let entered!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const entry = new Promise<void>(resolve => { entered = resolve })
+  try {
+    const settings = new ProviderSettingsStore(join(dir, 'settings.json'))
+    await settings.set('codex', { accounts: { a: { independentEntry: true } } })
+    const raw = new Raw()
+    const list = raw.listOwnModels.bind(raw)
+    if (gateAt === 'models') raw.listOwnModels = async (provider, account) => { entered(); await gate; return list(provider, account) }
+    const route = new AccountPreferencesAdapter({ provider: 'codex', adapter: raw, settings, pool: () => undefined,
+      accounts: async () => { if (gateAt === 'accounts') { entered(); await gate }; return [{ key: 'a', label: 'A' }] } })
+    const pending = consume(route, accountModelId('a', 'm:/模型'))
+    const rejected = assert.rejects(pending, /unavailable/)
+    await entry
+    await settings.set('codex', { accounts: { a: { independentEntry: false } } })
+    release()
+    await rejected
+    assert.deepEqual(raw.calls, [])
+  } finally { release(); await rm(dir, { recursive: true, force: true }) }
+})
+
 test('model display names decorate list and resolution without changing routing or capabilities', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'model-display-names-'))
   try {
@@ -134,6 +160,81 @@ test('account preferences validate, persist and distinguish absent and empty all
     assert.equal(accountAllowsPool({ poolModels: [] }, 'm'), false)
     assert.equal(accountAllowsPool({ poolModels: ['m'] }, 'm'), true)
     for (const account of [{ poolEnabled: 'true' }, { independentEntry: 1 }, { poolModels: [null] }, { alias: 3 }, []]) assert.throws(() => validatePreferences('codex', { accounts: { a: account } }))
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
+test('legacy Antigravity pool selections admit their family without widening concrete routes', () => {
+  const preferences = { poolModels: ['claude-sonnet-5-5-low', 'gemini-4-hydrogen-xhigh', 'gpt-oss-120b-medium'] }
+  const original = structuredClone(preferences)
+  const catalog = ['claude-sonnet-5-5', 'gemini-4-hydrogen', 'gpt-oss-120b'].map(id => ({ id }))
+  for (const { id: family } of catalog) {
+    assert.equal(accountAllowsPool(preferences, family, 'antigravity', catalog), true)
+    assert.equal(accountAllowsPool(preferences, family, 'codex', catalog), false)
+    assert.equal(accountAllowsPool(preferences, family), false)
+    assert.equal(accountAllowsPool(preferences, family, 'antigravity'), false, 'no inferred migration without a catalog')
+  }
+  assert.equal(accountAllowsPool(preferences, 'claude-sonnet-5-5', 'antigravity', [...catalog, { id: 'claude-sonnet-5-5-low' }]), false, 'a live concrete selection must not permit a separate family route')
+  assert.equal(accountAllowsPool(preferences, 'claude-sonnet-5-5-low', 'antigravity'), true, 'manual concrete catalogs retain exact matching')
+  assert.equal(accountAllowsPool(preferences, 'claude-sonnet-5-5-high', 'antigravity'), false)
+  assert.equal(accountAllowsPool({ poolModels: ['claude-sonnet-5-5'] }, 'claude-sonnet-5-5-high', 'antigravity'), false)
+  assert.equal(accountAllowsPool({ poolModels: ['gemini-3.8-flash-tiered'] }, 'gemini-3.8-flash', 'antigravity', [{ id: 'gemini-3.8-flash' }]), false)
+  assert.equal(accountAllowsPool({ poolModels: ['custom-high'] }, 'custom', 'antigravity', [{ id: 'custom' }]), false)
+  assert.equal(accountAllowsPool({ poolModels: [] }, 'claude-sonnet-5-5', 'antigravity', catalog), false)
+  assert.equal(accountAllowsPool({ ...preferences, poolEnabled: false }, 'claude-sonnet-5-5', 'antigravity', catalog), false)
+  assert.equal(accountAllowsPool(undefined, 'claude-sonnet-5-5', 'antigravity'), true)
+  assert.deepEqual(preferences, original)
+})
+
+test('saved Antigravity variant allowlists survive grouped discovery across direct and pool routes', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'antigravity-account-groups-'))
+  try {
+    const path = join(dir, 'settings.json')
+    const saved = JSON.stringify({ providers: { antigravity: { accounts: {
+      primary: { independentEntry: true, poolModels: ['claude-sonnet-5-5-low', 'claude-sonnet-5-5-high'] },
+      excluded: { poolEnabled: false },
+    } } }, toolHistory: [] })
+    await writeFile(path, saved)
+    const settings = new ProviderSettingsStore(path)
+    const raw = new Raw()
+    const family = 'claude-sonnet-5-5'
+    raw.listOwnModels = async provider => groupAntigravityModels([
+      { id: `${family}-low`, name: 'Sonnet (Low)', antigravity: { visible: true } },
+      { id: `${family}-high`, name: 'Sonnet (High)', antigravity: { visible: true } },
+    ]).map(model => ({ provider, id: model.id, name: model.name }))
+    const accounts = ['primary', 'excluded'].map(key => ({ key, label: key }))
+    let pool: PoolAdapter | undefined
+    const route = new AccountPreferencesAdapter({ provider: 'antigravity', adapter: raw, settings,
+      accounts: async () => accounts, pool: () => pool })
+    const request: GenerateOptions = { provider: 'antigravity', model: family, messages: [] }
+    assert.deepEqual((await route.listModels('antigravity')).map(model => model.id), [family, accountModelId('primary', family)])
+    const prepared = await route.prepareCall('antigravity', family)
+    for await (const _ of prepared.stream(request)) { /* drain */ }
+    for await (const _ of route.stream(request)) { /* drain */ }
+    assert.deepEqual(raw.calls, [`resolve:primary:${family}`, `stream:primary:${family}`, `stream:primary:${family}`])
+    const families = async () => buildAccountPools({ antigravity: { catalogs: await Promise.all(accounts.map(async ({ key }) => {
+      const models = await raw.listOwnModels('antigravity', key)
+      return { account: key, models: models.filter(model => accountAllowsPool(settings.get('antigravity').accounts?.[key], model.id, 'antigravity', models)) }
+    })) } })
+    assert.deepEqual((await families()).get(`antigravity/${family}`)?.members, [{ provider: 'antigravity', account: 'primary', model: family }])
+    pool = new PoolAdapter({ adapters: { antigravity: route.poolMember() }, health: new PoolHealthRegistry(),
+      usage: new PoolUsageTracker(() => undefined), strategy: 'priority', switchMargin: 2,
+      defaultAccount: async () => 'primary', families, tiers: {}, onWarn: () => {} })
+    const pooled = await route.prepareCall('antigravity', family)
+    for await (const _ of pooled.stream(request)) { /* drain */ }
+    assert.equal(raw.calls.at(-1), `stream:primary:${family}`)
+    assert.equal(raw.calls.some(call => call.includes(':excluded:')), false)
+    assert.equal(await readFile(path, 'utf8'), saved, 'routing does not rewrite saved account preferences')
+    const revoked = settings.get('antigravity')
+    revoked.accounts!.primary.poolModels = []
+    await settings.set('antigravity', revoked)
+    pool.invalidate()
+    await assert.rejects(route.resolveModel('antigravity', family), /No eligible/)
+    const callsBeforeRevokedDispatch = raw.calls.length
+    await assert.rejects(async () => { for await (const _ of prepared.stream(request)) { /* drain */ } }, /unavailable/)
+    assert.equal(raw.calls.length, callsBeforeRevokedDispatch)
+    const independent = await route.prepareCall('antigravity', accountModelId('primary', family))
+    for await (const _ of independent.stream({ ...request, model: accountModelId('primary', family) })) { /* drain */ }
+    assert.equal(raw.calls.at(-1), `stream:primary:${family}`, 'pool exclusion does not change independent-entry policy')
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
 
