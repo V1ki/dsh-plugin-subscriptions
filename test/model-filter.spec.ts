@@ -1,6 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { modelEditorNotice, modelEditorState, modelListState, savedModelIds } from '../src/client/model-filter.js'
+import {
+  contextWindowChoice, contextWindowTiers, formatWindowLabel,
+  modelEditorNotice, modelEditorState, modelListState, pruneDefaultContextOverrides, savedModelIds,
+} from '../src/client/model-filter.js'
 import { en, zh } from '../src/client/locales.js'
 
 test('a provider without rows reports provider-empty, not an empty filter result', () => {
@@ -99,4 +102,56 @@ test('every notice has copy in both dictionaries, and the Chinese one is Chinese
   }
   assert.match(en.modelDefaultsNoAccount, /account/i)
   assert.match(en.modelDefaultsDiscoveryFailed, /refresh/i)
+})
+
+test('window labels stay compact and exact', () => {
+  assert.equal(formatWindowLabel(256_000), '256K')
+  assert.equal(formatWindowLabel(500_000), '500K')
+  assert.equal(formatWindowLabel(1_000_000), '1M')
+  assert.equal(formatWindowLabel(872_500), '872500')
+  assert.equal(formatWindowLabel(undefined), '')
+})
+
+test('the grok window picker offers catalog tiers minus the followed default', () => {
+  assert.deepEqual(contextWindowTiers({ defaultContextWindow: 256_000, contextWindowOptions: [256_000, 500_000] }), [500_000])
+  assert.deepEqual(contextWindowTiers({ defaultContextWindow: 256_000 }), [])
+})
+
+test('the window picker keeps an unoffered saved tier visible instead of rewriting it', () => {
+  const model = { defaultContextWindow: 256_000, contextWindowOptions: [256_000, 500_000] }
+  // Follow provider: empty value, both real choices offered.
+  assert.deepEqual(contextWindowChoice('', model), { value: '', tiers: [500_000] })
+  // A saved tier the picker offers selects it.
+  assert.deepEqual(contextWindowChoice('500000', model), { value: '500000', tiers: [500_000] })
+  // Saving the default explicitly is the same choice as following the provider.
+  assert.deepEqual(contextWindowChoice('256000', model), { value: '', tiers: [500_000] })
+  // A tier the catalog stopped offering stays visible but disabled (issue #149).
+  assert.deepEqual(contextWindowChoice('500000', { defaultContextWindow: 256_000 }), {
+    value: '500000', tiers: [], unavailable: 500_000,
+  })
+  // Garbage never reaches the wire.
+  for (const bad of ['-1', '1.5', 'abc', '  ']) {
+    assert.deepEqual(contextWindowChoice(bad, model), { value: '', tiers: [500_000] }, bad)
+  }
+})
+
+test('the grok window picker copy exists in both languages', () => {
+  for (const key of ['modelsContextWindow', 'modelsContextFollow', 'modelsContextUnavailableOption', 'modelsContextGrokHint'] as const) {
+    assert.ok(en[key].length > 0, `en.${key}`)
+    assert.ok(zh[key].length > 0, `zh.${key}`)
+  }
+  assert.match(en.modelsContextFollow, /\{default\}/)
+  assert.match(zh.modelsContextUnavailableOption, /\{value\}/)
+})
+
+test('an explicit override equal to the advertised default is not persisted', () => {
+  const models = [
+    { id: 'grok-4.7', defaultContextWindow: 500_000 },
+    { id: 'codex-model', defaultContextWindow: 400_000 },
+  ]
+  assert.deepEqual(pruneDefaultContextOverrides({ 'grok-4.7': 500_000, 'codex-model': 872_000, missing: 123 }, models), {
+    'codex-model': 872_000, missing: 123,
+  })
+  // Nothing to drop when every saved window differs from its default.
+  assert.deepEqual(pruneDefaultContextOverrides({}, models), {})
 })

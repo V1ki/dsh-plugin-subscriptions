@@ -83,6 +83,9 @@ function sanitizeModel(value: unknown): DiscoveredModel | undefined {
       && (typeof raw.contextWindow !== 'number' || !Number.isInteger(raw.contextWindow) || raw.contextWindow <= 0))
     || (raw.maxContextWindow !== undefined
       && (typeof raw.maxContextWindow !== 'number' || !Number.isSafeInteger(raw.maxContextWindow) || raw.maxContextWindow <= 0))
+    || (raw.contextWindowOptions !== undefined
+      && (!Array.isArray(raw.contextWindowOptions) || raw.contextWindowOptions.length === 0
+        || raw.contextWindowOptions.some(option => typeof option !== 'number' || !Number.isSafeInteger(option) || option <= 0)))
     || (raw.maxOutputTokens !== undefined
       && (typeof raw.maxOutputTokens !== 'number' || !Number.isSafeInteger(raw.maxOutputTokens) || raw.maxOutputTokens <= 0))
     || (raw.priority !== undefined
@@ -122,6 +125,9 @@ function sanitizeModel(value: unknown): DiscoveredModel | undefined {
     ...raw.description === undefined ? {} : { description: raw.description as string },
     ...raw.contextWindow === undefined ? {} : { contextWindow: raw.contextWindow as number },
     ...raw.maxContextWindow === undefined ? {} : { maxContextWindow: raw.maxContextWindow as number },
+    ...raw.contextWindowOptions === undefined
+      ? {}
+      : { contextWindowOptions: [...raw.contextWindowOptions as number[]] },
     ...raw.maxOutputTokens === undefined ? {} : { maxOutputTokens: raw.maxOutputTokens as number },
     ...raw.priority === undefined ? {} : { priority: raw.priority as number },
     ...reasoning === undefined ? {} : { reasoning },
