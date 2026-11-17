@@ -3,6 +3,13 @@ export function antigravityModelId(id: string): string {
   return id.replace(/^((?:gemini|claude|gpt-oss)-.+)-(?:low|medium|high|xhigh)$/, '$1')
 }
 
+/** Map a retired effort selection only when its family replaces it in this account's catalog. */
+export function antigravitySelectionId(id: string, models: readonly { id: string }[]): string {
+  if (models.some(model => model.id === id)) return id
+  const family = antigravityModelId(id)
+  return models.some(model => model.id === family) ? family : id
+}
+
 /** Quota scopes retain concrete upstream ids; selectors use the family id. */
 export function sameAntigravityModel(left: string | undefined, right: string | undefined): boolean {
   return left !== undefined && right !== undefined && antigravityModelId(left) === antigravityModelId(right)
