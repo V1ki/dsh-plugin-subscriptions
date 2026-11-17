@@ -34,6 +34,43 @@ test('media tool views render the preparing phase before arguments are available
   }
 })
 
+test('media views observe streaming prompt updates and settled arguments', () => {
+  for (const [Component, name] of [[ImageGenerateToolview, 'image_generate'], [VideoGenerateToolview, 'video_generate']] as const) {
+    const args = new PartialArguments()
+    const block = { phase: 'preparing' as const, callId: 'media-call', name, turn: 0, step: 0, time: 0, subCalls: [], args }
+    const render = () => renderToStaticMarkup(createElement(Component, { block }))
+    assert.match(render(), new RegExp(name))
+    args.append('{"prompt":"Hello')
+    assert.equal(args.refresh(), true)
+    assert.match(render(), /Hello/)
+    args.append(' world","referenceImages":[{},{}]}')
+    assert.equal(args.refresh(), true)
+    assert.match(render(), /Hello world/)
+    if (name === 'image_generate') assert.match(render(), /\(2 ref\)/)
+    const settled = { kind: 'tool-result' as const, seq: 1, time: 0, callId: 'media-call', name,
+      args: PartialArguments.fromObject({ prompt: 'Finished', referenceImages: [{}, {}] }),
+      call: null, callTime: null, content: [], subCalls: [], isError: false }
+    assert.match(renderToStaticMarkup(createElement(Component, { block: settled })), /Finished/)
+  }
+})
+
+test('media views support legacy calls without argument views', () => {
+  for (const [Component, name] of [[ImageGenerateToolview, 'image_generate'], [VideoGenerateToolview, 'video_generate']] as const) {
+    const raw = JSON.stringify({ prompt: 'Legacy prompt', referenceImages: [{}, {}] })
+    const start = { phase: 'start', callId: 'legacy', name, turn: 0, step: 0, time: 0, subCalls: [], argsRaw: raw }
+    const result = { kind: 'tool-result', seq: 1, time: 0, callId: 'legacy', name,
+      call: { name, argsRaw: raw }, callTime: 0, content: [], subCalls: [], isError: false }
+    for (const legacy of [start, result]) {
+      const block = legacy as unknown as NonNullable<Parameters<typeof ImageGenerateToolview>[0]['block']>
+      const html = renderToStaticMarkup(createElement(Component, { block }))
+      assert.match(html, /Legacy prompt/)
+      if (name === 'image_generate') assert.match(html, /\(2 ref\)/)
+    }
+    const malformed = { ...start, argsRaw: 'invalid raw\nsecond line' } as unknown as NonNullable<Parameters<typeof ImageGenerateToolview>[0]['block']>
+    assert.match(renderToStaticMarkup(createElement(Component, { block: malformed })), /invalid raw/)
+  }
+})
+
 const windows: UsageWindow[] = Array.from({ length: 60 }, (_, i) => ({
   kind: 'other', scope: `gemini-model-${i}`, usedPercent: i,
 }))

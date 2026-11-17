@@ -53,6 +53,19 @@ try {
   assert.match(await badge.innerText(), /^我的 Grok /)
   await badge.click()
   await panel.waitFor()
+  const assertPanelInsideViewport = async () => {
+    const box = await panel.boundingBox()
+    const viewport = page.viewportSize()
+    assert.ok(box && viewport && box.x >= 11 && box.y >= 11 && box.x + box.width <= viewport.width - 11 && box.y + box.height <= viewport.height - 11)
+  }
+  await assertPanelInsideViewport()
+  await page.setViewportSize({ width: 360, height: 720 })
+  await page.waitForFunction(() => {
+    const box = document.querySelector('[role=dialog]')?.getBoundingClientRect()
+    return box && box.left >= 11 && box.top >= 11 && box.right <= innerWidth - 11 && box.bottom <= innerHeight - 11
+  })
+  await assertPanelInsideViewport()
+  await page.setViewportSize({ width: 900, height: 900 })
   assert.match(await panel.locator('section').first().innerText(), /^我的 Grok/)
   await page.keyboard.press('Escape')
   await page.getByRole('button', { name: 'Reset Grok', exact: true }).click()

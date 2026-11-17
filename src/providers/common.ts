@@ -79,6 +79,21 @@ export function validateModels(models: readonly ModelEntry[], label: string): Mo
   })
 }
 
+/** Re-raise an external or plugin-specific failure without losing its code or facts.
+ * DSH 0.2.2 narrows the constructor to built-in codes and adds fromFailure;
+ * earlier supported hosts accept arbitrary codes in the constructor instead.
+ */
+export function llmErrorFromFailure(failure: LlmError['failure'], options?: ErrorOptions): LlmError {
+  const constructor = LlmError as typeof LlmError & {
+    fromFailure?: (failure: LlmError['failure'], options?: ErrorOptions) => LlmError
+  }
+  if (typeof constructor.fromFailure === 'function') return constructor.fromFailure(failure, options)
+  const LegacyLlmError = LlmError as unknown as new (
+    message: string, code: string, options?: LlmError['failure'] & ErrorOptions,
+  ) => LlmError
+  return new LegacyLlmError(failure.message, failure.code, { ...failure, ...options })
+}
+
 /** Optional per-call hooks {@link httpLlmError} uses to read a rate-limit window. */
 export interface HttpLlmErrorOptions {
   /**
@@ -123,14 +138,14 @@ export async function httpLlmError(
   const message = shown.length > 0
     ? `${label} error (HTTP ${String(response.status)}): ${shown}`
     : `${label} error (HTTP ${String(response.status)})`
-  let code: string
+  let code: ConstructorParameters<typeof LlmError>[1]
   if (response.status === 401 || response.status === 403) code = 'AUTH'
   else if (response.status === 429) code = 'RATE_LIMIT'
   else if (isQuotaExceededError(shown)) code = QUOTA_EXCEEDED_CODE
   else if (response.status === 400 && isContextWindowExceededError(shown)) code = CONTEXT_WINDOW_EXCEEDED_CODE
   else if (response.status === 408 || response.status === 504) code = 'TIMEOUT'
   else if (response.status >= 500) code = 'SERVER'
-  else code = `HTTP_${String(response.status)}`
+  else code = `HTTP_${String(response.status)}` as `HTTP_${number}`
   const now = Date.now()
   // The provider's reader runs on a 429 and nowhere else. Providers attach
   // their rate-limit headers to every response, so reading them on a transient

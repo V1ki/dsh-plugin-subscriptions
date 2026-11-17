@@ -48,7 +48,7 @@ test('main speed and per-model subagent defaults stay independent through RPC, r
     const call = (endpoint: string, payload: unknown) => connection.handler(endpoint, payload, new AbortController().signal)
     const register = (id: string, header: Record<string, unknown>, provider = 'codex') => {
       const agent = { id, ctx, options: { provider }, session: { id, header: { id, ...header } } } as unknown as Agent
-      agents!.enter(agent, undefined)
+      agents!.enter(agent)
     }
     if (agents) {
       register('parent', {}, 'claude')
