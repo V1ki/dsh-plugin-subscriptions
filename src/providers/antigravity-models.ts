@@ -3,7 +3,7 @@ import { LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { DiscoveredModel } from './common.js'
 import { antigravityModelId } from '../antigravity-model-id.js'
 
-const EFFORTS = ['low', 'medium', 'high'] as const
+const EFFORTS = ['low', 'medium', 'high', 'xhigh'] as const
 type Effort = typeof EFFORTS[number]
 
 export interface AntigravityModelGroup extends DiscoveredModel {
@@ -25,7 +25,7 @@ export function groupAntigravityModels(models: readonly DiscoveredModel[]): Anti
   const visible = models.filter(model => model.antigravity?.visible ?? isAntigravityChatModel(model.id))
   const groups = new Map<string, AntigravityModelGroup>()
   for (const model of visible) {
-    const match = /^((?:gemini|claude|gpt-oss)-.+)-(low|medium|high)$/.exec(model.id)
+    const match = /^((?:gemini|claude|gpt-oss)-.+)-(low|medium|high|xhigh)$/.exec(model.id)
     const id = match === null ? undefined : antigravityModelId(model.id)
     const effort = model.antigravity?.thinkingLevel?.toLowerCase() ?? match?.[2]
     if (id === undefined || effort === undefined || !EFFORTS.includes(effort as Effort)) {
@@ -35,7 +35,7 @@ export function groupAntigravityModels(models: readonly DiscoveredModel[]): Anti
     let group = groups.get(id)
     if (group?.variants === undefined) {
       const base = visible.find(entry => entry.id === id) ?? model
-      group = { ...base, id, name: base.name.replace(/\s*\(?\b(?:low|medium|high|tiered)\)?$/i, '').trim(), variants: {} }
+      group = { ...base, id, name: base.name.replace(/\s*\(?\b(?:low|medium|high|xhigh|tiered)\)?$/i, '').trim(), variants: {} }
       groups.set(id, group)
     }
     group.variants![effort as Effort] = model
@@ -45,8 +45,9 @@ export function groupAntigravityModels(models: readonly DiscoveredModel[]): Anti
     const efforts = EFFORTS.filter(effort => group.variants![effort] !== undefined)
     // Prefer High, matching the previous Claude/Pro behavior; never invent a missing tier.
     group.reasoning = {
-      efforts: efforts.map(id => ({ id: ReasoningEffortId(id), name: id[0].toUpperCase() + id.slice(1) })),
-      defaultEffort: ReasoningEffortId(efforts.at(-1)!),
+      efforts: efforts.map(id => ({ id: ReasoningEffortId(id), name: id === 'xhigh' ? 'Extra High' : id[0].toUpperCase() + id.slice(1) })),
+      // Keep High as the default: XHigh is opt-in, not a silent behavior change.
+      defaultEffort: ReasoningEffortId(efforts.includes('high') ? 'high' : efforts.at(-1)!),
     }
     for (const field of ['contextWindow', 'maxOutputTokens'] as const) {
       const limits = Object.values(group.variants).map(model => model[field]).filter((value): value is number => value !== undefined)

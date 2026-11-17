@@ -1,6 +1,6 @@
 /** Only concrete, explicit effort suffixes establish an Antigravity model family. */
 export function antigravityModelId(id: string): string {
-  return id.replace(/^((?:gemini|claude|gpt-oss)-.+)-(?:low|medium|high)$/, '$1')
+  return id.replace(/^((?:gemini|claude|gpt-oss)-.+)-(?:low|medium|high|xhigh)$/, '$1')
 }
 
 /** Quota scopes retain concrete upstream ids; selectors use the family id. */
