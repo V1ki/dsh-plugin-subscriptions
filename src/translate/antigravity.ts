@@ -231,6 +231,24 @@ export function toAntigravityContents(messages: readonly TranslatableMessage[], 
   return out
 }
 
+/** Native DSH system instructions rejected with generic upstream 429s (see #223). */
+const DSH_SYSTEM_REPLACEMENTS = [
+  ['You are an AI agent powered by DeepSeek Harness.', 'You are an AI agent powered by DSH.'],
+  ['The runtime context names the DeepSeek Harness implementation checkout.', 'The runtime context names the DSH implementation checkout.'],
+  ['You are interacting with the user through the DeepSeek Harness Web GUI whose URL the runtime context names.',
+    'You are interacting with the user through the DSH Web GUI whose URL the runtime context names.'],
+  ['The browser provides no implicit DOM, route, or screenshot context.',
+    'Browser DOM, routes, and screenshots are available only after explicit inspection.'],
+] as const
+
+/** Equivalent wire wording for known host instructions, preserving other system text and conversation data. */
+function antigravitySystemPrompt(system: string): string {
+  for (const [original, replacement] of DSH_SYSTEM_REPLACEMENTS) {
+    system = system.replaceAll(original, replacement)
+  }
+  return system
+}
+
 /**
  * Build one v1internal generateContent/streamGenerateContent request.
  * When forStreaming is true and the model is Claude, caps maxOutputTokens at 64000
@@ -279,7 +297,7 @@ export function toAntigravityRequest(
     request: {
       contents: toAntigravityContents(messages, options.model, wireModel),
       sessionId,
-      ...system === undefined || system.length === 0 ? {} : { systemInstruction: { parts: [{ text: system }] } },
+      ...system === undefined || system.length === 0 ? {} : { systemInstruction: { parts: [{ text: antigravitySystemPrompt(system) }] } },
       ...tools.length === 0 ? {} : {
         tools,
         toolConfig: { functionCallingConfig: { mode: 'VALIDATED' as const } },

@@ -235,6 +235,59 @@ test('request conversion carries system, images, tools, tool results, and signed
   assert.equal(image?.inlineData?.data, 'aGVsbG8=')
 })
 
+test('Antigravity uses compatible native system instructions for both transports', () => {
+  const system = [
+    'You are an AI agent powered by DeepSeek Harness.',
+    'You are a coding agent powered by the gemini-4-carbon model.',
+    'The runtime context names the DeepSeek Harness implementation checkout. The checkout location and current working directory are separate.',
+    'You are interacting with the user through the DeepSeek Harness Web GUI whose URL the runtime context names. Continue using the supplied tools.',
+    'The browser provides no implicit DOM, route, or screenshot context.',
+  ].join('\r\n\r\n')
+  const expected = system.replaceAll('DeepSeek Harness', 'DSH')
+    .replace('The browser provides no implicit DOM, route, or screenshot context.',
+      'Browser DOM, routes, and screenshots are available only after explicit inspection.')
+  for (const streaming of [false, true]) {
+    const input = { ...options([]), system }
+    const payload = toAntigravityRequest(input, [], 'project-123', streaming)
+    assert.equal(payload.request.systemInstruction?.parts[0].text, expected)
+    assert.equal(input.system, system)
+  }
+})
+
+test('Antigravity normalizes system-message fallback and respects an explicit system override', () => {
+  const messages = [message('system', [{ type: 'text', text: 'You are an AI agent powered by DeepSeek Harness.' }])]
+  const { system: _system, ...input } = options([])
+  const original = structuredClone(messages)
+  assert.equal(toAntigravityRequest(input, messages, 'project-123').request.systemInstruction?.parts[0].text,
+    'You are an AI agent powered by DSH.')
+  assert.equal(toAntigravityRequest({ ...input, system: 'Keep my instructions.' }, messages, 'project-123').request.systemInstruction?.parts[0].text,
+    'Keep my instructions.')
+  assert.equal(toAntigravityRequest({ ...input, system: '' }, messages, 'project-123').request.systemInstruction, undefined)
+  assert.equal(toAntigravityRequest(input, [], 'project-123').request.systemInstruction, undefined)
+  assert.deepEqual(messages, original)
+})
+
+test('Antigravity preserves product names in custom instructions, paths, messages and tool data', () => {
+  const text = 'Document DeepSeek Harness and inspect C:/Program Files/DeepSeek Harness/config.json.'
+  const identity = 'You are an AI agent powered by DeepSeek Harness.'
+  const messages = [
+    message('user', [{ type: 'text', text: identity }]),
+    message('assistant', [{ type: 'text', text }, { type: 'tool-call', id: ToolCallId('identity-tool'), name: 'bash', arguments: JSON.stringify({ cmd: text }) }]),
+    message('user', [{ type: 'tool-result', toolCallId: ToolCallId('identity-tool'), content: [{ type: 'text', text: identity }] }]),
+  ]
+  const input = { ...options([]), system: text }
+  const original = structuredClone(input)
+  const originalMessages = structuredClone(messages)
+  const payload = toAntigravityRequest(input, messages, 'project-123')
+  assert.equal(payload.request.systemInstruction?.parts[0].text, text)
+  assert.equal(payload.request.contents[0].parts[0].text, identity)
+  assert.equal(payload.request.contents[1].parts[0].text, text)
+  assert.deepEqual(payload.request.contents[1].parts[1].functionCall?.args, { cmd: text })
+  assert.deepEqual(payload.request.contents[2].parts[0].functionResponse?.response, { output: identity })
+  assert.deepEqual(input, original)
+  assert.deepEqual(messages, originalMessages)
+})
+
 test('first-class harness tool messages become correlated function responses', () => {
   const messages: TranslatableMessage[] = [
     message('assistant', [{ type: 'tool-call', id: ToolCallId('current-call'), name: 'bash', arguments: '{}' }]),
