@@ -642,7 +642,12 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
                         <span
                           data-subscription-budget-target={row.kind}
                           data-subscription-budget-percent={Math.round(target)}
-                          style={{ ...styles.budgetTargetMarker, left: `clamp(1.5px, ${target}%, calc(100% - 1.5px))` }}
+                          data-subscription-budget-over={row.remainingPercent < target ? 'true' : 'false'}
+                          style={{
+                            ...styles.budgetTargetMarker,
+                            left: `clamp(1.5px, ${target}%, calc(100% - 1.5px))`,
+                            ...(row.remainingPercent < target ? styles.budgetTargetOver : {}),
+                          }}
                         />
                       )
                     })()}
@@ -830,10 +835,14 @@ const styles: Record<string, CSSProperties> = {
     overflow: 'visible', backgroundColor: 'var(--dsw-alias-border-l2)',
   },
   budgetTargetMarker: {
-    position: 'absolute', top: -1, height: 8, width: 2, borderRadius: 999,
+    position: 'absolute', top: -1, height: 8, width: 1.5, borderRadius: 999,
     transform: 'translateX(-50%)', backgroundColor: '#fff',
     boxShadow: '0 0 3px 1px rgba(0,0,0,.85), 0 0 6px 2px rgba(0,0,0,.45)',
     pointerEvents: 'none',
+  },
+  budgetTargetOver: {
+    backgroundColor: '#ff4545',
+    boxShadow: '0 0 3px 1px rgba(0,0,0,.85), 0 0 6px 2px rgba(0,0,0,.45)',
   },
   compactFill: {
     display: 'block', height: '100%', borderRadius: 'inherit',
