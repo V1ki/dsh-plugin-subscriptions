@@ -12,7 +12,7 @@ const css = registerHooks({ load(url, context, nextLoad) {
     : nextLoad(url, context)
 } })
 const { AccountWindows, CodexExhaustionNotice, compactSegment, createCurrentModelReader, previewWindows,
-  collapsedDisplays, expandedDisplays, retainSubscriptionSelection, usageBadgeIcon, compactQuotaRows } = await import('../src/client/SubscriptionUsageBadge.js')
+  collapsedDisplays, expandedDisplays, retainSubscriptionSelection, usageBadgeIcon, compactQuotaRows, budgetTargetRemaining } = await import('../src/client/SubscriptionUsageBadge.js')
 const { ImageGenerateToolview } = await import('../src/client/ImageGenerateToolview.js')
 const { VideoGenerateToolview } = await import('../src/client/VideoGenerateToolview.js')
 css.deregister()
@@ -316,4 +316,18 @@ test('Codex-style compact rows show only the default account shared windows as r
     { kind: 'session', shortLabel: '5h', usedPercent: 100, remainingPercent: 0 },
     { kind: 'weekly', shortLabel: '7d', usedPercent: 0, remainingPercent: 100 },
   ])
+})
+
+test('budget line tracks elapsed time within the reset duration, hiding invalid resets', () => {
+  const hour = 3600_000
+  const now = 2_000_000_000_000
+  assert.equal(budgetTargetRemaining({ kind: 'session', resetsAt: now + 2.5 * hour }, now), 50)
+  assert.equal(budgetTargetRemaining({ kind: 'weekly', resetsAt: now + 3.5 * 24 * hour }, now), 50)
+  assert.equal(budgetTargetRemaining({ kind: 'session', resetsAt: now + hour, durationMs: 2 * hour }, now), 50)
+  assert.equal(budgetTargetRemaining({ kind: 'session', resetsAt: now + 5 * hour }, now), 100)
+  assert.equal(budgetTargetRemaining({ kind: 'session', resetsAt: now }, now), 0)
+  assert.equal(budgetTargetRemaining({ kind: 'session' }, now), undefined)
+  assert.equal(budgetTargetRemaining({ kind: 'session', resetsAt: now - 1 }, now), undefined)
+  assert.equal(budgetTargetRemaining({ kind: 'session', resetsAt: now + 6 * hour }, now), undefined)
+  assert.equal(budgetTargetRemaining({ kind: 'session', resetsAt: now + hour, durationMs: 0 }, now), undefined)
 })

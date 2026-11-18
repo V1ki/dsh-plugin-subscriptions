@@ -39,7 +39,7 @@ import type { ModelDirectoriesLike } from './SpeedSelect.js'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
 import { hostIcon } from './host-icons.js'
-import { useUsageBadgeMode, useUsageBadgeStyle, useQuotaDisplayMode, type QuotaDisplayMode } from './usage-badge-preferences.js'
+import { useUsageBadgeMode, useUsageBadgeStyle, useBudgetTargetLine, useQuotaDisplayMode, type QuotaDisplayMode } from './usage-badge-preferences.js'
 import { visibleUsageWindows } from './usage-window-filter.js'
 import { DISPLAY_NAME_CHANGED, type DisplayNameChange } from './display-name-events.js'
 
@@ -242,6 +242,7 @@ export function compactQuotaRows(display: ProviderUsageDisplay): Array<{
   usedPercent: number
   remainingPercent: number
   resetsAt?: number
+  durationMs?: number
 }> {
   const account = pillAccountOf(display)
   if (!account) return []
@@ -259,8 +260,24 @@ export function compactQuotaRows(display: ProviderUsageDisplay): Array<{
       usedPercent,
       remainingPercent: 100 - usedPercent,
       ...(window.resetsAt === undefined ? {} : { resetsAt: window.resetsAt }),
+      ...(window.durationMs === undefined ? {} : { durationMs: window.durationMs }),
     }]
   })
+}
+
+/** Approximate a linear spending target from reset time and window duration. */
+export function budgetTargetRemaining(
+  row: { kind: 'session' | 'weekly'; resetsAt?: number; durationMs?: number },
+  now: number,
+): number | undefined {
+  if (row.resetsAt === undefined || !Number.isFinite(row.resetsAt)
+    || !Number.isFinite(now)) return undefined
+  const fallback = row.kind === 'session' ? 5 * 3600_000 : 7 * 24 * 3600_000
+  const duration = row.durationMs ?? fallback
+  if (!Number.isFinite(duration) || duration <= 0) return undefined
+  const remainingMs = row.resetsAt - now
+  if (remainingMs < 0 || remainingMs > duration) return undefined
+  return Math.max(0, Math.min(100, 100 * remainingMs / duration))
 }
 
 /** Visual indicator agrees with Codex Connect's remaining-quota thresholds. */
@@ -336,8 +353,9 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
   const [lastSubscription, setLastSubscription] = useState<ModelSelection | undefined>(undefined)
   const displayMode = useUsageBadgeMode()
   const styleMode = useUsageBadgeStyle()
+  const budgetTargetEnabled = useBudgetTargetLine()
   const quotaMode = useQuotaDisplayMode()
-  useQuotaClock()
+  const now = useQuotaClock()
   const current = selection?.provider
   const badgeSelection = retainSubscriptionSelection(lastSubscription, selection)
   const [open, setOpen] = useState(false)
@@ -571,9 +589,10 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
   const compact = compactRows.length > 0
   // The compact bars always encode REMAINING quota, like Codex Connect.
   // Keep full account information in the screen-reader label and popup.
-  const compactSummary = compactRows.map(row =>
-    `${row.shortLabel}: ${Math.round(row.remainingPercent)}% remaining`
-  ).join(' · ')
+  const compactSummary = compactRows.map(row => {
+    const target = budgetTargetEnabled ? budgetTargetRemaining(row, now) : undefined
+    return `${row.shortLabel}: ${Math.round(row.remainingPercent)}% remaining${target === undefined ? '' : `, linear target ${Math.round(target)}%`}`
+  }).join(' · ')
 
   // The dialog opens from the badge, so it follows the provider and model the
   // badge shows (a retained subscription when the current model is not one).
@@ -617,6 +636,16 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
                         backgroundColor: compactQuotaColor(row.remainingPercent),
                       }}
                     />
+                    {budgetTargetEnabled && (() => {
+                      const target = budgetTargetRemaining(row, now)
+                      return target === undefined ? null : (
+                        <span
+                          data-subscription-budget-target={row.kind}
+                          data-subscription-budget-percent={Math.round(target)}
+                          style={{ ...styles.budgetTargetMarker, left: `clamp(1.5px, ${target}%, calc(100% - 1.5px))` }}
+                        />
+                      )
+                    })()}
                   </span>
                 </span>
               ))}
@@ -797,8 +826,13 @@ const styles: Record<string, CSSProperties> = {
     color: 'var(--dsw-alias-label-tertiary)', fontSize: 9, lineHeight: '10px',
   },
   compactTrack: {
-    width: 48, height: 6, display: 'block', borderRadius: 999,
-    overflow: 'hidden', backgroundColor: 'var(--dsw-alias-border-l2)',
+    width: 48, height: 6, display: 'block', position: 'relative', borderRadius: 999,
+    overflow: 'visible', backgroundColor: 'var(--dsw-alias-border-l2)',
+  },
+  budgetTargetMarker: {
+    position: 'absolute', top: -2, height: 10, width: 3, borderRadius: 999,
+    transform: 'translateX(-50%)', backgroundColor: '#fff',
+    boxShadow: '0 0 0 1px rgba(0,0,0,.65)', pointerEvents: 'none',
   },
   compactFill: {
     display: 'block', height: '100%', borderRadius: 'inherit',

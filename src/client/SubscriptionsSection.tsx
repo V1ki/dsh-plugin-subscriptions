@@ -90,6 +90,8 @@ export interface UsageWindow {
   kind: 'session' | 'weekly' | 'other'
   scope?: string
   usedPercent: number
+  /** Reported total duration of the quota window, when available. */
+  durationMs?: number
   resetsAt?: number
 }
 

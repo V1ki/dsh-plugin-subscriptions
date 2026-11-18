@@ -78,6 +78,42 @@ export function useUsageBadgeStyle(): UsageBadgeStyle {
   return useSyncExternalStore(subscribeUsageBadgeStyle, readUsageBadgeStyle, () => 'compact')
 }
 
+/** Display-only linear spending guide; OFF is explicit, ON is the default. */
+const BUDGET_KEY = 'dsh.subscriptions.budgetTargetLine'
+const BUDGET_EVENT = 'dsh:subscriptions:budget-target-line'
+
+export function readBudgetTargetLine(): boolean {
+  if (typeof window === 'undefined') return true
+  try {
+    return window.localStorage.getItem(BUDGET_KEY) !== 'off'
+  } catch (error) {
+    if (!(error instanceof DOMException) || error.name !== 'SecurityError') throw error
+    return true
+  }
+}
+
+export function setBudgetTargetLine(enabled: boolean): void {
+  if (typeof enabled !== 'boolean') throw new TypeError('Invalid budget target preference')
+  window.localStorage.setItem(BUDGET_KEY, enabled ? 'on' : 'off')
+  window.dispatchEvent(new Event(BUDGET_EVENT))
+}
+
+export function subscribeBudgetTargetLine(notify: () => void): () => void {
+  const onStorage = (event: StorageEvent): void => {
+    if (event.key === BUDGET_KEY || event.key === null) notify()
+  }
+  window.addEventListener(BUDGET_EVENT, notify)
+  window.addEventListener('storage', onStorage)
+  return () => {
+    window.removeEventListener(BUDGET_EVENT, notify)
+    window.removeEventListener('storage', onStorage)
+  }
+}
+
+export function useBudgetTargetLine(): boolean {
+  return useSyncExternalStore(subscribeBudgetTargetLine, readBudgetTargetLine, () => true)
+}
+
 /** Independent of badge visibility; defaults preserve existing used semantics. */
 export type QuotaDisplayMode = 'used' | 'remaining'
 const QUOTA_KEY = 'dsh.subscriptions.quotaDisplayMode'
