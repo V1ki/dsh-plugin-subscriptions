@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { readUsageBadgeMode, setUsageBadgeMode, subscribeUsageBadgeMode, readQuotaDisplayMode, setQuotaDisplayMode, subscribeQuotaDisplayMode } from '../src/client/usage-badge-preferences.js'
+import { readUsageBadgeMode, setUsageBadgeMode, subscribeUsageBadgeMode, readQuotaDisplayMode, setQuotaDisplayMode, subscribeQuotaDisplayMode, readUsageBadgeStyle, setUsageBadgeStyle, subscribeUsageBadgeStyle, readBudgetTargetLine, setBudgetTargetLine, subscribeBudgetTargetLine } from '../src/client/usage-badge-preferences.js'
 import { UsageBadgeDisplaySetting } from '../src/client/UsageBadgeDisplaySetting.js'
 import { en, zh } from '../src/client/locales.js'
 
@@ -33,7 +33,12 @@ test('display preference defaults safely without a browser and renders bilingual
     assert.ok(html.includes(dictionary.usageBadgeDisplay))
     assert.ok(html.includes(dictionary.usageBadgeDisplayHidden))
     assert.ok(html.includes(dictionary.usageBadgeDisplayRecent))
-    assert.equal((html.match(/<option /g) ?? []).length, 4)
+    assert.equal((html.match(/<option /g) ?? []).length, 6)
+    assert.match(html, /role="switch"/)
+    assert.match(html, /aria-checked="true"/)
+    assert.match(html, /data-subscription-budget-switch="true"/)
+    assert.ok(html.includes(dictionary.usageBadgeStyleCompact))
+    assert.ok(html.includes(dictionary.usageBadgeStyleText))
     assert.ok(html.includes('<label'))
   }
 })
@@ -119,5 +124,39 @@ test('quota mode defaults to used and remains independent from legacy hiding', (
   browser.localStorage.setItem = () => { throw new DOMException('full', 'QuotaExceededError') }
   assert.throws(() => setQuotaDisplayMode('remaining'), { name: 'QuotaExceededError' })
   assert.equal(updates, 2)
+  unsubscribe()
+}))
+
+const styleKey = 'dsh.subscriptions.usageBadgeStyle'
+test('compact visual style is the local default and can be changed independently', () => withBrowser(browser => {
+  assert.equal(readUsageBadgeStyle(), 'compact')
+  let updates = 0
+  const unsubscribe = subscribeUsageBadgeStyle(() => { updates++ })
+  setUsageBadgeStyle('text')
+  assert.equal(readUsageBadgeStyle(), 'text')
+  assert.equal(browser.values.get(styleKey), 'text')
+  assert.equal(updates, 1)
+  setUsageBadgeStyle('compact')
+  assert.equal(readUsageBadgeStyle(), 'compact')
+  assert.equal(updates, 2)
+  assert.throws(() => Reflect.apply(setUsageBadgeStyle, undefined, ['bad']), TypeError)
+  assert.equal(updates, 2)
+  unsubscribe()
+}))
+
+const budgetKey = 'dsh.subscriptions.budgetTargetLine'
+test('budget target marker defaults to on, can be disabled and reacts to changes', () => withBrowser(browser => {
+  assert.equal(readBudgetTargetLine(), true)
+  let changes = 0
+  const unsubscribe = subscribeBudgetTargetLine(() => { changes++ })
+  setBudgetTargetLine(false)
+  assert.equal(readBudgetTargetLine(), false)
+  assert.equal(browser.values.get(budgetKey), 'off')
+  setBudgetTargetLine(true)
+  assert.equal(readBudgetTargetLine(), true)
+  assert.equal(changes, 2)
+  assert.throws(() => Reflect.apply(setBudgetTargetLine, undefined, ['maybe']), TypeError)
+  browser.values.set(budgetKey, 'unknown')
+  assert.equal(readBudgetTargetLine(), true)
   unsubscribe()
 }))
