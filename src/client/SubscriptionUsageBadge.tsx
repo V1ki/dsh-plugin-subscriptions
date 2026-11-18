@@ -280,6 +280,13 @@ export function budgetTargetRemaining(
   return Math.max(0, Math.min(100, 100 * remainingMs / duration))
 }
 
+/** Marker tone: red once over budget; yellow when within 10 pp of the target. */
+export function budgetTargetTone(remainingPercent: number, targetPercent: number): 'over' | 'near' | 'safe' {
+  if (remainingPercent < targetPercent) return 'over'
+  if (remainingPercent - targetPercent <= 10) return 'near'
+  return 'safe'
+}
+
 /** Visual indicator agrees with Codex Connect's remaining-quota thresholds. */
 function compactQuotaColor(remaining: number): string {
   if (remaining >= 60) return 'var(--dsw-alias-state-success-primary, #22c55e)'
@@ -638,15 +645,17 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
                     />
                     {budgetTargetEnabled && (() => {
                       const target = budgetTargetRemaining(row, now)
+                      const tone = target === undefined ? undefined : budgetTargetTone(row.remainingPercent, target)
                       return target === undefined ? null : (
                         <span
                           data-subscription-budget-target={row.kind}
                           data-subscription-budget-percent={Math.round(target)}
-                          data-subscription-budget-over={row.remainingPercent < target ? 'true' : 'false'}
+                          data-subscription-budget-over={tone === 'over' ? 'true' : 'false'}
+                          data-subscription-budget-tone={tone}
                           style={{
                             ...styles.budgetTargetMarker,
                             left: `clamp(1.5px, ${target}%, calc(100% - 1.5px))`,
-                            ...(row.remainingPercent < target ? styles.budgetTargetOver : {}),
+                            ...(tone === 'over' ? styles.budgetTargetOver : tone === 'near' ? styles.budgetTargetNear : {}),
                           }}
                         />
                       )
@@ -839,6 +848,9 @@ const styles: Record<string, CSSProperties> = {
     transform: 'translateX(-50%)', backgroundColor: '#fff',
     boxShadow: '0 0 3px 1px rgba(0,0,0,.85), 0 0 6px 2px rgba(0,0,0,.45)',
     pointerEvents: 'none',
+  },
+  budgetTargetNear: {
+    backgroundColor: '#ffdc45',
   },
   budgetTargetOver: {
     backgroundColor: '#ff4545',
