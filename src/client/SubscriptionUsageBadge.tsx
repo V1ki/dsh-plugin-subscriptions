@@ -850,7 +850,7 @@ const styles: Record<string, CSSProperties> = {
     pointerEvents: 'none',
   },
   budgetTargetNear: {
-    backgroundColor: '#ffdc45',
+    backgroundColor: '#f97316',
   },
   budgetTargetOver: {
     backgroundColor: '#ff4545',
