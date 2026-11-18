@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { CSSProperties } from 'react'
 import type { SubscriptionsKey } from './locales.js'
-import { setUsageBadgeMode, useUsageBadgeMode, setQuotaDisplayMode, useQuotaDisplayMode } from './usage-badge-preferences.js'
+import { setUsageBadgeMode, useUsageBadgeMode, setQuotaDisplayMode, useQuotaDisplayMode, setUsageBadgeStyle, useUsageBadgeStyle } from './usage-badge-preferences.js'
 
 type Translate = (key: SubscriptionsKey, params?: Record<string, unknown>) => string
 
@@ -9,6 +9,7 @@ type Translate = (key: SubscriptionsKey, params?: Record<string, unknown>) => st
 export function UsageBadgeDisplaySetting({ t }: { t: Translate }) {
   const mode = useUsageBadgeMode()
   const quotaMode = useQuotaDisplayMode()
+  const styleMode = useUsageBadgeStyle()
   const [failed, setFailed] = useState(false)
   return (
     <div style={styles.card}>
@@ -35,6 +36,25 @@ export function UsageBadgeDisplaySetting({ t }: { t: Translate }) {
         </select>
       </label>
       <p style={styles.hint}>{t('usageBadgeDisplayHint')}</p>
+      <label style={styles.field}>
+        <span>{t('usageBadgeStyle')}</span>
+        <select style={styles.select} aria-label={t('usageBadgeStyle')} value={styleMode}
+          onChange={event => {
+            const value = event.currentTarget.value
+            if (value !== 'compact' && value !== 'text') return
+            try {
+              setUsageBadgeStyle(value)
+              setFailed(false)
+            } catch (error) {
+              if (!(error instanceof DOMException) || !['SecurityError', 'QuotaExceededError'].includes(error.name)) throw error
+              setFailed(true)
+            }
+          }}>
+          <option value="compact">{t('usageBadgeStyleCompact')}</option>
+          <option value="text">{t('usageBadgeStyleText')}</option>
+        </select>
+      </label>
+      <p style={styles.hint}>{t('usageBadgeStyleHint')}</p>
       <label style={styles.field}>
         <span>{t('quotaDisplay')}</span>
         <select style={styles.select} aria-label={t('quotaDisplay')} value={quotaMode}

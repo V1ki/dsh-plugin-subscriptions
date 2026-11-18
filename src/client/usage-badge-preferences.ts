@@ -41,6 +41,43 @@ export function useUsageBadgeMode(): UsageBadgeMode {
   return useSyncExternalStore(subscribeUsageBadgeMode, readUsageBadgeMode, () => 'recent')
 }
 
+/** Local-only visual preference; does not alter the provider or fetched usage. */
+export type UsageBadgeStyle = 'compact' | 'text'
+const STYLE_KEY = 'dsh.subscriptions.usageBadgeStyle'
+const STYLE_EVENT = 'dsh:subscriptions:usage-badge-style'
+
+export function readUsageBadgeStyle(): UsageBadgeStyle {
+  if (typeof window === 'undefined') return 'compact'
+  try {
+    return window.localStorage.getItem(STYLE_KEY) === 'text' ? 'text' : 'compact'
+  } catch (error) {
+    if (!(error instanceof DOMException) || error.name !== 'SecurityError') throw error
+    return 'compact'
+  }
+}
+
+export function setUsageBadgeStyle(style: UsageBadgeStyle): void {
+  if (style !== 'compact' && style !== 'text') throw new TypeError('Invalid subscription usage badge style')
+  window.localStorage.setItem(STYLE_KEY, style)
+  window.dispatchEvent(new Event(STYLE_EVENT))
+}
+
+export function subscribeUsageBadgeStyle(notify: () => void): () => void {
+  const onStorage = (event: StorageEvent): void => {
+    if (event.key === STYLE_KEY || event.key === null) notify()
+  }
+  window.addEventListener(STYLE_EVENT, notify)
+  window.addEventListener('storage', onStorage)
+  return () => {
+    window.removeEventListener(STYLE_EVENT, notify)
+    window.removeEventListener('storage', onStorage)
+  }
+}
+
+export function useUsageBadgeStyle(): UsageBadgeStyle {
+  return useSyncExternalStore(subscribeUsageBadgeStyle, readUsageBadgeStyle, () => 'compact')
+}
+
 /** Independent of badge visibility; defaults preserve existing used semantics. */
 export type QuotaDisplayMode = 'used' | 'remaining'
 const QUOTA_KEY = 'dsh.subscriptions.quotaDisplayMode'

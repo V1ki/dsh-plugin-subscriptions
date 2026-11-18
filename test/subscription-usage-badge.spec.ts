@@ -12,7 +12,7 @@ const css = registerHooks({ load(url, context, nextLoad) {
     : nextLoad(url, context)
 } })
 const { AccountWindows, CodexExhaustionNotice, compactSegment, createCurrentModelReader, previewWindows,
-  collapsedDisplays, expandedDisplays, retainSubscriptionSelection, usageBadgeIcon } = await import('../src/client/SubscriptionUsageBadge.js')
+  collapsedDisplays, expandedDisplays, retainSubscriptionSelection, usageBadgeIcon, compactQuotaRows } = await import('../src/client/SubscriptionUsageBadge.js')
 const { ImageGenerateToolview } = await import('../src/client/ImageGenerateToolview.js')
 const { VideoGenerateToolview } = await import('../src/client/VideoGenerateToolview.js')
 css.deregister()
@@ -297,4 +297,23 @@ test('single-account summaries identify fallback source, mode, stale data and un
   d.accounts.push({ key: 'unknown', isDefault: false, windows: [] })
   assert.match(compactSegment(d), /2 signed-in accounts/)
   assert.doesNotMatch(compactSegment(d), /%/)
+})
+
+test('Codex-style compact rows show only the default account shared windows as remaining quotas', () => {
+  const d = display('claude', [
+    { kind: 'weekly', usedPercent: 57, resetsAt: 1_900_000_000_000 },
+    { kind: 'session', usedPercent: 25, resetsAt: 1_800_000_000_000 },
+    { kind: 'weekly', scope: 'Fable', usedPercent: 9 },
+  ])
+  d.accounts.unshift({ key: 'other', isDefault: false,
+    windows: [{ kind: 'session', usedPercent: 99 }, { kind: 'weekly', usedPercent: 100 }] })
+  assert.deepEqual(compactQuotaRows(d), [
+    { kind: 'session', shortLabel: '5h', usedPercent: 25, remainingPercent: 75, resetsAt: 1_800_000_000_000 },
+    { kind: 'weekly', shortLabel: '7d', usedPercent: 57, remainingPercent: 43, resetsAt: 1_900_000_000_000 },
+  ])
+  assert.deepEqual(compactQuotaRows(display('antigravity', [{ kind: 'weekly', scope: 'Gemini', usedPercent: 20 }])), [])
+  assert.deepEqual(compactQuotaRows(display('codex', [{ kind: 'session', usedPercent: 110 }, { kind: 'weekly', usedPercent: -4 }])), [
+    { kind: 'session', shortLabel: '5h', usedPercent: 100, remainingPercent: 0 },
+    { kind: 'weekly', shortLabel: '7d', usedPercent: 0, remainingPercent: 100 },
+  ])
 })
