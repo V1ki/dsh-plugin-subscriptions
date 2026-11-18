@@ -830,9 +830,10 @@ const styles: Record<string, CSSProperties> = {
     overflow: 'visible', backgroundColor: 'var(--dsw-alias-border-l2)',
   },
   budgetTargetMarker: {
-    position: 'absolute', top: -2, height: 10, width: 3, borderRadius: 999,
+    position: 'absolute', top: -1, height: 8, width: 2, borderRadius: 999,
     transform: 'translateX(-50%)', backgroundColor: '#fff',
-    boxShadow: '0 0 0 1px rgba(0,0,0,.65)', pointerEvents: 'none',
+    boxShadow: '0 0 3px 1px rgba(0,0,0,.85), 0 0 6px 2px rgba(0,0,0,.45)',
+    pointerEvents: 'none',
   },
   compactFill: {
     display: 'block', height: '100%', borderRadius: 'inherit',
