@@ -6,7 +6,7 @@ import { ToolCallId } from '../src/compat.js'
 import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
 import { hostSupportsImageOffload, imageRequestTarget, requiredImageOffloadCount, resolveImages } from '../src/translate/resolved.js'
 import type { TranslatableMessage } from '../src/translate/resolved.js'
-import { CLAUDE_REQUEST_IMAGE_BUDGET, ClaudeAdapter } from '../src/providers/claude.js'
+import { CLAUDE_IMAGE_LIMIT, CLAUDE_REQUEST_IMAGE_BUDGET, ClaudeAdapter } from '../src/providers/claude.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
 import type { ClaudeSession } from '../src/auth/store.js'
 import type { CompatibleMessage } from '../src/compat.js'
@@ -59,10 +59,14 @@ function withImages(...refs: object[]): Message[] {
 }
 
 /** An attachment store recording which read each image took. */
-function store(options: { projection?: 'unsupported' } = {}) {
+function store(options: { projection?: 'unsupported'; hostPath?: string } = {}) {
   const calls: string[] = []
   const targets: unknown[] = []
   const attachments = {
+    imageHostPath: () => {
+      if (options.hostPath === 'throw') throw new Error('invalid attachment reference')
+      return options.hostPath
+    },
     readImage: async (ref: { attachmentId: string }) => {
       calls.push(`stored:${ref.attachmentId}`)
       return { ref, data: new Uint8Array([111]) }
@@ -83,6 +87,50 @@ test('image request targets fit the long edge and carry both host projection sha
   assert.deepEqual(imageRequestTarget(TALL, LIMIT), { width: 1545, height: 2000, maxPixels: 3_090_000, maxBytes: 3_750_000 })
   assert.equal(imageRequestTarget({ width: 2000, height: 2000 }, LIMIT), undefined)
   assert.equal(imageRequestTarget(SMALL, LIMIT), undefined)
+})
+
+test('a soft byte target re-encodes heavy images at their own size and caps every target', () => {
+  const soft = { ...LIMIT, softBytes: 1_000_000 }
+  const heavy = { ...SMALL, bytes: 3_000_000 }
+  assert.deepEqual(imageRequestTarget(heavy, soft), { width: 800, height: 600, maxPixels: 480_000, maxBytes: 1_000_000 })
+  assert.equal(imageRequestTarget({ ...SMALL, bytes: 1_000_000 }, soft), undefined)
+  assert.equal(imageRequestTarget({ width: 800, height: 600 }, soft), undefined, 'unknown size is sent as stored')
+  assert.equal(imageRequestTarget(heavy, LIMIT), undefined, 'no soft target keeps the edge-only rule')
+  assert.equal(imageRequestTarget(WIDE, soft)?.maxBytes, 1_000_000)
+  assert.equal(imageRequestTarget(heavy, { ...LIMIT, softBytes: 5_000_000 }), undefined, 'the soft target never exceeds maxBytes')
+  assert.equal(imageRequestTarget({ ...SMALL, bytes: 4_000_000 }, { ...LIMIT, softBytes: 5_000_000 })?.maxBytes, 3_750_000)
+  assert.equal(imageRequestTarget(WIDE, { ...LIMIT, softBytes: 5_000_000 })?.maxBytes, 3_750_000)
+})
+
+test('Claude re-encodes lossless screenshots over 1MB within the edge limit', async () => {
+  assert.equal(CLAUDE_IMAGE_LIMIT.softBytes, 1_000_000)
+  const { attachments, calls, targets } = store()
+  const heavy = { ...SMALL, attachmentId: 'heavy', bytes: 3_000_000 }
+  await resolveImages(withImages(heavy, SMALL), attachments, undefined, CLAUDE_IMAGE_LIMIT)
+  assert.deepEqual(calls, ['request:heavy', 'stored:small'])
+  assert.deepEqual(targets, [{ width: 800, height: 600, maxPixels: 480_000, maxBytes: 1_000_000 }])
+})
+
+test('offloaded images name a read-only copy when the filesystem maps the host path', async () => {
+  const attachment = { ...SMALL, mediaType: 'image/png' as const, attachmentId: AttachmentId('small') }
+  const messages: GenerateOptions['messages'] = [{ role: 'user', content: [{ type: 'image', attachment, offloaded: true }] }]
+  const { attachments, calls } = store({ hostPath: 'host/small.png' })
+  const mapped = await resolveImages(messages, attachments, undefined, undefined, hostPath => `/work/${hostPath}`)
+  assert.match(JSON.stringify(mapped), /read-only[^"]*\\"\/work\/host\/small\.png\\"/)
+  assert.deepEqual(calls, [], 'an offloaded image is never read back')
+
+  const unmapped = await resolveImages(messages, attachments)
+  assert.match(JSON.stringify(unmapped), /No local normalized image path/)
+  const outside = await resolveImages(messages, attachments, undefined, undefined, () => undefined)
+  assert.match(JSON.stringify(outside), /No local normalized image path/)
+  const broken = store({ hostPath: 'throw' })
+  const failing = await resolveImages(messages, broken.attachments, undefined, undefined, hostPath => hostPath)
+  assert.match(JSON.stringify(failing), /No local normalized image path/, 'a failing lookup keeps the no-path text')
+  const throwingMapper = await resolveImages(messages, attachments, undefined, undefined, () => { throw new Error('mapper failed') })
+  assert.match(JSON.stringify(throwingMapper), /No local normalized image path/, 'a failing mapper keeps the no-path text')
+  const { imageHostPath: _omitted, ...legacy } = attachments as Record<string, unknown>
+  const noHostPath = await resolveImages(messages, legacy as never, undefined, undefined, hostPath => hostPath)
+  assert.match(JSON.stringify(noHostPath), /No local normalized image path/, 'a store without imageHostPath keeps the no-path text')
 })
 
 test('a limited route sends oversized images downscaled and leaves the rest as stored', async () => {
@@ -107,7 +155,7 @@ test('without a limit, or on a host that cannot project, images are sent as stor
 })
 
 /** A Claude adapter on one logged-in account whose requests `fetch` answers. */
-function claudeAdapter(attachments: unknown) {
+function claudeAdapter(attachments: unknown, mapHostPath?: (hostPath: string) => string | undefined) {
   const session: ClaudeSession = { accessToken: 'at', refreshToken: 'rt', expiresAt: Date.now() + 3_600_000, scopes: 'scope' }
   const tokens = new AccountTokenManager<ClaudeSession>({
     provider: 'claude',
@@ -126,6 +174,7 @@ function claudeAdapter(attachments: unknown) {
     tokens,
     discovery: false,
     resolveAttachments: () => attachments as never,
+    resolveHostPathMapper: () => mapHostPath,
     resolveCliVersion: async () => '2.1.999',
   })
 }
@@ -204,6 +253,27 @@ test('Claude asks the host to offload the oldest images instead of sending an ov
   assert.equal(failure.code, 'IMAGE_OFFLOAD_REQUIRED')
   const base64 = Math.ceil(raw / 3) * 4
   assert.equal(failure.failure?.offloadImages, 7 - Math.floor(CLAUDE_REQUEST_IMAGE_BUDGET / base64))
+})
+
+test('Claude passes the host-path mapper to offloaded image placeholders', async () => {
+  const attachment = { ...SMALL, mediaType: 'image/png' as const, attachmentId: AttachmentId('small') }
+  const messages: Message[] = [{ id: MessageId('m'), role: 'user', source: { kind: 'user' }, content: [{ type: 'image', attachment, offloaded: true } as never] }]
+  const { attachments } = store({ hostPath: 'host/small.png' })
+  let body = ''
+  const original = globalThis.fetch
+  globalThis.fetch = (async (_url: unknown, init?: { body?: unknown }) => {
+    body = String(init?.body ?? '')
+    return new Response('{}', { status: 400 })
+  }) as typeof globalThis.fetch
+  try {
+    const options: GenerateOptions = { provider: 'claude', model: 'claude-opus-5-5', messages, maxTokens: 1_000 }
+    await assert.rejects(async () => {
+      for await (const _chunk of claudeAdapter(attachments, hostPath => `/work/${hostPath}`).stream(options)) { /* drain */ }
+    })
+  } finally {
+    globalThis.fetch = original
+  }
+  assert.match(body, /read-only[^"]*\\"\/work\/host\/small\.png\\"/)
 })
 
 test('Claude sends a request whose images fit the budget', async () => {
