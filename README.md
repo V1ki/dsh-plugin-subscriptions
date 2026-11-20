@@ -215,6 +215,7 @@ Existing defaults continue to load from and save to `~/.dsh/plugins/subscription
     providers: [codex, claude]        # subset; default all five
     streamIdleTimeoutMs: 300000
     claudePromptCacheTtl: 5m           # Claude prompt-cache lifetime: 5m (default) or 1h
+    claudeDeferTools: []               # Claude: tool-name patterns sent deferred (see below); empty = unchanged request
     rateLimit:
       wait: true                       # wait out a closed rate-limit window (default)
       maxWaitMs: 21600000              # ceiling on one wait; 6 h, covers a 5-hour session window
@@ -224,6 +225,20 @@ Existing defaults continue to load from and save to `~/.dsh/plugins/subscription
       copilot:                         # manual entries disable Copilot catalog discovery
         - { id: gpt-5.6-sol, wire: responses }   # copilot only: force the upstream protocol
 ```
+
+`claudeDeferTools` lists tool names (or prefixes ending in `*`, for example `mcp__*`) whose definitions the Claude route sends with
+`defer_loading: true`. When at least one tool is deferred, the route also adds Anthropic's server-side tool search tool
+(`tool_search_tool_regex_20251119`), so the model loads a deferred definition only when it needs it. This shrinks the tool
+definitions every request carries: in the verification in [`docs/claude-deferred-tools-verification.md`](docs/claude-deferred-tools-verification.md)
+30 tools of about 600 tokens each went from 18,658 to 713 input tokens. The default is empty and then the request is
+byte-identical to earlier releases. The first turn in which the set of deferred tools becomes non-empty (or empty again) changes `tools`, which
+Anthropic documents as invalidating the cache once; later turns keep the cache. A pattern is a literal name or a prefix with one trailing `*`; it is never a regular
+expression. If DSH core ever passes a tool marked `deferLoading` to this route, that tool is deferred too; today core removes the marker before the request reaches this plugin (the route does not declare `toolUpdate`), so the pattern list is what defers tools. Limits of the API: only models that support tool search accept it (Opus 4.1 and earlier do not; a model that rejects it answers 400, so enable the option only with
+supported models); at least one tool must stay
+loaded (the search tool counts), and a deferred tool cannot carry `cache_control` (this route never puts one on a tool; the
+tools+system mark sits on `system`). When the model runs a search inside a turn, usage is the cumulative total the endpoint reports in `message_delta`. A request with deferred tools was served from the prompt cache in the end-to-end check, and Anthropic documents that deferred tools
+leave the cached prefix untouched ([prompt caching with tools](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-use-with-prompt-caching));
+a hit rate across a long session was not measured.
 
 `claudePromptCacheTtl` sets how long Anthropic keeps the Claude conversation cache after its last use.
 It can also be changed without a restart from Settings → Subscriptions → Claude → Manage ("Prompt cache

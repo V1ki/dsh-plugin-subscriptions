@@ -26,6 +26,7 @@ import {
   toAnthropicMessages,
   toAnthropicSystem,
   toAnthropicTools,
+  toAnthropicToolsDeferred,
 } from '../translate/anthropic.js'
 import type { PromptCacheTtl } from '../translate/anthropic.js'
 import {
@@ -573,6 +574,13 @@ export interface ClaudeAdapterOptions {
    * the next turn without a restart; undefined falls back to `promptCacheTtl`.
    */
   promptCacheTtlOverride?: () => PromptCacheTtl | undefined
+  /**
+   * Tool-name patterns sent with `defer_loading: true`, with the server-side
+   * tool search tool added. Empty or absent keeps the request body exactly as
+   * it was before this option existed. A function so a caller may supply a live
+   * value; `apply` passes the configured list, which changes with a config reload.
+   */
+  deferToolPatterns?: () => readonly string[]
 }
 
 /**
@@ -612,6 +620,7 @@ const CLAUDE_MODALITIES: readonly ('text' | 'image')[] = ['text', 'image']
  * @param thinking - the thinking parameter, when the model takes one.
  * @param effort - the reasoning effort, when the model advertises efforts.
  * @param cacheTtl - lifetime of every cache breakpoint; defaults to five minutes.
+ * @param deferToolPatterns - tool-name patterns to send deferred (see {@link toAnthropicToolsDeferred}); empty keeps the body unchanged.
  * Requests that carry a `purpose` (compaction, session titles) always use five
  * minutes to preserve their existing auxiliary-request behavior. A five-minute
  * mark can still read an entry a one-hour mark wrote.
@@ -624,6 +633,7 @@ export function claudeRequestBody(
   thinking?: Record<string, unknown>,
   effort?: string,
   cacheTtl?: PromptCacheTtl,
+  deferToolPatterns: readonly string[] = [],
 ): Record<string, unknown> {
   const ttl = options.purpose === undefined ? cacheTtl : undefined
   const anthropicMessages = toAnthropicMessages(messages)
@@ -634,7 +644,11 @@ export function claudeRequestBody(
     system: toAnthropicSystem(options.system, messages, ttl),
     messages: anthropicMessages,
     ...options.tools !== undefined && options.tools.length > 0
-      ? { tools: toAnthropicTools(options.tools) }
+      ? {
+          tools: deferToolPatterns.length === 0 && !options.tools.some(tool => tool.deferLoading === true)
+            ? toAnthropicTools(options.tools)
+            : toAnthropicToolsDeferred(options.tools, { deferPatterns: deferToolPatterns }),
+        }
       : {},
     ...thinking === undefined ? {} : { thinking },
     ...effort === undefined ? {} : { output_config: { effort } },
@@ -891,7 +905,7 @@ export class ClaudeAdapter extends LlmAdapter {
       ? String(options.reasoningEffort)
       : undefined
     const cacheTtl = this.options.promptCacheTtlOverride?.() ?? this.options.promptCacheTtl
-    const body = claudeRequestBody(options, messages, maxTokens, thinking, effort, cacheTtl)
+    const body = claudeRequestBody(options, messages, maxTokens, thinking, effort, cacheTtl, this.options.deferToolPatterns?.() ?? [])
     const cliVersion = await (this.options.resolveCliVersion ?? localClaudeCliVersion)()
     return proxiedFetch(CLAUDE_API_URL, {
       method: 'POST',

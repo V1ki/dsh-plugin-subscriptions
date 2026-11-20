@@ -320,6 +320,68 @@ export function toAnthropicTools(tools: readonly ToolSchema[]): Record<string, u
     }))
 }
 
+/** Name of the server-side tool search tool this adapter adds (regex variant). */
+export const TOOL_SEARCH_TOOL_NAME = 'tool_search_tool_regex'
+
+/** Version tag of the regex tool search tool, as documented for the Messages API. */
+export const TOOL_SEARCH_TOOL_TYPE = 'tool_search_tool_regex_20251119'
+
+/**
+ * Whether a tool name matches one `claudeDeferTools` pattern. A pattern is a
+ * literal name, or a literal prefix followed by a single trailing `*`
+ * (`mcp__*`); a bare `*` matches everything. Nothing else is a wildcard, so
+ * a pattern can never be a regular expression a model or a config typo could
+ * turn into something unexpected.
+ * @param name - tool name.
+ * @param pattern - one configured pattern.
+ * @returns true when the pattern covers the name.
+ */
+export function matchesDeferPattern(name: string, pattern: string): boolean {
+  if (pattern.length === 0) return false
+  if (pattern.endsWith('*')) return name.startsWith(pattern.slice(0, -1))
+  return name === pattern
+}
+
+/** Options for {@link toAnthropicToolsDeferred}. */
+export interface DeferredToolsOptions {
+  /** Name patterns whose tools are sent with `defer_loading: true`. */
+  deferPatterns: readonly string[]
+}
+
+/**
+ * Like {@link toAnthropicTools}, with deferred loading and the tool search
+ * tool added. A tool is deferred when DSH marked it (`deferLoading`) or when
+ * its name matches one of `deferPatterns`.
+ *
+ * The API rejects a request in which every tool is deferred, but the search
+ * tool is itself a loaded tool, so deferring every other tool is valid
+ * (verified against the endpoint). It is added only when something is
+ * actually deferred; otherwise the output equals {@link toAnthropicTools}.
+ * The API also rejects `cache_control` on a deferred tool: this function never
+ * adds one, and the request body places its cache mark on `system`. The wire
+ * order stays name-sorted for the existing cache-prefix reason, with the
+ * search tool first so that the deferred set never moves a loaded tool.
+ * @param tools - tool schemas from the request.
+ * @param options - defer rule.
+ * @returns Anthropic `tools` array entries.
+ */
+export function toAnthropicToolsDeferred(
+  tools: readonly ToolSchema[],
+  options: DeferredToolsOptions,
+): Record<string, unknown>[] {
+  const isDeferred = (tool: ToolSchema): boolean =>
+    tool.deferLoading === true || options.deferPatterns.some(pattern => matchesDeferPattern(tool.name, pattern))
+  const deferred = tools.filter(isDeferred)
+  if (deferred.length === 0) return toAnthropicTools(tools)
+  const deferredNames = new Set(deferred.map(tool => tool.name))
+  return [
+    { type: TOOL_SEARCH_TOOL_TYPE, name: TOOL_SEARCH_TOOL_NAME },
+    ...toAnthropicTools(tools).map(entry => (
+      deferredNames.has(entry.name as string) ? { ...entry, defer_loading: true } : entry
+    )),
+  ]
+}
+
 /** The subset of Anthropic SSE event shapes this translator reads. */
 export interface AnthropicStreamEvent {
   type: string
@@ -344,7 +406,13 @@ export interface AnthropicStreamEvent {
     partial_json?: string
     stop_reason?: string
   }
-  usage?: { output_tokens?: number }
+  usage?: {
+    output_tokens?: number
+    /** Cumulative across server-side iterations (tool search); absent on ordinary replies. */
+    input_tokens?: number
+    cache_read_input_tokens?: number
+    cache_creation_input_tokens?: number
+  }
   error?: { type?: string; message?: string }
 }
 
@@ -529,6 +597,22 @@ export class AnthropicStreamTranslator {
       }
       case 'message_delta': {
         if (event.usage?.output_tokens !== undefined) this.outputTokens = event.usage.output_tokens
+        // When the server runs a tool search inside the turn, `message_start` reports only the first iteration's input;
+        // `message_delta` then carries the cumulative total. Replace the start figures only for the fields it sends,
+        // so an ordinary reply (no input fields in the delta) keeps reporting exactly what it did before.
+        const total = event.usage
+        if (total !== undefined && (total.input_tokens !== undefined
+          || total.cache_read_input_tokens !== undefined || total.cache_creation_input_tokens !== undefined)) {
+          this.pendingUsage = {
+            inputTokens: total.input_tokens ?? this.pendingUsage?.inputTokens ?? 0,
+            ...(total.cache_read_input_tokens ?? this.pendingUsage?.cacheReadTokens) !== undefined
+              ? { cacheReadTokens: (total.cache_read_input_tokens ?? this.pendingUsage?.cacheReadTokens) as number }
+              : {},
+            ...(total.cache_creation_input_tokens ?? this.pendingUsage?.cacheWriteTokens) !== undefined
+              ? { cacheWriteTokens: (total.cache_creation_input_tokens ?? this.pendingUsage?.cacheWriteTokens) as number }
+              : {},
+          }
+        }
         switch (event.delta?.stop_reason) {
           case 'end_turn':
           case 'stop_sequence':

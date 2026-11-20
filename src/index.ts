@@ -175,6 +175,14 @@ export interface Config {
    * compaction and session-title requests always stay on five minutes.
    */
   claudePromptCacheTtl?: PromptCacheTtl
+  /**
+   * Claude only: tool-name patterns sent with `defer_loading: true`, with the
+   * server-side tool search tool added, so the model loads those definitions
+   * on demand instead of carrying them in every request. A pattern is a
+   * literal name or a prefix ending in `*` (`mcp__*`). Default empty: the
+   * request body is unchanged.
+   */
+  claudeDeferTools?: string[]
   /** Whether and how long a route waits out a closed rate-limit window. */
   rateLimit?: RateLimitConfig
   /** Advisory model catalogs overriding the built-in defaults, per provider. */
@@ -232,6 +240,7 @@ export const Config: z<Config> = z.object({
   codexClientVersion: z.string(),
   streamIdleTimeoutMs: z.number().min(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   claudePromptCacheTtl: z.union(['5m', '1h']).default(DEFAULT_PROMPT_CACHE_TTL),
+  claudeDeferTools: z.array(z.string()).default([]),
   rateLimit: z.object({
     wait: z.boolean().default(true),
     maxWaitMs: z.number().min(1).default(DEFAULT_RATE_LIMIT_MAX_WAIT_MS),
@@ -731,6 +740,12 @@ export function apply(ctx: Context, config: Config): void {
   if (claudePromptCacheTtl !== '5m' && claudePromptCacheTtl !== '1h') {
     throw new Error(`${name}: claudePromptCacheTtl must be '5m' or '1h'`)
   }
+  const claudeDeferTools = config.claudeDeferTools ?? []
+  if (!Array.isArray(claudeDeferTools)
+    || claudeDeferTools.some(pattern => typeof pattern !== 'string' || pattern.length === 0 || pattern !== pattern.trim())) {
+    // A pattern with surrounding whitespace would silently match nothing, so it is rejected rather than trimmed.
+    throw new Error(`${name}: claudeDeferTools must be an array of non-empty strings without surrounding whitespace`)
+  }
   const rateLimit = resolveRateLimitWait(config.rateLimit, `${name}: rateLimit`)
   const catalog = resolveCatalog(config.models)
   // A non-empty configured catalog is an explicit override: it wins over live
@@ -929,6 +944,7 @@ export function apply(ctx: Context, config: Config): void {
           resolveCliVersion: () => claudeVersion.resolve(),
           promptCacheTtl: claudePromptCacheTtl,
           promptCacheTtlOverride: () => preferences.promptCacheTtl(),
+          deferToolPatterns: () => claudeDeferTools,
           pool: () => poolAdapter,
         })
         adapters.set('claude', adapter)

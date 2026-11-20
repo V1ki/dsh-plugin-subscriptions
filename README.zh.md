@@ -214,6 +214,7 @@ Codex 的 **速度** 控件与 `/fast` 按底层模型（与其独立账号入�
     providers: [codex, claude]        # 子集;默认五个全启用
     streamIdleTimeoutMs: 300000
     claudePromptCacheTtl: 5m           # Claude 提示缓存时长:5m(默认)或 1h
+    claudeDeferTools: []               # Claude:按名称延迟加载的工具(见下文);为空则请求不变
     rateLimit:
       wait: true                       # 等待限流窗口重开(默认开启)
       maxWaitMs: 21600000              # 单次等待上限;6 小时,足够覆盖 5 小时会话窗口
@@ -223,6 +224,14 @@ Codex 的 **速度** 控件与 `/fast` 按底层模型（与其独立账号入�
       copilot:                         # 手工条目会关闭 Copilot 目录发现
         - { id: gpt-5.6-sol, wire: responses }   # 仅 copilot:强制指定上游协议
 ```
+
+`claudeDeferTools` 列出要延迟加载的工具名(或以 `*` 结尾的前缀,例如 `mcp__*`)。Claude 路由会为这些工具发送 `defer_loading: true`;
+只要有至少一个被延迟的工具,就会同时加入 Anthropic 的服务端工具搜索工具(`tool_search_tool_regex_20251119`),模型只在需要时才加载其定义,
+从而减少每次请求携带的工具定义。验证见 [`docs/claude-deferred-tools-verification.md`](docs/claude-deferred-tools-verification.md):
+30 个约 600 token 的工具,输入由 18,658 降到 713 token。默认为空,此时请求与以往版本逐字节一致。名称匹配模式只能是字面名称或带一个结尾 `*`
+的前缀,不是正则表达式。若核心将来把带 `deferLoading` 标记的工具传给本路由,该工具同样会被延迟;目前核心会在请求到达本插件之前移除该标记(本路由未声明 `toolUpdate`),因此实际由名称模式列表决定哪些工具被延迟。API 限制:至少要有一个工具保持加载(搜索工具算一个);被延迟的工具不能带
+`cache_control`(本路由从不在工具上加缓存标记,工具与系统提示的缓存标记在 `system` 上)。端到端验证中,带延迟工具的请求可从提示缓存读取;Anthropic 文档也说明延迟工具不影响已缓存的前缀
+([提示缓存与工具](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-use-with-prompt-caching));长会话中的命中率未测量。
 
 `claudePromptCacheTtl` 决定 Anthropic 在最近一次使用之后保留 Claude 对话缓存多久。默认 `5m` 发送的请求
 与之前的版本完全一致。设为 `1h` 时，每个缓存断点（工具+系统提示前缀，以及对话中的三个标记）都会带上
