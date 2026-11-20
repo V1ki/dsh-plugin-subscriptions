@@ -26,6 +26,23 @@ export const providerSettingsCss = `
   color-scheme: light;
 }
 .dsh-subscription-provider-area { min-width: 0; }
+.dsh-subscription-provider-header {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+.dsh-subscription-provider-identity { flex: 1 1 12rem; min-width: 0; overflow-wrap: anywhere; }
+.dsh-subscription-provider-actions,
+.dsh-subscription-add-account {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.dsh-subscription-provider-actions { margin-left: auto; }
+.dsh-subscription-add-account { gap: 2px; }
+.dsh-subscription-provider-actions button { gap: 5px; }
 .dsh-subscription-tabs-shell {
   position: relative;
   min-width: 0;

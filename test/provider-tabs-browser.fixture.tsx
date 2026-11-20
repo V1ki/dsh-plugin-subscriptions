@@ -31,7 +31,10 @@ const rpc = { call: async (_channel: string, method: string, payload: any) => {
     return { ok: true, value: {} }
   }
   if (endpoint === 'proxyGet') return { ok: true, value: { enabled: false, url: '', bypass: [], passwordSet: false } }
-  if (endpoint === 'usage') return { ok: true, value: { supported: false, windows: [] } }
+  if (endpoint === 'usage') {
+    if (payload.force) state.forcedRefresh = payload
+    return { ok: true, value: { supported: true, windows: [] } }
+  }
   return { ok: true, value: {} }
 } } as any
 createRoot(document.getElementById('root')!).render(<SubscriptionsSection rpc={rpc} />)

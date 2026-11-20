@@ -8,6 +8,7 @@ import type { AccountCatalogRow } from './account-preferences.js'
 import { modelEditorState, savedModelIds } from './model-filter.js'
 import type { SubscriptionsKey } from './locales.js'
 import { SettingHelp } from './SettingHelp.js'
+import { ProviderActionIcon } from './ProviderActionIcon.js'
 
 interface ModelRow {
   id: string
@@ -173,9 +174,7 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
       <SettingHelp title={t('modelsEdit')} hint={t('modelsHint')} t={t} portal={false} />
       <button type="button" className="dsh-subscription-quiet" style={{ gap: 6, marginLeft: 'auto' }}
         disabled={busy || disabled || dirty} onClick={() => { void load(true) }}>
-        <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M20 7v5h-5M4 17v-5h5" /><path d="M5.6 9a7 7 0 0 1 11.7-2L20 12M4 12l2.7 5a7 7 0 0 0 11.7-2" />
-        </svg>
+        <ProviderActionIcon icon="refresh" />
         {t('usageRefresh')}
       </button>
       {busy && <span role="status">{t('modelDefaultsLoading')}</span>}

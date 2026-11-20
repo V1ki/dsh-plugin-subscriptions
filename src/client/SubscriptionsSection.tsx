@@ -23,6 +23,8 @@ import { AntigravityQuotaSummary } from './AntigravityQuotaSummary.js'
 import { antigravityQuotaScope } from '../antigravity-model-id.js'
 import { visibleUsageWindows } from './usage-window-filter.js'
 import { ProviderAccountManager } from './ProviderAccountManager.js'
+import { ProviderActionIcon } from './ProviderActionIcon.js'
+import { SettingHelp } from './SettingHelp.js'
 import { SubscriptionTabs } from './SubscriptionTabs.js'
 import { providerSettingsCss } from './provider-settings-styles.js'
 import { UsageBadgeDisplaySetting } from './UsageBadgeDisplaySetting.js'
@@ -246,7 +248,7 @@ const styles: Record<string, CSSProperties> = {
   usageHeader: { display: 'flex', alignItems: 'center', gap: 8 },
   usageTitle: { fontSize: 12, lineHeight: '18px', fontWeight: 500, color: 'var(--dsw-alias-label-secondary)' },
   usagePlan: { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
-  usageRefresh: { minHeight: 22, height: 22, padding: '0 8px', marginLeft: 'auto' },
+  usageRefresh: { width: 28, padding: 0, marginLeft: 'auto' },
   usageRow: { display: 'flex', flexDirection: 'column', gap: 3 },
   usageMeta: {
     display: 'flex', justifyContent: 'space-between', gap: 8,
@@ -927,13 +929,56 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
           <div key={id} role="tabpanel" data-subscription-provider={id} id={`${tabIdPrefix}-panel-${id}`}
             aria-labelledby={`${tabIdPrefix}-tab-${id}`} hidden={activeProvider !== id} tabIndex={0}>
           <div style={styles.card}>
-            <div style={styles.cardHeader}>
-              <span style={{ ...styles.dot, background: dotColor(status) }} />
-              <span style={styles.name}>{status?.displayName || name}</span>
-              {status?.displayName && <small style={styles.statusLine}>{name}</small>}
-              <ClientVersionTag clientVersion={status?.clientVersion} t={t} />
+            <div className="dsh-subscription-provider-header">
+              <div className="dsh-subscription-provider-identity">
+                <div style={{ ...styles.cardHeader, flexWrap: 'wrap' }}>
+                  <span style={{ ...styles.dot, background: dotColor(status) }} />
+                  <span style={styles.name}>{status?.displayName || name}</span>
+                  {status?.displayName && <small style={styles.statusLine}>{name}</small>}
+                  <ClientVersionTag clientVersion={status?.clientVersion} t={t} />
+                </div>
+                <p style={styles.statusLine}>{statusText(t, status)}</p>
+              </div>
+              <div className="dsh-subscription-provider-actions">
+                {!busy && accounts.length === 0 && (
+                  <button type="button" onClick={() => { void login(id) }}>
+                    {t('login')}
+                  </button>
+                )}
+                {!busy && accounts.length > 0 && id === 'claude' && (
+                  <>
+                    <div className="dsh-subscription-add-account">
+                      <SettingHelp title={t('addAccountOAuth')} hint={t('addAccountHint')} t={t} />
+                      <button type="button" onClick={() => { void login(id, 'oauth') }}>
+                        <ProviderActionIcon icon="add" />{t('addAccountOAuth')}
+                      </button>
+                    </div>
+                    <button type="button" onClick={() => { void login(id, 'keychain') }}>
+                      {t('addAccountKeychain')}
+                    </button>
+                  </>
+                )}
+                {!busy && accounts.length > 0 && id !== 'claude' && (
+                  <div className="dsh-subscription-add-account">
+                    <SettingHelp title={t('addAccount')} hint={t('addAccountHint')} t={t} />
+                    <button type="button" onClick={() => { void login(id) }}>
+                      <ProviderActionIcon icon="add" />{t('addAccount')}
+                    </button>
+                  </div>
+                )}
+                {/* 与同排其它按钮一致：登录/取消进行中不开第二个写配置的弹窗。 */}
+                {!busy && <button type="button" aria-haspopup="dialog"
+                  onClick={() => setManagedProvider({ id, name })}>
+                  <ProviderActionIcon icon="manage" />{t('accountsManage')}
+                </button>}
+
+                {busy && (
+                  <button type="button" onClick={() => { void cancel(id) }}>
+                    {t('cancel')}
+                  </button>
+                )}
+              </div>
             </div>
-            <p style={styles.statusLine}>{statusText(t, status)}</p>
             {status?.detail !== undefined && status.detail !== '' && (
               <p style={styles.statusLine}>{status.detail}</p>
             )}
@@ -989,10 +1034,12 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                         {usage?.supported !== false && <button
                           type="button"
                           style={styles.usageRefresh}
+                          title={t('usageRefresh')}
+                          aria-label={t('usageRefresh')}
                           disabled={usageLoading[usageKey] === true}
                           onClick={() => { void loadUsage(id, account.key, true) }}
                         >
-                          {t('usageRefresh')}
+                          <ProviderActionIcon icon="refresh" />
                         </button>}
                       </div>
                       {usage && <UsageFreshness usage={usage} t={t} />}
@@ -1075,43 +1122,6 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 </div>
               )
             })}
-            <div style={styles.actions}>
-              {!busy && accounts.length === 0 && (
-                <button type="button" onClick={() => { void login(id) }}>
-                  {t('login')}
-                </button>
-              )}
-              {!busy && accounts.length > 0 && id === 'claude' && (
-                <>
-                  <button type="button" onClick={() => { void login(id, 'oauth') }}>
-                    {t('addAccountOAuth')}
-                  </button>
-                  <button type="button" onClick={() => { void login(id, 'keychain') }}>
-                    {t('addAccountKeychain')}
-                  </button>
-                </>
-              )}
-              {!busy && accounts.length > 0 && id !== 'claude' && (
-                <button type="button" onClick={() => { void login(id) }}>
-                  {t('addAccount')}
-                </button>
-              )}
-              {/* 与同排其它按钮一致：登录/取消进行中不开第二个写配置的弹窗。 */}
-              {!busy && <button type="button" aria-haspopup="dialog"
-                onClick={() => setManagedProvider({ id, name })}>
-                {t('accountsManage')}
-              </button>}
-
-              {busy && (
-                <button type="button" onClick={() => { void cancel(id) }}>
-                  {t('cancel')}
-                </button>
-              )}
-            </div>
-            {!busy && accounts.length > 0 && (
-              <p style={styles.statusLine}>{t('addAccountHint')}</p>
-            )}
-
             {busy && deviceCode !== undefined && (
               <div style={styles.deviceCode}>
                 <span style={styles.statusLine}>{t('deviceCodePrompt')}</span>
