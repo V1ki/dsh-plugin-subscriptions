@@ -24,7 +24,7 @@ const result = await build({
 const code = result.output.find(file => file.type === 'chunk').code
 const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE } : {}) })
 const hints = [
-  { name: 'Status-bar quota display', hint: 'Saved automatically in this browser. At most one subscription is shown; non-subscription models keep the most recent subscription selected in this view, or show nothing. Hiding does not affect usage details here.' },
+  { name: 'Status-bar quota display', hint: 'Saved automatically in this browser. At most one subscription is shown, and only while the session uses a subscription model; a non-subscription model shows nothing instead of the last subscription used here. Hiding does not affect usage details here.' },
   { name: 'Quota percentages', hint: 'Applies to Settings and the status bar, independently of hiding. Warning colors always indicate high usage.' },
 ]
 const errors = []

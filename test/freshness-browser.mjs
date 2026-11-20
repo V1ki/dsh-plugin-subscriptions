@@ -80,7 +80,7 @@ try {
     await page.goto('http://freshness.test/')
     const card = page.getByRole('tabpanel').filter({ hasText: 'Codex (ChatGPT)' })
     await page.getByText('A (synthetic)', { exact: true }).waitFor()
-    await page.waitForFunction(() => !document.querySelector('button[disabled]'))
+    await page.waitForFunction(() => !document.querySelector('[role="tabpanel"] button[disabled]'))
     const accountA = card.getByText('A (synthetic)', { exact: true }).locator('xpath=../..')
     const refresh = accountA.getByRole('button', { name: 'Refresh', exact: true })
     if (scenario === 'legacy-cache' || scenario === 'stale-recovery') failNow = true
@@ -88,7 +88,7 @@ try {
       await refresh.waitFor()
       const count = requests.length
       await refresh.click()
-      await page.waitForFunction(() => !document.querySelector('button[disabled]'))
+      await page.waitForFunction(() => !document.querySelector('[role="tabpanel"] button[disabled]'))
       assert.ok(requests.slice(count).some(request => request.force === true && request.account === 'account-a' && request.provider === 'codex'))
     }
     const badge = page.locator('[data-composer-stats] button')
@@ -136,12 +136,12 @@ try {
       await page.keyboard.press('Escape')
       const before = fetches
       await refresh.click()
-      await page.waitForFunction(() => !document.querySelector('button[disabled]'))
+      await page.waitForFunction(() => !document.querySelector('[role="tabpanel"] button[disabled]'))
       assert.equal(fetches, before, 'second force cannot bypass failure cooldown')
       failNow = false
       await page.waitForTimeout(Math.max(0, last.value.retryAt - Date.now()) + 20)
       await refresh.click()
-      await page.waitForFunction(() => !document.querySelector('button[disabled]'))
+      await page.waitForFunction(() => !document.querySelector('[role="tabpanel"] button[disabled]'))
       await badge.click()
       await panel.waitFor()
       assert.doesNotMatch(await panel.innerText(), /refresh unavailable|Freshness unknown/)

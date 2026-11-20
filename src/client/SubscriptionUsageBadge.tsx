@@ -226,8 +226,8 @@ function compactPercentages(windows: readonly UsageWindow[], t: Translate, mode:
 /**
  * Bounded readout; Antigravity quotas belong to individual models, not the
  * account. The composer stats row is narrow, so the pill carries only the
- * provider name and at most two percentages ("Gemini · 13% / 15%"): the
- * default/listed source, the window labels, the freshness note and the
+ * provider name and at most two percentages ("Gemini · 13% used / 15% used"):
+ * the default/listed source, the window labels, the freshness note and the
  * remaining windows are all one click away in the dialog.
  */
 export function compactSegment(d: ProviderUsageDisplay, model?: string, t: Translate = fallbackTranslate, mode: QuotaDisplayMode = 'used'): string {
@@ -309,7 +309,7 @@ function usageWindowLabel(t: Translate, window: UsageWindow): string {
 }
 
 /**
- * The composer subscription-usage badge: a pill reading e.g. `Codex 13% / 25%`
+ * The composer subscription-usage badge: a pill reading e.g. `Codex · 13% used / 25% used`
  * for the current model's provider, opening a dialog with every provider's
  * accounts and their windows, including unavailable telemetry.
  */
@@ -541,13 +541,15 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
     return () => { observer.disconnect() }
   }, [])
 
-  useEffect(() => {
-    if (displayMode === 'hidden') setOpen(false)
-  }, [displayMode])
-
   const seat = <span ref={seatRef} style={styles.seat} aria-hidden />
   const collapsed = collapsedDisplays(displays, badgeSelection?.provider)
-  if (displayMode === 'hidden' || collapsed.length === 0) return seat
+  const visible = displayMode !== 'hidden' && collapsed.length > 0
+
+  useEffect(() => {
+    if (!visible) setOpen(false)
+  }, [visible])
+
+  if (!visible) return seat
 
   const label = compactSegment(collapsed[0]!, badgeSelection?.model, translate, quotaMode)
   // The dialog opens from the badge, so it follows the provider and model the

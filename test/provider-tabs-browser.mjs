@@ -274,16 +274,18 @@ try {
   // a single tab (e.g. Google Antigravity) is wider than viewport - 2 * EDGE.
   await scrollToFraction(0)
   await waitState(false, true)
-  for (let steps = 0; steps < 10 && await available(right); steps++) {
-    const before = await list.evaluate(el => el.scrollLeft)
+  for (let steps = 0; steps < 10; steps++) {
+    const { scrollLeft, maxScroll } = await list.evaluate(el => ({ scrollLeft: el.scrollLeft, maxScroll: el.scrollWidth - el.clientWidth }))
+    if (maxScroll - scrollLeft <= 1) break
     await right.click()
-    await narrow.waitForFunction(prev => document.querySelector('[role="tablist"]').scrollLeft > prev, before)
+    await narrow.waitForFunction(prev => document.querySelector('[role="tablist"]').scrollLeft > prev, scrollLeft)
   }
   await waitState(true, false)
-  for (let steps = 0; steps < 10 && await available(left); steps++) {
-    const before = await list.evaluate(el => el.scrollLeft)
+  for (let steps = 0; steps < 10; steps++) {
+    const scrollLeft = await list.evaluate(el => el.scrollLeft)
+    if (scrollLeft <= 1) break
     await left.click()
-    await narrow.waitForFunction(prev => document.querySelector('[role="tablist"]').scrollLeft < prev, before)
+    await narrow.waitForFunction(prev => document.querySelector('[role="tablist"]').scrollLeft < prev, scrollLeft)
   }
   await waitState(false, true)
   // Logging in on a disconnected tab at the far right reorders it into the connected group;
