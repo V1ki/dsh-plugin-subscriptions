@@ -19,7 +19,7 @@ import type { ProviderId } from '../auth/store.js'
 import type { PoolAdapter } from './pool.js'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { hostSupportsImageOffload, IMAGE_OFFLOAD_REQUIRED, requiredImageOffloadCount, resolveImages } from '../translate/resolved.js'
-import type { TranslatableMessage } from '../translate/resolved.js'
+import type { HostPathMapper, ImageRequestLimit, TranslatableMessage } from '../translate/resolved.js'
 import {
   markMessageCache,
   streamAnthropic,
@@ -552,6 +552,8 @@ export interface ClaudeAdapterOptions {
   rateLimit?: RateLimitWait
   /** Resolve the attachment service per request; absent means image requests fail loudly. */
   resolveAttachments?: () => AttachmentStore | undefined
+  /** Resolve the filesystem's host-path mapping per request, so offloaded images keep a readable path. */
+  resolveHostPathMapper?: () => HostPathMapper | undefined
   /** Durable catalog store seeding capability metadata across restarts. */
   catalogStore?: CatalogPersistence
   onCatalogChanged?: () => void
@@ -578,8 +580,11 @@ export interface ClaudeAdapterOptions {
  * images, and every later turn resends the history, so one oversized
  * screenshot would fail the session for good (#110). Images are sent within
  * this cap; 3.75MB encoded stays under the 5MB base64 per-image limit.
+ * Images over 1MB are re-encoded at their own size too: a lossless 2–4MB
+ * screenshot would otherwise let only five or six images fit the request
+ * image budget below before older ones are offloaded.
  */
-const CLAUDE_IMAGE_LIMIT = { maxEdge: 2000, maxBytes: 3_750_000 }
+export const CLAUDE_IMAGE_LIMIT: ImageRequestLimit = { maxEdge: 2000, maxBytes: 3_750_000, softBytes: 1_000_000 }
 
 /**
  * Inline image data a Claude request may carry, in base64 bytes. Every turn
@@ -863,7 +868,9 @@ export class ClaudeAdapter extends LlmAdapter {
   }
 
   private async request(options: GenerateOptions, session: ClaudeSession, signal: AbortSignal): Promise<Response> {
-    const messages = await resolveImages(options.messages, this.options.resolveAttachments?.(), signal, CLAUDE_IMAGE_LIMIT)
+    const messages = await resolveImages(
+      options.messages, this.options.resolveAttachments?.(), signal, CLAUDE_IMAGE_LIMIT, this.options.resolveHostPathMapper?.(),
+    )
     if (hostSupportsImageOffload()) {
       const offloadImages = requiredImageOffloadCount(messages, CLAUDE_REQUEST_IMAGE_BUDGET)
       if (offloadImages > 0) {

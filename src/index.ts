@@ -73,6 +73,7 @@ import { DEFAULT_RATE_LIMIT_MAX_WAIT_MS, resolveRateLimitWait } from './provider
 import type { RateLimitConfig } from './providers/rate-limit.js'
 import { DEFAULT_PROMPT_CACHE_TTL } from './translate/anthropic.js'
 import type { PromptCacheTtl } from './translate/anthropic.js'
+import type { HostPathMapper } from './translate/resolved.js'
 import { accountCatalogStore, catalogStore } from './providers/catalog-store.js'
 import { ClaudeCliVersionCache } from './providers/claude-cli-version.js'
 import type { CliVersion, NpmCliVersionCache } from './providers/npm-cli-version.js'
@@ -748,6 +749,15 @@ export function apply(ctx: Context, config: Config): void {
   // this plugin's apply, so a one-time capture would stay undefined forever.
   const resolveAttachments = (): AttachmentStore | undefined =>
     ctx.get('attachments') as AttachmentStore | undefined
+  // Optional, resolved per request for the same reason: maps an attachment's
+  // host path into the tool execution world, so an image offloaded to text
+  // names a read-only copy the model can reopen. Structural face of the
+  // filesystem service; only this one method is consumed.
+  const resolveHostPathMapper = (): HostPathMapper | undefined => {
+    const fs = ctx.get('fs') as { processPathFromHostPath?: HostPathMapper } | undefined
+    const map = fs?.processPathFromHostPath
+    return typeof map === 'function' ? hostPath => map.call(fs, hostPath) : undefined
+  }
 
   // Registration handles are kept so an auth-state change can re-announce the
   // route (`replace` fires `llm/adapters-updated`), which makes the web model
@@ -911,6 +921,7 @@ export function apply(ctx: Context, config: Config): void {
           discovery: !overridden.has('claude'),
           onWarn,
           resolveAttachments,
+          resolveHostPathMapper,
           catalogStore: catalogStore('claude'),
           onCatalogChanged: catalogChanged,
           accountCatalogStore: account => accountCatalogStore('claude', account),
