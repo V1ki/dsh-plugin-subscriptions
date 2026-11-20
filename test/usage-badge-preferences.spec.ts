@@ -3,7 +3,14 @@ import assert from 'node:assert/strict'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { readUsageBadgeMode, setUsageBadgeMode, subscribeUsageBadgeMode, readQuotaDisplayMode, setQuotaDisplayMode, subscribeQuotaDisplayMode } from '../src/client/usage-badge-preferences.js'
-import { UsageBadgeDisplaySetting } from '../src/client/UsageBadgeDisplaySetting.js'
+import { registerHooks } from 'node:module'
+const css = registerHooks({ load(url, context, nextLoad) {
+  return url.endsWith('.css')
+    ? { format: 'module', source: 'export default {}', shortCircuit: true }
+    : nextLoad(url, context)
+} })
+const { UsageBadgeDisplaySetting } = await import('../src/client/UsageBadgeDisplaySetting.js')
+css.deregister()
 import { en, zh } from '../src/client/locales.js'
 
 const key = 'dsh.subscriptions.usageBadgeMode'
