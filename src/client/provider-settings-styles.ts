@@ -43,6 +43,30 @@ export const providerSettingsCss = `
 .dsh-subscription-provider-actions { margin-left: auto; }
 .dsh-subscription-add-account { gap: 2px; }
 .dsh-subscription-provider-actions button { gap: 5px; }
+.subscriptions-credit-summary { padding-top: 8px; }
+.subscriptions-credit-line,
+.subscriptions-reset-credits > summary {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+.subscriptions-reset-count {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin-inline-start: auto;
+}
+.subscriptions-reset-credits > summary { list-style: none; cursor: pointer; }
+.subscriptions-reset-credits > summary::-webkit-details-marker { display: none; }
+.subscriptions-reset-disclosure { display: inline-flex; align-items: center; gap: 3px; }
+.subscriptions-reset-credits:not([open]) .subscriptions-reset-collapse,
+.subscriptions-reset-credits[open] .subscriptions-reset-expand { display: none; }
+.subscriptions-reset-credits[open] .subscriptions-reset-disclosure svg { transform: rotate(180deg); }
+.subscriptions-reset-list { display: grid; gap: 4px; margin-top: 6px; }
+.subscriptions-reset-row { display: flex; align-items: center; gap: 8px; min-height: 28px; }
+.subscriptions-reset-row > span { min-width: 0; overflow-wrap: anywhere; }
 .dsh-subscription-tabs-shell {
   position: relative;
   min-width: 0;

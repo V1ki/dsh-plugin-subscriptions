@@ -990,6 +990,8 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
               const usageError = usageErrors[usageKey]
               const display = account.account ?? account.key
               const sortedCredits = [...(usage?.resetCredits ?? [])].sort((a, b) => (a.expiresAt ?? Infinity) - (b.expiresAt ?? Infinity))
+              const balance = id === 'codex' ? creditBalanceText(usage?.credits, t) : undefined
+              const resetCount = sortedCredits.length === 1 ? t('resetCreditAvailable') : t('resetCreditsAvailable', { count: sortedCredits.length })
               const nextReset = sortedCredits.find(c => c.expiresAt === undefined || c.expiresAt > Date.now())
               const resetBlock = usage ? resetActionBlock(usage) : 'resetUseRefresh'
               const resetDisabled = resetBusy || resetBlock !== undefined
@@ -1064,50 +1066,49 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                           </div>
                         )
                       })}
-                      {id === 'codex' && creditBalanceText(usage?.credits, t) !== undefined && (
-                        <div style={styles.usageRow}>
-                          <div style={styles.usageMeta}>
-                            <span>{creditBalanceText(usage?.credits, t)}</span>
-                          </div>
+                      {id === 'codex' && (balance !== undefined || usage?.resetCredits !== undefined) && (
+                        <div className="subscriptions-credit-summary" style={styles.statusLine}>
+                          {sortedCredits.length > 0 ? (
+                            <details className="subscriptions-reset-credits">
+                              <summary>
+                                {balance !== undefined && <span>{balance}</span>}
+                                <span className="subscriptions-reset-count">
+                                  <span>{resetCount}</span>
+                                  <span className="subscriptions-reset-disclosure">
+                                    <span className="subscriptions-reset-expand">{t('modelsExpand')}</span>
+                                    <span className="subscriptions-reset-collapse">{t('modelsCollapse')}</span>
+                                    <svg aria-hidden="true" width="12" height="12" viewBox="0 0 16 16">
+                                      <path d="m4 6 4 4 4-4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                                    </svg>
+                                  </span>
+                                </span>
+                              </summary>
+                              <div className="subscriptions-reset-list">
+                                {sortedCredits.map((credit, index) => (
+                                  <div key={credit.id ?? index} className="subscriptions-reset-row">
+                                    <span>{credit.expiresAt === undefined ? t('resetCreditExpiryUnknown') : t('resetCreditExpires', { date: new Date(credit.expiresAt).toLocaleString() })}</span>
+                                    {credit === nextReset && (
+                                      <button type="button" aria-disabled={resetDisabled}
+                                        title={t(resetBusy ? 'resetUseChecking' : resetBlock ?? 'resetUseReady')}
+                                        style={{ height: 22, minHeight: 22, padding: '0 7px',
+                                          opacity: resetDisabled ? 0.35 : 1, cursor: resetDisabled ? 'not-allowed' : 'pointer' }}
+                                        onClick={() => { if (!resetDisabled) void prepareReset(account.key) }}>
+                                        {resetBusy && resetAccount === account.key ? t('resetUseChecking') : t('resetUseButton')}
+                                      </button>
+                                    )}
+                                  </div>
+                                ))}
+                                {resetAccount === account.key && resetMessage && <p role="status" style={styles.statusLine}>{resetMessage}</p>}
+                              </div>
+                            </details>
+                          ) : <div className="subscriptions-credit-line">
+                            {balance !== undefined && <span>{balance}</span>}
+                            {usage?.resetCredits !== undefined && <span className="subscriptions-reset-count">{resetCount}</span>}
+                          </div>}
                         </div>
                       )}
                       {id === 'codex' && usage?.resetCreditsError !== undefined && (
                         <p style={styles.errorLine}>{t('resetCreditsError', { message: usage.resetCreditsError })}</p>
-                      )}
-                      {id === 'codex' && usage?.resetCredits !== undefined && (
-                        <details className="subscriptions-reset-credits" style={styles.usageRow}>
-                          <summary style={{ ...styles.usageMeta, cursor: 'pointer', listStyle: 'none', justifyContent: 'flex-start', gap: 6 }}>
-                            <svg aria-hidden="true" width="12" height="12" viewBox="0 0 16 16" style={{ flexShrink: 0 }}>
-                              <path d="m6 3 5 5-5 5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                            </svg>
-                            <span>{t('resetCreditsTitle')}</span>
-                            <span style={{ marginLeft: 'auto' }}>{t('resetCreditsAvailable', { count: usage.resetCredits.length })}</span>
-                          </summary>
-                          <style>{
-                            '.subscriptions-reset-credits > summary::-webkit-details-marker { display: none; }'
-                            + '.subscriptions-reset-credits[open] > summary > svg { transform: rotate(90deg); }'
-                          }</style>
-                          <div style={{ paddingLeft: 18, marginTop: 6 }}>
-                            {sortedCredits.map((credit, index) => (
-                              <div key={credit.id ?? index} style={{ ...styles.usageMeta, minHeight: 28, gap: 12 }}>
-                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-                                  {t('resetCreditFull')}
-                                  {credit === nextReset && (
-                                    <button type="button" aria-disabled={resetDisabled}
-                                      title={t(resetBusy ? 'resetUseChecking' : resetBlock ?? 'resetUseReady')}
-                                      style={{ height: 22, minHeight: 22, padding: '0 7px',
-                                        opacity: resetDisabled ? 0.35 : 1, cursor: resetDisabled ? 'not-allowed' : 'pointer' }}
-                                      onClick={() => { if (!resetDisabled) void prepareReset(account.key) }}>
-                                      {resetBusy && resetAccount === account.key ? t('resetUseChecking') : t('resetUseButton')}
-                                    </button>
-                                  )}
-                                </span>
-                                <span style={{ textAlign: 'right' }}>{credit.expiresAt === undefined ? t('resetCreditExpiryUnknown') : t('resetCreditExpires', { date: new Date(credit.expiresAt).toLocaleString() })}</span>
-                              </div>
-                            ))}
-                            {resetAccount === account.key && resetMessage && <p role="status" style={styles.statusLine}>{resetMessage}</p>}
-                          </div>
-                        </details>
                       )}
                     </div>
                   )}

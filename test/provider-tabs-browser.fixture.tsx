@@ -31,7 +31,24 @@ const rpc = { call: async (_channel: string, method: string, payload: any) => {
     return { ok: true, value: {} }
   }
   if (endpoint === 'proxyGet') return { ok: true, value: { enabled: false, url: '', bypass: [], passwordSet: false } }
+  if (endpoint === 'prepareReset') {
+    state.preparedReset = payload
+    return { ok: true, value: { ticket: 'test-ticket', expiresAt: Date.now() + 60_000, creditExpiresAt: state.resetExpiry, weeklyUsedPercent: 90 } }
+  }
+  if (endpoint === 'consumeReset') {
+    state.consumedReset = payload
+    return { ok: true, value: {} }
+  }
   if (endpoint === 'usage') {
+    if (payload.provider === 'codex') {
+      const now = Date.now()
+      state.resetExpiry = now + 86_400_000
+      return { ok: true, value: {
+        supported: true, credits: { balance: 0 },
+        windows: [{ kind: 'weekly', usedPercent: payload.force ? 90 : 47, resetsAt: now + 86_400_000 }],
+        resetCredits: [3, 1, 2].map(days => ({ id: String(days), expiresAt: now + days * 86_400_000 })),
+      } }
+    }
     if (payload.force) state.forcedRefresh = payload
     return { ok: true, value: { supported: true, windows: [] } }
   }
