@@ -4,3 +4,5 @@ lib-test/
 *.tgz
 overlay.yml
 .DS_Store
+.pnpm-store
+.worktrees
