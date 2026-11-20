@@ -24,6 +24,7 @@ import { antigravityQuotaScope } from '../antigravity-model-id.js'
 import { visibleUsageWindows } from './usage-window-filter.js'
 import { ProviderAccountManager } from './ProviderAccountManager.js'
 import { ProviderActionIcon } from './ProviderActionIcon.js'
+import { ProviderRefreshButton } from './ProviderRefreshButton.js'
 import { SettingHelp } from './SettingHelp.js'
 import { SubscriptionTabs } from './SubscriptionTabs.js'
 import { providerSettingsCss } from './provider-settings-styles.js'
@@ -248,7 +249,6 @@ const styles: Record<string, CSSProperties> = {
   usageHeader: { display: 'flex', alignItems: 'center', gap: 8 },
   usageTitle: { fontSize: 12, lineHeight: '18px', fontWeight: 500, color: 'var(--dsw-alias-label-secondary)' },
   usagePlan: { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
-  usageRefresh: { width: 28, padding: 0, marginLeft: 'auto' },
   usageRow: { display: 'flex', flexDirection: 'column', gap: 3 },
   usageMeta: {
     display: 'flex', justifyContent: 'space-between', gap: 8,
@@ -1031,16 +1031,8 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                         {usage?.plan !== undefined && (
                           <span style={styles.usagePlan}>{t('usagePlan', { plan: usage.plan })}</span>
                         )}
-                        {usage?.supported !== false && <button
-                          type="button"
-                          style={styles.usageRefresh}
-                          title={t('usageRefresh')}
-                          aria-label={t('usageRefresh')}
-                          disabled={usageLoading[usageKey] === true}
-                          onClick={() => { void loadUsage(id, account.key, true) }}
-                        >
-                          <ProviderActionIcon icon="refresh" />
-                        </button>}
+                        {usage?.supported !== false && <ProviderRefreshButton label={t('usageRefresh')}
+                          disabled={usageLoading[usageKey] === true} onClick={() => { void loadUsage(id, account.key, true) }} />}
                       </div>
                       {usage && <UsageFreshness usage={usage} t={t} />}
                       {usage === undefined && usageError === undefined && (
