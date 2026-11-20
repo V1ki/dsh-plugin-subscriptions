@@ -898,6 +898,8 @@ export function apply(ctx: Context, config: Config): void {
           accountCatalogStore: account => accountCatalogStore('codex', account),
           defaultEffortOf: (model: string) => defaultEffortOf('codex', model),
           contextWindowOf: model => preferences.contextWindow(model),
+          defaultContextWindow: () => preferences.get('codex').contextWindow,
+          defaultMaxTokens: () => preferences.get('codex').defaultMaxTokens,
           pool: () => poolAdapter,
           speedFor: (sessionId: string | undefined, model: string): boolean | Promise<boolean> =>
             sessionId !== undefined

@@ -13,6 +13,7 @@ import { notifyDisplayNameChange } from './display-name-events.js'
 import { providerSettingsCss } from './provider-settings-styles.js'
 import { SubscriptionTabs } from './SubscriptionTabs.js'
 import { SettingHelp } from './SettingHelp.js'
+import { CODEX_DEFAULT_MAX_TOKENS } from '../codex-budget-defaults.js'
 
 interface Catalog {
   settings: ProviderPreferences
@@ -48,6 +49,8 @@ export function ProviderAccountManager({ provider, name, accountsVersion, rpc, t
   const tabRefs = useRef<Record<string, HTMLButtonElement>>({})
   const restoreAccountFocus = useRef(false)
   const initialized = useRef(false)
+  const contextWindowId = useId()
+  const outputReserveId = useId()
   const [catalog, setCatalog] = useState<Catalog>()
   const [changes, setChanges] = useState<Record<string, AccountPreferences>>({})
   const [loading, setLoading] = useState(true)
@@ -61,6 +64,11 @@ export function ProviderAccountManager({ provider, name, accountsVersion, rpc, t
   /** '' follows the plugin config; otherwise an explicit TTL. */
   const [cacheTtl, setCacheTtl] = useState<PromptCacheTtlSetting | ''>('')
   const [cacheTtlDirty, setCacheTtlDirty] = useState(false)
+  const [contextWindow, setContextWindow] = useState('')
+  const [outputReserve, setOutputReserve] = useState('')
+  const [contextDirty, setContextDirty] = useState(false)
+  const [reserveDirty, setReserveDirty] = useState(false)
+  const [budgetSubmitted, setBudgetSubmitted] = useState(false)
   const alive = useRef(true)
   const saveLock = useRef(false)
   const editor = useRef<ProviderModelEditorHandle>(null)
@@ -85,6 +93,8 @@ export function ProviderAccountManager({ provider, name, accountsVersion, rpc, t
         if (!initialized.current) {
           setDisplayName(data.settings.displayName ?? '')
           setCacheTtl(data.settings.promptCacheTtl ?? '')
+          setContextWindow(data.settings.contextWindow?.toString() ?? '')
+          setOutputReserve(data.settings.defaultMaxTokens?.toString() ?? '')
           initialized.current = true
         }
         const previous = selectedAccountRef.current
@@ -109,6 +119,15 @@ export function ProviderAccountManager({ provider, name, accountsVersion, rpc, t
     else dialog.current?.querySelector<HTMLButtonElement>('header button')?.focus()
   }, [catalog, selectedAccount])
 
+  // Empty means no override. Reject exponents, decimals, signs and unsafe integers.
+  function parseBudget(value: string): number | undefined {
+    if (!/^[0-9]+$/.test(value)) return undefined
+    const parsed = Number(value)
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined
+  }
+  const contextInvalid = contextWindow !== '' && parseBudget(contextWindow) === undefined
+  const reserveInvalid = outputReserve !== '' && parseBudget(outputReserve) === undefined
+
   function edit(key: string, next: AccountPreferences) {
     setChanges(current => ({ ...current, [key]: next }))
   }
@@ -119,6 +138,10 @@ export function ProviderAccountManager({ provider, name, accountsVersion, rpc, t
    */
   async function save() {
     if (saveLock.current) return
+    if (provider === 'codex' && (contextInvalid || reserveInvalid)) {
+      setBudgetSubmitted(true)
+      return
+    }
     // An invalid model draft (e.g. a malformed context window) blocks the
     // whole submit; the editor shows the reason next to the field.
     const models = editor.current === null ? { efforts: [] } : editor.current.collect()
@@ -138,13 +161,17 @@ export function ProviderAccountManager({ provider, name, accountsVersion, rpc, t
       const latest = await callSubscriptionsAuth<Catalog>(rpc, 'providerSettings', { provider })
       if (!alive.current) return
       const base = models.settings === undefined ? latest.settings : mergeLatestAccounts(models.settings, latest.settings)
-      const { displayName: _staleName, promptCacheTtl: _staleTtl, ...rest } = mergeAccountChanges(base, changes)
+      const { displayName: _staleName, promptCacheTtl: _staleTtl, contextWindow: _staleContext, defaultMaxTokens: _staleReserve, ...rest } = mergeAccountChanges(base, changes)
       const savedName = nameDirty ? displayName.trim() : latest.settings.displayName
       const savedTtl = cacheTtlDirty ? cacheTtl : latest.settings.promptCacheTtl
+      const savedContext = contextDirty ? parseBudget(contextWindow) : latest.settings.contextWindow
+      const savedReserve = reserveDirty ? parseBudget(outputReserve) : latest.settings.defaultMaxTokens
       const settings = {
         ...rest,
         ...(savedName ? { displayName: savedName } : {}),
         ...(savedTtl ? { promptCacheTtl: savedTtl } : {}),
+        ...(savedContext === undefined ? {} : { contextWindow: savedContext }),
+        ...(savedReserve === undefined ? {} : { defaultMaxTokens: savedReserve }),
       }
       await callSubscriptionsAuth(rpc, 'setProviderSettings', { provider, settings })
       notifyDisplayNameChange(provider, settings.displayName)
@@ -262,14 +289,41 @@ export function ProviderAccountManager({ provider, name, accountsVersion, rpc, t
           </fieldset>
           </div>
         })}
+        {provider === 'codex' && <section style={{ ...stack, gap: 10, paddingBottom: 8 }}>
+          <h3 style={{ margin: 0 }}>{t('codexModelDefaults')}</h3>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 240px), 1fr))', gap: 12, alignItems: 'start' }}>
+            <div style={{ ...stack, gap: 6 }}>
+              <div style={{ ...actions, gap: 4 }}>
+                <label htmlFor={contextWindowId}>{t('codexGlobalContext')}</label>
+                <SettingHelp title={t('codexGlobalContext')} hint={t('codexGlobalContextHint')} t={t} portal={false} />
+              </div>
+              <input id={contextWindowId} type="text" inputMode="numeric" value={contextWindow} placeholder={t('codexContextDefault')}
+                aria-describedby={budgetSubmitted && contextInvalid ? contextWindowId + '-error' : undefined}
+                aria-invalid={budgetSubmitted && contextInvalid || undefined}
+                onChange={event => { setContextWindow(event.target.value); setContextDirty(true) }} />
+              {budgetSubmitted && contextInvalid && <small id={contextWindowId + '-error'} role="alert">{t('codexBudgetInvalid')}</small>}
+            </div>
+            <div style={{ ...stack, gap: 6 }}>
+              <div style={{ ...actions, gap: 4 }}>
+                <label htmlFor={outputReserveId}>{t('codexOutputReserve')}</label>
+                <SettingHelp title={t('codexOutputReserve')} hint={t('codexOutputReserveHint')} t={t} portal={false} />
+              </div>
+              <input id={outputReserveId} type="text" inputMode="numeric" value={outputReserve} placeholder={t('codexBudgetDefault', { value: CODEX_DEFAULT_MAX_TOKENS.toLocaleString() })}
+                aria-describedby={budgetSubmitted && reserveInvalid ? outputReserveId + '-error' : undefined}
+                aria-invalid={budgetSubmitted && reserveInvalid || undefined}
+                onChange={event => { setOutputReserve(event.target.value); setReserveDirty(true) }} />
+              {budgetSubmitted && reserveInvalid && <small id={outputReserveId + '-error'} role="alert">{t('codexBudgetInvalid')}</small>}
+            </div>
+          </div>
+        </section>}
       </fieldset>}
-      <ProviderModelEditor ref={editor} provider={provider} rpc={rpc} t={t} disabled={saving} onDirtyChange={setModelsDirty} />
+      <ProviderModelEditor ref={editor} provider={provider} rpc={rpc} t={t} disabled={saving} globalContextWindow={parseBudget(contextWindow)} onDirtyChange={setModelsDirty} />
       <footer style={{ ...stack, gap: 8, borderTop: border, padding: '14px 0 8px',
         position: 'sticky', bottom: 0, background: 'var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1))' }}>
         {saveError && <p role="alert">{saveError}</p>}
         <div style={{ ...actions, justifyContent: 'flex-end' }}>
           <button type="button" disabled={saving} onClick={onClose}>{t('cancel')}</button>
-          <button type="button" className="dsh-subscription-primary" disabled={loading || saving || (!Object.keys(changes).length && !modelsDirty && !nameDirty && !cacheTtlDirty)}
+          <button type="button" className="dsh-subscription-primary" disabled={loading || saving || (!Object.keys(changes).length && !modelsDirty && !nameDirty && !cacheTtlDirty && !contextDirty && !reserveDirty)}
             onClick={() => { void save() }}>{saving ? t('modelDefaultsSaving') : t('modelsSave')}</button>
         </div>
       </footer>

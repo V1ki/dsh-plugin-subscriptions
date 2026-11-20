@@ -24,6 +24,10 @@ import { Config } from '../src/index.js'
 import { CopilotAdapter, fetchCopilotModels } from '../src/providers/copilot.js'
 import { ModelCatalogCache } from '../src/providers/common.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
+import { PoolAdapter } from '../src/providers/pool.js'
+import { poolKey } from '../src/providers/pool-family.js'
+import { PoolHealthRegistry } from '../src/providers/pool-health.js'
+import { PoolUsageTracker } from '../src/providers/pool-usage.js'
 import type { CatalogPersistence, CatalogSnapshot, FetchFn } from '../src/providers/common.js'
 import type { ClaudeSession, CodexSession, CopilotSession, GrokSession } from '../src/auth/store.js'
 import { oauthEndpointError, withTimeout } from '../src/providers/common.js'
@@ -67,6 +71,66 @@ test('Codex context overrides clamp per account, restore defaults, and distrust 
   assert.equal((await adapter.resolveOwnModel('codex', 'm', 'pro')).context?.contextWindow, 272000)
   requested = 128000
   assert.equal((await adapter.resolveOwnModel('codex', 'm', 'pro')).context?.contextWindow, 128000)
+})
+
+test('Codex provider budgets preserve saved context and static output overrides without disabling discovery', async () => {
+  let globalWindow: number | undefined = 350000
+  let globalOutput: number | undefined = 32768
+  let perModel: number | undefined
+  const session = { accessToken: 'p', refreshToken: 'r', accountId: 'p', expiresAt: Date.now() + 3600000 }
+  const adapter = new CodexAdapter({
+    models: [{ id: 'static', contextWindow: 230000, maxTokens: 8192 }], discovery: true,
+    tokens: memoryAccounts({ p: session }), streamIdleTimeoutMs: 1000,
+    defaultContextWindow: () => globalWindow, defaultMaxTokens: () => globalOutput,
+    contextWindowOf: model => model === 'static' ? perModel : undefined,
+    fetchFn: (async () => new Response(JSON.stringify({ models: [
+      { slug: 'static', context_window: 272000, max_context_window: 300000 },
+      { slug: 'new', context_window: 272000, max_context_window: 300000 },
+      { slug: 'unknown-max', context_window: 200000 },
+    ] }))) as FetchFn,
+  })
+  assert.deepEqual((await adapter.listOwnModels('codex', 'p')).map(row => row.id), ['static', 'new', 'unknown-max'])
+  assert.equal((await adapter.resolveOwnModel('codex', 'new', 'p')).context?.contextWindow, 300000)
+  assert.equal((await adapter.resolveOwnModel('codex', 'new', 'p')).defaultMaxTokens, 32768)
+  assert.equal((await adapter.resolveOwnModel('codex', 'unknown-max', 'p')).context?.contextWindow, 200000)
+  assert.equal((await adapter.resolveOwnModel('codex', 'static', 'p')).context?.contextWindow, 300000)
+  assert.equal((await adapter.resolveOwnModel('codex', 'static', 'p')).defaultMaxTokens, 8192)
+  perModel = 150000
+  assert.equal((await adapter.resolveOwnModel('codex', 'static', 'p')).context?.contextWindow, 150000)
+  perModel = undefined
+  globalWindow = undefined
+  globalOutput = undefined
+  assert.equal((await adapter.resolveOwnModel('codex', 'static', 'p')).context?.contextWindow, 272000, 'unset preserves discovery precedence')
+  assert.equal((await adapter.resolveOwnModel('codex', 'new', 'p')).defaultMaxTokens, 8_192)
+})
+
+test('Codex pool budgets intersect per-account limits and mixed-provider members', async () => {
+  const session = { accessToken: 'token', refreshToken: 'r', accountId: 'pro', expiresAt: Date.now() + 3600000 }
+  let globalWindow = 500000
+  const codex = new CodexAdapter({
+    models: [], discovery: true, tokens: memoryAccounts({ pro: session, plus: { ...session, accountId: 'plus' } }),
+    streamIdleTimeoutMs: 1000, defaultContextWindow: () => globalWindow, defaultMaxTokens: () => 32000,
+    fetchFn: (async (_url, init) => new Response(JSON.stringify({ models: [{ slug: 'm', context_window: 272000,
+      max_context_window: new Headers(init?.headers).get('chatgpt-account-id') === 'pro' ? 800000 : 300000 }] }))) as FetchFn,
+  })
+  const claude = new ClaudeAdapter({ models: [{ id: 'other', contextWindow: 250000, maxTokens: 16000 }],
+    discovery: false, tokens: memoryAccounts({ pro: claudeSession }), streamIdleTimeoutMs: 1000 })
+  const pool = new PoolAdapter({
+    adapters: { codex, claude }, health: new PoolHealthRegistry(), usage: new PoolUsageTracker(() => undefined),
+    strategy: 'priority', switchMargin: 2, defaultAccount: async () => 'pro', tiers: {}, onWarn: () => {},
+    families: async () => new Map([
+      [poolKey('codex', 'm'), { members: [{ provider: 'codex', model: 'm', account: 'pro' }, { provider: 'codex', model: 'm', account: 'plus' }] }],
+      [poolKey('codex', 'tier'), { members: [{ provider: 'codex', model: 'm', account: 'pro' }, { provider: 'claude', model: 'other', account: 'pro' }], extra: true }],
+    ]),
+  })
+  const pooled = await pool.resolveModel('codex', 'm')
+  assert.equal(pooled.context?.contextWindow, 300000)
+  assert.equal(pooled.defaultMaxTokens, 32000)
+  const mixed = await pool.resolveModel('codex', 'tier')
+  assert.equal(mixed.context?.contextWindow, 250000)
+  assert.equal(mixed.defaultMaxTokens, 16000)
+  globalWindow = 200000
+  assert.equal((await pool.resolveModel('codex', 'm')).context?.contextWindow, 200000)
 })
 
 const codexSession: CodexSession = {
@@ -542,6 +606,8 @@ test('codexRequestBody sends service_tier priority only on the fast tier', () =>
   )
   assert.equal(base.model, 'gpt-5.1-codex')
   assert.equal('service_tier' in base, false)
+  const withReservation = codexRequestBody({ provider: 'codex', model: 'gpt-5.1-codex', messages: [], maxTokens: 32768 }, { input: [] }, false)
+  assert.equal('max_output_tokens' in withReservation, false, 'the local reservation is not a Codex wire limit')
 
   const fast = codexRequestBody(
     {
