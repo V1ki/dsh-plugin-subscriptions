@@ -227,10 +227,11 @@ ${formScope} button.dsh-subscription-model-toggle {
 .dsh-subscription-tools {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px 20px;
+  gap: 8px 26px;
   min-width: 0;
 }
-.dsh-subscription-tools label { min-width: 0; overflow-wrap: anywhere; }
+.dsh-subscription-tools label { min-width: 0; overflow-wrap: anywhere; align-items: center; }
+.dsh-subscription-tools label input[type="checkbox"] { margin: 0 0 0 3px; }
 
 ${formScope} button.dsh-subscription-quiet {
   border-color: transparent;

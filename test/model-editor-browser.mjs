@@ -49,6 +49,7 @@ try {
   await page.keyboard.press('Escape')
   const tools = page.locator('.dsh-subscription-tools')
   assert.equal(await tools.locator('label svg[aria-hidden="true"]').count(), 4)
+  assert.deepEqual(await tools.locator('label').evaluateAll(els => els.map(el => [...el.children].map(child => child.tagName.toLowerCase()))), Array(4).fill(['svg', 'span', 'input']))
   const toolLabels = ['Image generation', 'Video generation', 'Web search', 'X search']
   for (const label of toolLabels) assert.equal(await page.getByRole('checkbox', { name: label }).isChecked(), true)
   await page.getByRole('checkbox', { name: 'Video generation' }).uncheck()

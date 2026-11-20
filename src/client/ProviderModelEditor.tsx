@@ -279,11 +279,11 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
           </div>
           <div className="dsh-subscription-tools">
             {catalog.tools.map(tool => <label key={tool}>
+              <ToolIcon tool={tool} />
+              <span>{t(tool === 'image_generate' ? 'modelsImage' : tool === 'video_generate' ? 'modelsVideo' : tool === 'web_search' ? 'modelsWebSearch' : 'modelsSearch')}</span>
               <input type="checkbox" checked={draft.tools?.[tool] !== false} onChange={event => edit({
                 ...draft, tools: { ...draft.tools, [tool]: event.target.checked },
               })} />
-              <ToolIcon tool={tool} />
-              <span>{t(tool === 'image_generate' ? 'modelsImage' : tool === 'video_generate' ? 'modelsVideo' : tool === 'web_search' ? 'modelsWebSearch' : 'modelsSearch')}</span>
             </label>)}
           </div>
         </div>}
