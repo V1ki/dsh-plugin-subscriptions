@@ -105,6 +105,43 @@ test('provider settings RPC edits picker visibility without losing the editor ca
   }
 })
 
+test('Codex RPC saves live global budgets and rejects invalid values', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'codex-budget-rpc-'))
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  const ctx = new Context()
+  const llm = new LlmRuntime(ctx)
+  const adapters = new Map<string, AccountAwareAdapter>()
+  const register = llm.registerAdapter.bind(llm)
+  llm.registerAdapter = (routes: string[], adapter: AccountAwareAdapter) => { adapters.set(routes[0], adapter); return register(routes, adapter) }
+  const connection = createFakeConnection()
+  ctx.provide('connection', connection.connection)
+  ctx.provide('tools', { register: () => () => {} })
+  const runtime = ctx.plugin(plugin, { providers: ['codex'], pool: { enabled: false }, models: { codex: [{ id: 'm', name: 'Model', inputModalities: ['text'] }] } })
+  try {
+    await saveAccountSession('codex', 'account', { accessToken: 't', refreshToken: 'r', expiresAt: Date.now() + 3600000, accountId: 'account' })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    const call = (endpoint: string, payload: unknown) => connection.handler(endpoint, payload, new AbortController().signal)
+    const adapter = adapters.get('codex')!
+    assert.equal((await adapter.resolveModel('codex', 'm')).defaultMaxTokens, 8_192)
+    assert.ok((await call('setProviderSettings', { provider: 'codex', settings: { contextWindow: 200000, defaultMaxTokens: 32768 } })).ok)
+    const resolved = await adapter.resolveModel('codex', 'm')
+    assert.equal(resolved.context?.contextWindow, 200000)
+    assert.equal(resolved.defaultMaxTokens, 32768)
+    const catalog = await call('providerSettings', { provider: 'codex' })
+    assert.ok(catalog.ok)
+    assert.deepEqual((catalog.value as { settings: unknown }).settings, { contextWindow: 200000, defaultMaxTokens: 32768 })
+    assert.equal((await call('setProviderSettings', { provider: 'codex', settings: { defaultMaxTokens: 0 } })).ok, false)
+    assert.equal((await adapter.resolveModel('codex', 'm')).defaultMaxTokens, 32768)
+    assert.ok((await call('setProviderSettings', { provider: 'codex', settings: {} })).ok)
+    assert.equal((await adapter.resolveModel('codex', 'm')).defaultMaxTokens, 8_192)
+  } finally {
+    await runtime.dispose()
+    if (previous === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previous
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
 test('Antigravity registers the real multi-account adapter with provider settings', async () => {
   const { saveAccountSession, authFilePath, accountKeyOf, listAccounts } = await import('../src/auth/store.js')
   const home = await mkdtemp(join(tmpdir(), 'antigravity-rpc-'))

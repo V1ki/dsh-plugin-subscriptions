@@ -34,6 +34,7 @@ interface Props {
   t: (key: SubscriptionsKey, params?: Record<string, unknown>) => string
   /** Freeze the editor while the owning dialog submits. */
   disabled?: boolean
+  globalContextWindow?: number | undefined
   /** Reports whether the draft differs from the loaded catalog. */
   onDirtyChange?: (dirty: boolean) => void
 }
@@ -74,7 +75,7 @@ function ToolIcon({ tool }: { tool: SubscriptionTool }) {
  * in one go, so there is a single Save/Cancel pair.
  */
 export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(function ProviderModelEditor(
-  { provider, rpc, t, disabled = false, onDirtyChange }, ref,
+  { provider, rpc, t, disabled = false, globalContextWindow, onDirtyChange }, ref,
 ) {
   const [catalog, setCatalog] = useState<Catalog>()
   const [draft, setDraft] = useState<ProviderPreferences>({})
@@ -241,10 +242,12 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
             {provider === 'codex' && model.maxContextWindow !== undefined && <div style={actions}>
               <label style={actions}>{t('modelsContext')}
                 <input style={{ width: 140 }} inputMode="numeric" value={contexts[model.id] ?? ''}
-                  aria-label={`${model.name} ${t('modelsContext')}`} placeholder={String(model.defaultContextWindow)}
+                  aria-label={`${model.name} ${t('modelsContext')}`} placeholder={globalContextWindow === undefined ? String(model.defaultContextWindow ?? '') : String(Math.min(globalContextWindow, model.maxContextWindow))}
                   onChange={event => { setContexts({ ...contexts, [model.id]: event.target.value }); setDirty(true) }} />
               </label>
-              <small>{t('modelsContextBounds', { default: model.defaultContextWindow, max: model.maxContextWindow })}</small>
+              <small>{globalContextWindow === undefined
+                ? t('modelsContextBounds', { default: model.defaultContextWindow, max: model.maxContextWindow })
+                : t('modelsGlobalContextBounds', { default: Math.min(globalContextWindow, model.maxContextWindow), max: model.maxContextWindow })}</small>
             </div>}
             </div>
             {provider === 'codex' && (model.fastTier || Object.hasOwn(draft.subagentSpeeds ?? {}, model.id)) && <div style={{ display: 'grid', gap: 6 }}>
