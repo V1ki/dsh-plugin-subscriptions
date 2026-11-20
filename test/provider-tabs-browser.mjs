@@ -19,11 +19,11 @@ const code = result.output.find(file => file.type === 'chunk').code
 const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE } : {}) })
 try {
   const errors = []
-  async function setup(width = 900) {
-    const page = await browser.newPage({ viewport: { width, height: 900 } })
+  async function setup(width = 900, reducedMotion = 'reduce') {
+    const page = await browser.newPage({ viewport: { width, height: 900 }, reducedMotion })
     page.setDefaultTimeout(5000)
     page.on('pageerror', error => errors.push(error.message))
-    await page.setContent('<meta charset="utf-8"><style>body{margin:0;font:14px system-ui}</style><div id="root"></div>')
+    await page.setContent('<meta charset="utf-8"><style>body{margin:0;font:14px system-ui;--dsw-alias-label-primary:#111;--dsw-alias-bg-layer-3:#ddd;--dsw-alias-state-business-primary:#2455aa;--dsw-focus-ring-color:#2455aa}</style><div id="root"></div>')
     await page.addScriptTag({ content: code })
     await page.getByRole('tablist').waitFor()
     return page
@@ -87,41 +87,137 @@ try {
   await selected(early, 'Grok (X Premium)')
   await early.close()
 
-  // The selected roving tab can be reached with Tab, arrows wrap, and Home/End jump.
-  // A narrow viewport must reveal the keyboard-selected tab inside the scroll strip.
+  // Overflow controls must describe real actions rather than decorative chevrons.
+  // An unavailable direction may be hidden or disabled, but must not be actionable.
   const narrow = await setup(280)
   await narrow.evaluate(() => window.releaseStatus())
   await tab(narrow, 'Alpha').waitFor()
   const list = narrow.getByRole('tablist')
-  await narrow.mouse.move(0, 0)
-  const scrollbarColor = () => list.evaluate(el => getComputedStyle(el).scrollbarColor)
-  assert.equal(await scrollbarColor(), 'rgba(0, 0, 0, 0) rgba(0, 0, 0, 0)', 'scrollbar is visually hidden at rest')
+  const left = narrow.getByRole('button', { name: 'Scroll providers left', exact: true })
+  const right = narrow.getByRole('button', { name: 'Scroll providers right', exact: true })
+  async function available(control) {
+    return await control.isVisible() && await control.isEnabled()
+  }
+  async function waitState(wantLeft, wantRight) {
+    await narrow.waitForFunction(([l, r]) => {
+      const buttons = [...document.querySelectorAll('button')]
+      const usable = name => {
+        const el = buttons.find(button => button.getAttribute('aria-label') === name)
+        if (!el) return false
+        const style = getComputedStyle(el), rect = el.getBoundingClientRect()
+        return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0 && !el.disabled && el.getAttribute('aria-disabled') !== 'true'
+      }
+      return usable('Scroll providers left') === l && usable('Scroll providers right') === r
+    }, [wantLeft, wantRight])
+    assert.equal(await available(left), wantLeft)
+    assert.equal(await available(right), wantRight)
+  }
+  async function scrollToFraction(fraction) {
+    await list.evaluate((el, value) => { el.scrollLeft = (el.scrollWidth - el.clientWidth) * value }, fraction)
+  }
+  async function fullyVisible(name, focused = false) {
+    const target = tab(narrow, name)
+    await narrow.waitForFunction(label => {
+      const strip = document.querySelector('[role="tablist"]')
+      const item = [...strip.querySelectorAll('[role="tab"]')].find(el => el.textContent.trim() === label)
+      const a = strip.getBoundingClientRect(), b = item.getBoundingClientRect()
+      return b.left >= a.left - 1 && b.right <= a.right + 1
+    }, name)
+    const details = await target.evaluate(el => {
+      const style = getComputedStyle(el), range = document.createRange()
+      range.selectNodeContents(el)
+      const box = el.getBoundingClientRect(), text = range.getBoundingClientRect()
+      const strip = el.closest('[role="tablist"]').getBoundingClientRect()
+      const outset = Math.max(0, parseFloat(style.outlineOffset) + parseFloat(style.outlineWidth))
+      return { focused: el === document.activeElement, focusVisible: el.matches(':focus-visible'),
+        ring: style.outlineStyle !== 'none' && parseFloat(style.outlineWidth) > 0 && style.outlineColor !== 'rgba(0, 0, 0, 0)',
+        ringFits: box.left - outset >= strip.left - 1 && box.right + outset <= strip.right + 1 &&
+          box.top - outset >= strip.top - 1 && box.bottom + outset <= strip.bottom + 1,
+        textFits: text.left >= box.left - 1 && text.right <= box.right + 1,
+        noEllipsis: style.textOverflow !== 'ellipsis', noWrap: style.whiteSpace === 'nowrap' }
+    })
+    assert.ok(details.textFits && details.noEllipsis && details.noWrap, name + ' label is not truncated or wrapped')
+    if (focused) assert.ok(details.focused && details.focusVisible && details.ring && details.ringFits,
+      name + ' has an unclipped visible keyboard focus ring')
+    await selected(narrow, name)
+    const styles = await narrow.getByRole('tab').evaluateAll(els => els.map(el => {
+      const css = getComputedStyle(el)
+      return { selected: el.getAttribute('aria-selected') === 'true', background: css.backgroundColor,
+        border: css.borderColor, weight: css.fontWeight }
+    }))
+    const active = styles.find(style => style.selected), other = styles.find(style => !style.selected)
+    assert.ok(active.background !== other.background || active.border !== other.border || active.weight !== other.weight,
+      name + ' has a visible selected style')
+  }
+  const sizes = await list.evaluate(el => ({ scroll: el.scrollWidth, client: el.clientWidth }))
+  assert.ok(sizes.scroll > sizes.client, 'narrow provider strip overflows')
+  await scrollToFraction(0)
+  await waitState(false, true)
+  assert.equal(await right.evaluate(el => el.tagName), 'BUTTON', 'right chevron is a native button')
+  await right.click()
+  await narrow.waitForFunction(() => document.querySelector('[role="tablist"]').scrollLeft > 0)
+  await selected(narrow, 'Alpha') // Scrolling must not change selection.
+  await scrollToFraction(0.5)
+  await waitState(true, true)
+  assert.equal(await left.evaluate(el => el.tagName), 'BUTTON', 'left chevron is a native button')
+  await scrollToFraction(1)
+  await waitState(true, false)
+  await left.focus()
+  await narrow.keyboard.press('Enter')
+  await narrow.waitForFunction(() => {
+    const el = document.querySelector('[role="tablist"]')
+    return el.scrollLeft < el.scrollWidth - el.clientWidth - 1
+  })
+  await selected(narrow, 'Alpha')
+
+  // Native horizontal scroll events also update the controls, not only clicks.
+  await scrollToFraction(0)
+  await waitState(false, true)
   await list.hover()
-  assert.notEqual(await scrollbarColor(), 'rgba(0, 0, 0, 0) rgba(0, 0, 0, 0)', 'scrollbar is visible on hover')
-  await narrow.mouse.move(0, 0)
-  await tab(narrow, 'Alpha').focus()
-  assert.notEqual(await scrollbarColor(), 'rgba(0, 0, 0, 0) rgba(0, 0, 0, 0)', 'scrollbar is visible while navigating with keyboard')
-  assert.equal(await tab(narrow, 'Alpha').evaluate(el => el === document.activeElement), true, 'selected tab accepts keyboard focus')
+  await narrow.mouse.wheel(100, 0)
+  await narrow.waitForFunction(() => document.querySelector('[role="tablist"]').scrollLeft > 0)
+  await waitState(true, true)
+  await selected(narrow, 'Alpha')
+
+  // Automatic activation, roving focus, wraparound and Home/End reveal each tab.
+  await left.focus()
+  await narrow.keyboard.press('Tab')
+  assert.equal(await tab(narrow, 'Alpha').evaluate(el => el === document.activeElement), true,
+    'Tab reaches the selected roving tab from the preceding chevron')
   assert.equal(await narrow.getByRole('tab').evaluateAll(els => els.filter(el => el.tabIndex === 0).length), 1)
   await narrow.keyboard.press('End')
-  await selected(narrow, 'Grok (X Premium)')
-  assert.equal(await tab(narrow, 'Grok (X Premium)').evaluate(el => el === document.activeElement), true)
-  const geometry = await list.evaluate(el => {
-    const selected = el.querySelector('[role="tab"][aria-selected="true"]')
-    const strip = el.getBoundingClientRect(), item = selected.getBoundingClientRect()
-    return { scrollWidth: el.scrollWidth, clientWidth: el.clientWidth, left: item.left - strip.left, right: item.right - strip.right }
-  })
-  assert.ok(geometry.scrollWidth > geometry.clientWidth, 'narrow viewport overflows the tab strip')
-  assert.ok(geometry.left >= -1 && geometry.right <= 1, 'keyboard-selected tab is not clipped')
+  await fullyVisible('Grok (X Premium)', true)
+  await waitState(true, false)
   await narrow.keyboard.press('ArrowRight')
-  await selected(narrow, 'Alpha')
+  await fullyVisible('Alpha', true)
   await narrow.keyboard.press('ArrowLeft')
-  await selected(narrow, 'Grok (X Premium)')
+  await fullyVisible('Grok (X Premium)', true)
   await narrow.keyboard.press('Home')
-  await selected(narrow, 'Alpha')
+  await fullyVisible('Alpha', true)
   await narrow.keyboard.press('ArrowRight')
-  await selected(narrow, 'Zulu')
+  await fullyVisible('Zulu', true)
+  for (const name of ['GitHub Copilot', 'Google Antigravity', 'Grok (X Premium)']) {
+    await narrow.keyboard.press('ArrowRight')
+    await fullyVisible(name, true)
+  }
+  await narrow.keyboard.press('Home')
+  await narrow.keyboard.press('ArrowRight')
+  await fullyVisible('Zulu', true)
   await settingsVisible(narrow)
+
+  // Resize without remounting: controls and selected tab must remain correct.
+  await narrow.setViewportSize({ width: 900, height: 900 })
+  await waitState(false, false)
+  assert.equal(await list.evaluate(el => el.scrollWidth <= el.clientWidth + 1), true, 'wide provider strip fits')
+  await fullyVisible('Zulu', true)
+  await narrow.setViewportSize({ width: 280, height: 900 })
+  await narrow.waitForFunction(() => {
+    const el = document.querySelector('[role="tablist"]')
+    return el.scrollWidth > el.clientWidth
+  })
+  await fullyVisible('Zulu', true)
+  await narrow.waitForFunction(() => Array.from(document.querySelectorAll('.dsh-subscription-tabs-arrow')).some(button => !button.disabled))
+  assert.ok(await available(left) || await available(right), 'resize restores an available scroll direction')
   await narrow.close()
   assert.deepEqual(errors, [])
   console.log('Provider tabs browser checks passed')

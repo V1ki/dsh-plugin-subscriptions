@@ -201,6 +201,7 @@ export function ProviderAccountManager({ provider, name, accountsVersion, rpc, t
         </section>}
         {catalog.accounts.length === 0 && <p className="dsh-subscription-hint">{t('accountsEmpty')}</p>}
         {catalog.accounts.length > 0 && <SubscriptionTabs prefix={tabIdPrefix} label={t('accountsTabs')}
+          scrollLeftLabel={t('scrollAccountsLeft')} scrollRightLabel={t('scrollAccountsRight')}
           active={activeAccount} onSelect={setSelectedAccount} tabRefs={tabRefs} tabs={catalog.accounts.map(account => {
             const alias = (changes[account.key] ?? catalog.settings.accounts?.[account.key])?.alias?.trim()
             return { key: account.key, id: accountId(account.key), label: alias || account.label,

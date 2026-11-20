@@ -910,6 +910,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       <p style={styles.intro}>{t('intro')}</p>
       <div className="dsh-subscription-provider-area">
       <SubscriptionTabs prefix={tabIdPrefix} label={t('providerTabs')} active={activeProvider}
+        scrollLeftLabel={t('scrollProvidersLeft')} scrollRightLabel={t('scrollProvidersRight')}
         onSelect={setSelectedProvider} tabRefs={tabRefs} tabs={sortedProviders.map(({ id, name }) => {
           const status = statuses[id]
           const displayName = status?.displayName || name

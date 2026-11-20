@@ -26,35 +26,82 @@ export const providerSettingsCss = `
   color-scheme: light;
 }
 .dsh-subscription-provider-area { min-width: 0; }
-.dsh-subscription-tabs {
-  display: flex;
-  gap: 6px;
-  overflow-x: auto;
-  max-width: 100%;
-  padding: 4px 4px 10px;
+.dsh-subscription-tabs-shell {
+  position: relative;
+  min-width: 0;
   margin-bottom: 4px;
-  scrollbar-width: thin;
-  scrollbar-color: transparent transparent;
+  --tabs-surface: var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1, Canvas));
 }
-.dsh-subscription-tabs:hover,
-.dsh-subscription-tabs:focus-within {
-  scrollbar-color: var(--dsw-alias-label-tertiary, #888) transparent;
+.dsh-subscription-tabs {
+  overflow-x: auto;
+  scrollbar-width: none;
 }
-.dsh-subscription-tabs::-webkit-scrollbar { height: 6px; }
-.dsh-subscription-tabs::-webkit-scrollbar-track { background: transparent; }
-.dsh-subscription-tabs::-webkit-scrollbar-thumb { background: transparent; border-radius: 6px; }
-.dsh-subscription-tabs:hover::-webkit-scrollbar-thumb,
-.dsh-subscription-tabs:focus-within::-webkit-scrollbar-thumb {
-  background: var(--dsw-alias-label-tertiary, #888);
+.dsh-subscription-tabs::-webkit-scrollbar { display: none; }
+.dsh-subscription-tabs-track {
+  display: flex;
+  width: max-content;
+  gap: 6px;
+  padding: 4px 4px 10px;
+}
+.dsh-subscription-tabs-shell::before,
+.dsh-subscription-tabs-shell::after {
+  position: absolute;
+  z-index: 1;
+  top: 4px;
+  bottom: 10px;
+  width: 44px;
+  content: '';
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.dsh-subscription-tabs-shell::before {
+  left: 0;
+  background: linear-gradient(to right, var(--tabs-surface) 24px, transparent);
+}
+.dsh-subscription-tabs-shell::after {
+  right: 0;
+  background: linear-gradient(to left, var(--tabs-surface) 24px, transparent);
+}
+.dsh-subscription-tabs-shell[data-left]::before,
+.dsh-subscription-tabs-shell[data-right]::after { opacity: 1; }
+${formScope} button.dsh-subscription-tabs-arrow {
+  position: absolute;
+  z-index: 2;
+  top: 6px;
+  width: 24px;
+  height: 24px;
+  min-height: 24px;
+  padding: 0;
+  border: 1px solid var(--dsw-alias-border-l2, #8884);
+  border-radius: 9px;
+  color: var(--dsw-alias-label-secondary, inherit);
+  background: var(--tabs-surface);
+  box-shadow: 0 1px 3px #0002;
+  transition: opacity 120ms ease, visibility 120ms;
+}
+${formScope} button.dsh-subscription-tabs-arrow-left { left: 0; }
+${formScope} button.dsh-subscription-tabs-arrow-right { right: 0; }
+${formScope} button.dsh-subscription-tabs-arrow:disabled {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
 }
 ${formScope} .dsh-subscription-tabs button {
   gap: 6px;
   white-space: nowrap;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+${formScope} .dsh-subscription-tabs button:focus-visible { outline-offset: -2px; }
+@media (prefers-reduced-motion: reduce) {
+  .dsh-subscription-tabs-shell::before,
+  .dsh-subscription-tabs-shell::after,
+  ${formScope} button.dsh-subscription-tabs-arrow,
+  ${formScope} .dsh-subscription-tabs button { transition: none; }
 }
 ${formScope} .dsh-subscription-tabs button[aria-selected="true"] {
   background: var(--dsw-alias-interactive-bg-active, var(--dsw-alias-bg-layer-3));
   border-color: var(--dsw-alias-state-business-primary, var(--dsw-alias-brand-primary));
-  font-weight: 600;
 }
 body[data-ds-dark-theme] ${formScope} {
   color-scheme: dark;
