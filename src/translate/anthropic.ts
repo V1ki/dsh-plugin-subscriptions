@@ -147,6 +147,23 @@ function conversationStart(messages: readonly TranslatableMessage[]): number {
 }
 
 /**
+ * Make a tool-call id acceptable to Anthropic, which requires
+ * `^[a-zA-Z0-9_-]+$` for both `tool_use.id` and `tool_result.tool_use_id`.
+ *
+ * Ids minted by other providers survive in the history when the model is
+ * switched mid-session (e.g. DeepSeek to Claude), and may carry characters
+ * such as `.`, `:` or `|`. Each offending character becomes `_`; the mapping
+ * is deterministic, so a call and its result always agree on the new id.
+ * Ids that already conform are returned unchanged.
+ * @param id - tool-call id from the conversation history.
+ * @returns an id matching Anthropic's allowed pattern.
+ */
+export function sanitizeToolId(id: string): string {
+  const cleaned = id.replace(/[^a-zA-Z0-9_-]/g, '_')
+  return cleaned === '' ? '_' : cleaned
+}
+
+/**
  * Convert harness messages into Anthropic messages. Consecutive same-role
  * messages merge into one message with multiple content blocks; tool results
  * arrive as user messages with `tool_result` blocks, which a merged user
@@ -176,7 +193,7 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[]): A
       if (id === undefined) throw new LlmError('tool result has no call id', 'INVALID_REQUEST')
       blocks.push({
         type: 'tool_result',
-        tool_use_id: id,
+        tool_use_id: sanitizeToolId(id),
         content: toolResultContent({ type: 'tool-result', toolCallId: ToolCallId(id), content: message.content }),
         ...message.isError === true ? { is_error: true } : {},
       })
@@ -205,7 +222,7 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[]): A
           blocks.push(role === 'assistant'
             ? {
                 type: 'tool_use',
-                id: String(block.id),
+                id: sanitizeToolId(String(block.id)),
                 name: block.name,
                 input: parseToolInput(block.arguments),
               }
@@ -214,7 +231,7 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[]): A
         case 'tool-result':
           blocks.push({
             type: 'tool_result',
-            tool_use_id: String(block.toolCallId),
+            tool_use_id: sanitizeToolId(String(block.toolCallId)),
             content: toolResultContent(block),
             ...block.isError === true ? { is_error: true } : {},
           })
