@@ -3,6 +3,7 @@ import { LlmError } from '@deepseek-ai/dsh-llm'
 import assert from 'node:assert/strict'
 import { QwenAdapter, QwenOAuthClient, QwenOAuthError, QWEN_AUTH_URL, QWEN_GATEWAY_URL } from '../src/providers/qwen.js'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
+import { classifyPoolFailure } from '../src/providers/pool-health.js'
 
 const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } })
 const token = { access_token: 'access', refresh_token: 'refresh', token_type: 'Bearer', expires_in: 3600, scope: 'model:invoke profile:read' }
@@ -231,4 +232,61 @@ test('temperature and stop preserve explicit zero and empty list without leaking
   await assert.rejects(async () => { for await (const _ of adapter.stream(options)) {} }, (error: unknown) => error instanceof Error && !error.message.includes(secret))
   assert.equal(request.temperature, 0)
   assert.deepEqual(request.stop, [])
+})
+
+test('quota exhaustion parses only strict future Unix seconds and preserves conservative retry hints', async () => {
+  const reset = Math.floor(Date.now() / 1000) + 3600
+  for (const retryAfter of [undefined, '1', '7200']) {
+    let observed: { observedAt: number; resetsAt?: number } | undefined
+    const adapter = new QwenAdapter({
+      tokens: { async getAccessToken() { return 'token' } }, streamIdleTimeoutMs: 1000,
+      onQuotaExhausted: value => { observed = value },
+      fetchFn: async () => new Response(JSON.stringify({ error: { code: 'insufficient_quota', message: 'secret upstream', quota: { reset_at: reset } } }), { status: 402, headers: retryAfter === undefined ? {} : { 'retry-after': retryAfter } }),
+    })
+    await assert.rejects(adapter.listModels('qwen-subscription'), (error: unknown) => {
+      assert.ok(error instanceof LlmError)
+      assert.equal(error.code, 'QUOTA')
+      const action = classifyPoolFailure(error, 'qwen-subscription')
+      assert.equal(action.action, 'switch')
+      if (action.action === 'switch' && 'cooldownMs' in action) {
+        assert.equal(action.cooldownMs, error.failure.providerRetryAfterMs)
+        assert.equal(action.scope, 'account')
+      } else assert.fail('quota must produce account cooldown')
+      assert.match(error.message, /quota exhausted/)
+      assert.ok(error.message.includes(new Date(reset * 1000).toISOString()))
+      assert.ok(!error.message.includes('secret upstream'))
+      assert.equal(error.failure.providerRetryAfterMs, Math.max(reset * 1000 - observed!.observedAt, Number(retryAfter ?? 0) * 1000))
+      return true
+    })
+    assert.equal(observed?.resetsAt, reset * 1000)
+  }
+  for (const invalid of [undefined, null, String(reset), reset + 0.1, 0, -1, Math.floor(Date.now() / 1000) - 1, 8640000000001, Number.MAX_SAFE_INTEGER]) {
+    let observed: { observedAt: number; resetsAt?: number } | undefined
+    const adapter = new QwenAdapter({ tokens: { async getAccessToken() { return 'token' } }, streamIdleTimeoutMs: 1000,
+      onQuotaExhausted: value => { observed = value },
+      fetchFn: async () => json({ error: { code: 'insufficient_quota', reset_at: reset, quota: { reset_at: invalid } } }, 402),
+    })
+    await assert.rejects(adapter.listModels('qwen-subscription'), (error: unknown) => error instanceof LlmError && error.code === 'QUOTA' && error.message.includes('reset not provided') && error.failure.providerRetryAfterMs === undefined)
+    assert.ok(observed)
+    assert.equal(observed.resetsAt, undefined)
+  }
+})
+
+test('quota observations require both HTTP 402 and exact insufficient_quota code', async () => {
+  for (const [status, code] of [[429, 'insufficient_quota'], [403, 'insufficient_quota'], [402, 'other'], [402, undefined]] as const) {
+    const observations: unknown[] = []
+    const adapter = new QwenAdapter({ tokens: { async getAccessToken() { return 'token' } }, streamIdleTimeoutMs: 1000,
+      onQuotaExhausted: value => observations.push(value), fetchFn: async () => json({ error: { code, quota: { reset_at: Math.floor(Date.now() / 1000) + 60 } } }, status),
+    })
+    await assert.rejects(adapter.listModels('qwen-subscription'), (error: unknown) => error instanceof LlmError && error.code !== 'QUOTA')
+    assert.deepEqual(observations, [])
+  }
+})
+
+test('throwing quota observation hooks cannot replace sanitized QUOTA errors', async () => {
+  const adapter = new QwenAdapter({ tokens: { async getAccessToken() { return 'token' } }, streamIdleTimeoutMs: 1000,
+    onQuotaExhausted: () => { throw new Error('secret observer failure') },
+    fetchFn: async () => json({ error: { code: 'insufficient_quota' } }, 402),
+  })
+  await assert.rejects(adapter.listModels('qwen-subscription'), (error: unknown) => error instanceof LlmError && error.code === 'QUOTA' && error.message.includes('quota exhausted') && !error.message.includes('secret'))
 })

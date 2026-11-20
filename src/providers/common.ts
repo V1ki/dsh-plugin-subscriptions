@@ -644,6 +644,8 @@ export interface CreditBalance {
 
 /** Subscription usage of one provider, as served by the `usage` RPC endpoint. */
 export interface ProviderUsage {
+  /** Observed Qwen rejection, not a queried remaining balance or a percentage. */
+  quotaExhaustion?: { observedAt: number; resetsAt?: number }
   /** Display-only telemetry; does not affect routing or cooldown decisions. */
   fetchedAt?: number
   staleAt?: number

@@ -18,6 +18,7 @@ import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from
 import type { CSSProperties } from 'react'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import { en } from './locales.js'
+import { QuotaExhaustionNotice } from './QuotaExhaustionNotice.js'
 import { resetActionBlock } from './reset-action.js'
 import { AntigravityQuotaSummary } from './AntigravityQuotaSummary.js'
 import { antigravityQuotaScope } from '../antigravity-model-id.js'
@@ -108,6 +109,8 @@ export interface ProviderUsage {
   retryAt?: number
 
   supported: boolean
+  /** Observed upstream quota exhaustion, even without a usage-query endpoint. */
+  quotaExhaustion?: { observedAt: number; resetsAt?: number }
   windows?: UsageWindow[]
   plan?: string
   /** Remaining purchased Codex credits from `wham/usage`, when disclosed. */
@@ -698,6 +701,21 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     return () => { unsubscribe(); window.removeEventListener('focus', focus) }
   }, [rpc, statuses])
 
+  // Qwen usage reads only server-side observation memory (no usage endpoint).
+  // Re-read on open, focus and while Settings stays open: an old unsupported
+  // browser snapshot must not hide exhaustion observed by a later LLM request.
+  useEffect(() => {
+    const accounts = statuses['qwen-subscription']?.accounts ?? []
+    if (!rpc || accounts.length === 0) return
+    const readObservations = () => {
+      for (const account of accounts) void loadUsage('qwen-subscription', account.key)
+    }
+    readObservations()
+    const timer = setInterval(readObservations, 30_000)
+    window.addEventListener('focus', readObservations)
+    return () => { clearInterval(timer); window.removeEventListener('focus', readObservations) }
+  }, [rpc, statuses, loadUsage])
+
   async function prepareReset(account: string): Promise<void> {
     if (!rpc || resetInflight.current) return
     resetInflight.current = true
@@ -1014,7 +1032,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                         {usage?.plan !== undefined && (
                           <span style={styles.usagePlan}>{t('usagePlan', { plan: usage.plan })}</span>
                         )}
-                        {usage?.supported !== false && <button
+                        {(usage?.supported !== false || id === 'qwen-subscription' || usage.quotaExhaustion !== undefined) && <button
                           type="button"
                           style={styles.usageRefresh}
                           disabled={usageLoading[usageKey] === true}
@@ -1023,6 +1041,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                           {t('usageRefresh')}
                         </button>}
                       </div>
+                      <QuotaExhaustionNotice exhaustion={usage?.quotaExhaustion} t={t} />
                       {usage && <UsageFreshness usage={usage} t={t} />}
                       {usage === undefined && usageError === undefined && (
                         <p style={styles.statusLine}>{t('usageLoading')}</p>

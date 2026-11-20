@@ -103,15 +103,27 @@ function bearer(token: string): string { return 'Bearer ' + token }
 
 /** Host must atomically persist rotated pairs and serialize refresh; rejectedToken enables compare-and-refresh. */
 export interface QwenTokenSource { getAccessToken(signal?: AbortSignal, rejectedToken?: string): Promise<string> }
-export interface QwenAdapterOptions { tokens: QwenTokenSource; fetchFn?: Fetch; resolveAttachments?: () => AttachmentStore | undefined; streamIdleTimeoutMs: number; userAgent?: string; defaultEffortOf?: (model: string) => string | undefined }
+export interface QwenQuotaExhaustion { observedAt: number; resetsAt?: number }
+export interface QwenAdapterOptions { tokens: QwenTokenSource; fetchFn?: Fetch; resolveAttachments?: () => AttachmentStore | undefined; streamIdleTimeoutMs: number; userAgent?: string; defaultEffortOf?: (model: string) => string | undefined; onQuotaExhausted?: (observation: QwenQuotaExhaustion) => void }
 /** Never include gateway body or upstream messages, which can echo credentials. */
-async function qwenHttpError(response: Response): Promise<LlmError> {
-  const data = await response.json().catch(() => undefined) as { error?: { code?: unknown } } | undefined
+async function qwenHttpError(response: Response, onQuotaExhausted?: (observation: QwenQuotaExhaustion) => void): Promise<LlmError> {
+  const data = await response.json().catch(() => undefined) as { error?: { code?: unknown; quota?: { reset_at?: unknown } } } | undefined
   const quota = response.status === 402 && data?.error?.code === 'insufficient_quota'
   const status = response.status
   const code = status === 401 || status === 403 ? 'AUTH' : status === 429 ? 'RATE_LIMIT' : quota ? 'QUOTA' : status === 400 && data?.error?.code === 'context_length_exceeded' ? 'CONTEXT_WINDOW_EXCEEDED' : status === 408 || status === 504 ? 'TIMEOUT' : status >= 500 ? 'SERVER' : `HTTP_${status}` as `HTTP_${number}`
-  const retry = retryAfter(response.headers.get('retry-after'))
-  return new LlmError(`Qwen gateway error (HTTP ${status})`, code, { status, ...(retry === undefined ? {} : { providerRetryAfterMs: retry }) })
+  let retry = retryAfter(response.headers.get('retry-after'))
+  let message = `Qwen gateway error (HTTP ${status})`
+  if (quota) {
+    const observedAt = Date.now()
+    const reset = data?.error?.quota?.reset_at
+    const ms = typeof reset === 'number' && Number.isSafeInteger(reset) ? reset * 1000 : NaN
+    const resetsAt = ms > observedAt && Number.isFinite(new Date(ms).getTime()) ? ms : undefined
+    // Both hints are lower bounds: never retry before either advertised delay.
+    if (resetsAt !== undefined) retry = Math.max(retry ?? 0, resetsAt - observedAt)
+    message = `Qwen quota exhausted (HTTP ${status}); ${resetsAt === undefined ? 'reset not provided' : 'reset ' + new Date(resetsAt).toISOString()}`
+    try { onQuotaExhausted?.({ observedAt, ...(resetsAt === undefined ? {} : { resetsAt }) }) } catch { /* Observation hooks must never replace the sanitized gateway error. */ }
+  }
+  return new LlmError(message, code, { status, ...(retry === undefined ? {} : { providerRetryAfterMs: retry }) })
 }
 
 class QwenNetworkError extends Error { constructor(cause: unknown) { super('Qwen network request failed', { cause }) } }
@@ -119,6 +131,8 @@ interface Model { id: string; inputModalities?: ('text' | 'image')[]; contextWin
 export class QwenAdapter extends LlmAdapter {
   private models: Model[] = []
   private catalogRevision = 0
+  /** Successful chat completion supersedes quota failures from earlier requests. */
+  private chatSuccessRevision = 0
   constructor(private readonly options: QwenAdapterOptions) { super() }
   override providerInfo(provider: string) { return { id: provider, name: 'Qwen Subscription' } }
   clearCatalog(): void { this.catalogRevision++; this.models = [] }
@@ -143,6 +157,7 @@ export class QwenAdapter extends LlmAdapter {
   /** Freshness is request-local so overlapping refreshes cannot overwrite it. */
   async listModelsResult(provider: string, signal?: AbortSignal): Promise<{ models: readonly LlmModelInfo[]; fallback: boolean }> {
     const revision = this.catalogRevision
+    const chatRevision = this.chatSuccessRevision
     let response: Response
     try {
       response = await this.gateway('/models', { headers: { accept: 'application/json' } }, signal)
@@ -154,7 +169,7 @@ export class QwenAdapter extends LlmAdapter {
     signal?.throwIfAborted()
     if (!response.ok) {
       if (response.status >= 500 && revision === this.catalogRevision && this.models.length) { await response.body?.cancel(); signal?.throwIfAborted(); if (revision !== this.catalogRevision) throw new Error('Qwen login changed during model discovery'); return { models: this.modelRows(provider), fallback: true } }
-      throw await qwenHttpError(response)
+      throw await qwenHttpError(response, observation => { if (revision === this.catalogRevision && chatRevision === this.chatSuccessRevision) this.options.onQuotaExhausted?.(observation) })
     }
     const data = await response.json() as { data?: unknown }
     if (!Array.isArray(data.data) || data.data.length === 0) throw new Error('Qwen model catalog is invalid')
@@ -178,6 +193,8 @@ export class QwenAdapter extends LlmAdapter {
     return { provider, id: model, name: model, ...(found?.inputModalities ? { inputModalities: found.inputModalities } : {}), ...(found?.contextWindow ? { context: { contextWindow: found.contextWindow } } : {}), ...(reasoning ? { reasoning } : {}) }
   }
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const revision = this.catalogRevision
+    const chatRevision = this.chatSuccessRevision
     const watchdog = idleWatchdog(options.signal, this.options.streamIdleTimeoutMs)
     try {
       const messages = await resolveImages(options.messages, this.options.resolveAttachments?.(), watchdog.signal)
@@ -198,9 +215,13 @@ export class QwenAdapter extends LlmAdapter {
       }
       const body = { model: options.model, messages: wireMessages, ...(options.tools?.length ? { tools: toChatTools(options.tools), tool_choice: 'auto' } : {}), ...(options.maxTokens !== undefined ? { max_tokens: options.maxTokens } : {}), ...(options.temperature !== undefined ? { temperature: options.temperature } : {}), ...(options.stop !== undefined ? { stop: options.stop } : {}), enable_thinking: effort !== 'off', ...(effort === 'off' ? {} : { thinking_budget: budget }), stream: true, stream_options: { include_usage: true } }
       const response = await this.gateway('/chat/completions', { method: 'POST', headers: { accept: 'text/event-stream', 'content-type': 'application/json' }, body: JSON.stringify(body) }, watchdog.signal)
-      if (!response.ok) throw await qwenHttpError(response)
+      if (!response.ok) throw await qwenHttpError(response, observation => { if (revision === this.catalogRevision && chatRevision === this.chatSuccessRevision) this.options.onQuotaExhausted?.(observation) })
       if (!response.body) throw new LlmError('qwen API returned no response body', EMPTY_RESPONSE_CODE)
-      yield* streamChatCompletions(response.body, () => watchdog.pulse())
+      for await (const chunk of streamChatCompletions(response.body, () => watchdog.pulse())) {
+        // Consumers may stop immediately at finish, without requesting another next().
+        if (chunk.type === 'finish' && chunk.reason.kind !== 'error' && revision === this.catalogRevision) this.chatSuccessRevision++
+        yield chunk
+      }
     } catch (error) {
       throw mapFetchFailure('qwen API', error, watchdog, options.signal)
     } finally { watchdog.stop() }

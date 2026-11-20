@@ -5,9 +5,10 @@ import type { QwenSession, ProviderId } from '../auth/store.js'
 import { AccountTokenManager, DISCOVERY_TIMEOUT_MS } from './accounts.js'
 import type { AccountAwareAdapter } from './accounts.js'
 import { withAbortSignal, withTimeout } from './common.js'
+import type { ProviderUsage } from './common.js'
 import type { PoolAdapter } from './pool.js'
 import { QwenAdapter } from './qwen.js'
-import type { QwenAdapterOptions } from './qwen.js'
+import type { QwenAdapterOptions, QwenQuotaExhaustion } from './qwen.js'
 
 export interface QwenAccountAdapterOptions {
   tokens: AccountTokenManager<QwenSession>
@@ -26,6 +27,8 @@ export interface QwenAccountAdapterOptions {
 
 interface AccountAdapter {
   adapter: QwenAdapter
+  /** Observed gateway exhaustion only; deliberately not persisted or inferred from catalogs. */
+  quotaExhaustion?: QwenQuotaExhaustion
   /** Last successful listing, used for non-network picker and timeout fallback. */
   models?: readonly LlmModelInfo[]
   /** Snapshot of account-specific capabilities used for change detection. */
@@ -88,6 +91,9 @@ export class QwenAccountAdapter extends LlmAdapter implements AccountAwareAdapte
       const adapter = new QwenAdapter({
         tokens: { getAccessToken: (signal, rejectedToken) => this.accessToken(key, signal, rejectedToken) },
         streamIdleTimeoutMs: this.options.streamIdleTimeoutMs,
+        onQuotaExhausted: observation => {
+          if (this.accounts.get(key) === entry) entry!.quotaExhaustion = observation
+        },
         ...this.options.fetchFn === undefined ? {} : { fetchFn: this.options.fetchFn },
         ...this.options.resolveAttachments === undefined ? {} : { resolveAttachments: this.options.resolveAttachments },
         ...this.options.userAgent === undefined ? {} : { userAgent: this.options.userAgent },
@@ -97,6 +103,15 @@ export class QwenAccountAdapter extends LlmAdapter implements AccountAwareAdapte
       this.accounts.set(key, entry)
     }
     return entry
+  }
+
+  /** No Qwen usage endpoint exists; report only account-scoped in-memory observations. */
+  async usage(account: string, signal?: AbortSignal): Promise<ProviderUsage> {
+    signal?.throwIfAborted()
+    const key = await withAbortSignal(() => this.canonical(account), signal)
+    signal?.throwIfAborted()
+    const observation = this.accounts.get(key)?.quotaExhaustion
+    return { supported: false, ...(observation === undefined ? {} : { quotaExhaustion: { ...observation } }) }
   }
 
   /**
@@ -333,13 +348,27 @@ export class QwenAccountAdapter extends LlmAdapter implements AccountAwareAdapte
     }
     const key = await withAbortSignal(() => this.defaultKey(), options.signal)
     options.signal?.throwIfAborted()
-    yield* this.adapterFor(key).adapter.stream(options)
+    const entry = this.adapterFor(key)
+    const observation = entry.quotaExhaustion
+    for await (const chunk of entry.adapter.stream(options)) {
+      // Commit before yielding finish: consumers need not call next() again.
+      // Do not erase a newer concurrent failure or a replacement login's state.
+      if (chunk.type === 'finish' && chunk.reason.kind !== 'error' && this.accounts.get(key) === entry && entry.quotaExhaustion === observation) delete entry.quotaExhaustion
+      yield chunk
+    }
   }
 
   /** Pool seam: use the exact account and bypass pool delegation. */
   async *streamAccount(options: GenerateOptions, account: string): AsyncIterable<StreamChunk> {
     const key = await withAbortSignal(() => this.canonical(account), options.signal)
     options.signal?.throwIfAborted()
-    yield* this.adapterFor(key).adapter.stream(options)
+    const entry = this.adapterFor(key)
+    const observation = entry.quotaExhaustion
+    for await (const chunk of entry.adapter.stream(options)) {
+      // Commit before yielding finish: consumers need not call next() again.
+      // Do not erase a newer concurrent failure or a replacement login's state.
+      if (chunk.type === 'finish' && chunk.reason.kind !== 'error' && this.accounts.get(key) === entry && entry.quotaExhaustion === observation) delete entry.quotaExhaustion
+      yield chunk
+    }
   }
 }

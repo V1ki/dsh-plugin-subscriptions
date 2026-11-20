@@ -337,3 +337,130 @@ test('cancelled catalog request settles without accepting a late response', asyn
   assert.deepEqual((await adapter.lastKnownOwnModels('qwen-subscription', 'a'))?.map(m => m.id), ['known'])
   assert.deepEqual((await adapter.listOwnModels('qwen-subscription', 'a')).map(m => m.id), ['fresh'])
 })
+
+test('quota usage is account-scoped memory only, without endpoint or invented percentages', async () => {
+  const h = harness()
+  const reset = Math.floor(Date.now() / 1000) + 3600
+  let fail = true; let calls = 0
+  const adapter = new QwenAccountAdapter({ tokens: h.tokens, streamIdleTimeoutMs: 1000, fetchFn: async (url, init) => {
+    calls++
+    if (String(url).endsWith('/models')) return data({ id: 'shared' })
+    return fail && bearer(init) === 'Bearer a-token' ? json({ error: { code: 'insufficient_quota', quota: { reset_at: reset } } }, 402) : okStream()
+  } })
+  assert.deepEqual(await adapter.usage('a'), { supported: false })
+  assert.equal(calls, 0)
+  await assert.rejects(collect(adapter.streamAccount(OPTIONS, 'old-a')), /quota exhausted/)
+  const usage = await adapter.usage('a')
+  assert.equal(usage.supported, false)
+  assert.equal(usage.quotaExhaustion?.resetsAt, reset * 1000)
+  assert.ok(usage.quotaExhaustion!.observedAt <= Date.now())
+  assert.equal(usage.windows, undefined)
+  assert.deepEqual(await adapter.usage('old-a'), usage)
+  assert.deepEqual(await adapter.usage('b'), { supported: false })
+  await collect(adapter.streamAccount(OPTIONS, 'b'))
+  assert.deepEqual(await adapter.usage('a'), usage, 'another account success cannot clear exhaustion')
+  adapter.invalidateAccountCatalog('a')
+  await adapter.listOwnModels('qwen-subscription', 'a')
+  assert.deepEqual(await adapter.usage('a'), usage, 'force refresh and catalog success do not prove renewal')
+  const freshInstance = new QwenAccountAdapter({ tokens: h.tokens, streamIdleTimeoutMs: 1000 })
+  assert.deepEqual(await freshInstance.usage('a'), { supported: false }, 'observations are not persisted')
+  fail = false
+  await collect(adapter.stream(OPTIONS))
+  assert.deepEqual(await adapter.usage('a'), { supported: false }, 'completed default chat success clears same account')
+  const controller = new AbortController(); controller.abort(new Error('cancel usage'))
+  await assert.rejects(adapter.usage('a', controller.signal), /cancel usage/)
+})
+
+test('auth catalog clearing removes quota and ignores delayed pre-login responses', async () => {
+  const h = harness()
+  let pending: ReturnType<typeof deferred<Response>> | undefined
+  let started: ReturnType<typeof deferred<void>> | undefined
+  const adapter = new QwenAccountAdapter({ tokens: h.tokens, streamIdleTimeoutMs: 1000, fetchFn: async () => {
+    if (pending) { started!.resolve(); return pending.promise }
+    return json({ error: { code: 'insufficient_quota' } }, 402)
+  } })
+  await assert.rejects(collect(adapter.streamAccount(OPTIONS, 'a')), /quota exhausted/)
+  await assert.rejects(collect(adapter.streamAccount(OPTIONS, 'b')), /quota exhausted/)
+  assert.ok((await adapter.usage('old-a')).quotaExhaustion)
+  adapter.clearAccountCatalog('old-a')
+  assert.deepEqual(await adapter.usage('a'), { supported: false })
+  assert.ok((await adapter.usage('b')).quotaExhaustion)
+  pending = deferred<Response>(); started = deferred<void>()
+  const old = collect(adapter.streamAccount(OPTIONS, 'a'))
+  const oldRejected = assert.rejects(old, /quota exhausted/)
+  await started.promise
+  adapter.clearAccountCatalog('a')
+  pending.resolve(json({ error: { code: 'insufficient_quota' } }, 402))
+  await oldRejected
+  assert.deepEqual(await adapter.usage('a'), { supported: false })
+  adapter.clearAccountCatalog()
+  assert.deepEqual(await adapter.usage('b'), { supported: false })
+})
+
+test('late successful chat cannot erase a newer concurrent quota observation', async () => {
+  const h = harness(); let delaySuccess = false
+  const pending = deferred<Response>(); const started = deferred<void>()
+  const adapter = new QwenAccountAdapter({ tokens: h.tokens, streamIdleTimeoutMs: 1000, fetchFn: async () => {
+    if (delaySuccess) { delaySuccess = false; started.resolve(); return pending.promise }
+    return json({ error: { code: 'insufficient_quota' } }, 402)
+  } })
+  await assert.rejects(collect(adapter.streamAccount(OPTIONS, 'a')), /quota exhausted/)
+  delaySuccess = true
+  const success = collect(adapter.streamAccount(OPTIONS, 'a'))
+  await started.promise
+  await assert.rejects(collect(adapter.streamAccount(OPTIONS, 'a')), /quota exhausted/)
+  const newer = await adapter.usage('a')
+  pending.resolve(okStream()); await success
+  assert.deepEqual(await adapter.usage('a'), newer)
+})
+
+test('empty and content-filter terminal errors never disprove quota exhaustion', async () => {
+  for (const reason of ['stop', 'content_filter']) {
+    const h = harness(); let fail = true
+    const adapter = new QwenAccountAdapter({ tokens: h.tokens, streamIdleTimeoutMs: 1000, fetchFn: async () => fail
+      ? json({ error: { code: 'insufficient_quota' } }, 402)
+      : new Response('data: ' + JSON.stringify({ choices: [{ index: 0, delta: reason === 'content_filter' ? { content: 'filtered response' } : {}, finish_reason: reason }] }) + '\n\ndata: [DONE]\n\n'),
+    })
+    await assert.rejects(collect(adapter.streamAccount(OPTIONS, 'a')), /quota exhausted/)
+    const before = await adapter.usage('a'); fail = false
+    const chunks = await collect(adapter.streamAccount(OPTIONS, 'a'))
+    assert.ok(chunks.some(chunk => chunk.type === 'finish' && chunk.reason.kind === 'error'))
+    assert.deepEqual(await adapter.usage('a'), before)
+  }
+})
+
+test('confirmed chat success suppresses quota from earlier requests but preserves new failures', async () => {
+  const h = harness(); let delay = true; let fail = false
+  const pending = deferred<Response>(); const started = deferred<void>()
+  const adapter = new QwenAccountAdapter({ tokens: h.tokens, streamIdleTimeoutMs: 1000, fetchFn: async () => {
+    if (delay) { delay = false; started.resolve(); return pending.promise }
+    return fail ? json({ error: { code: 'insufficient_quota' } }, 402) : okStream()
+  } })
+  const old = collect(adapter.streamAccount(OPTIONS, 'a'))
+  const rejected = assert.rejects(old, /quota exhausted/)
+  await started.promise
+  for await (const chunk of adapter.streamAccount(OPTIONS, 'a')) {
+    if (chunk.type === 'finish') break
+  }
+  pending.resolve(json({ error: { code: 'insufficient_quota' } }, 402)); await rejected
+  assert.deepEqual(await adapter.usage('a'), { supported: false }, 'old request cannot reinsert superseded exhaustion')
+  fail = true
+  await assert.rejects(collect(adapter.streamAccount(OPTIONS, 'a')), /quota exhausted/)
+  assert.ok((await adapter.usage('a')).quotaExhaustion, 'new request still records exhaustion')
+})
+
+test('consumer break on successful finish clears quota before yielding terminal chunk', async () => {
+  const h = harness(); let fail = true
+  const adapter = new QwenAccountAdapter({ tokens: h.tokens, streamIdleTimeoutMs: 1000, fetchFn: async () => fail
+    ? json({ error: { code: 'insufficient_quota' } }, 402) : okStream(),
+  })
+  await assert.rejects(collect(adapter.streamAccount(OPTIONS, 'a')), /quota exhausted/)
+  fail = false
+  for await (const chunk of adapter.streamAccount(OPTIONS, 'a')) {
+    if (chunk.type === 'finish') {
+      assert.deepEqual(await adapter.usage('a'), { supported: false })
+      break
+    }
+  }
+  assert.deepEqual(await adapter.usage('a'), { supported: false })
+})

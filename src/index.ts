@@ -456,9 +456,12 @@ export class SubscriptionsAuthController implements AuthController {
   }
 
   usage(provider: ProviderId, account: string, signal: AbortSignal, force = false): Promise<ProviderUsage> {
-    if (force) this.onUsageForced?.(provider, account)
+    if (force && provider !== 'qwen-subscription') this.onUsageForced?.(provider, account)
     const fetcher = this.usageFetchers[provider]
     if (fetcher === undefined) return Promise.resolve({ supported: false })
+    // Qwen reports observed rejections, not a pollable balance. Do not cache away
+    // newly observed failures or clear routing cooldowns by re-reading this state.
+    if (provider === 'qwen-subscription') return fetcher(account, signal)
     if (this.poolUsage === undefined) return fetcher(account, signal).then(snapshot => {
       const fetchedAt = Date.now()
       return { ...snapshot, fetchedAt, staleAt: fetchedAt + 5 * 60_000 }
@@ -1119,6 +1122,7 @@ export function apply(ctx: Context, config: Config): void {
           defaultEffortOf: model => defaultEffortOf('qwen-subscription', model),
           pool: () => poolAdapter,
         })
+        usageFetchers['qwen-subscription'] = (account, signal) => adapter.usage(account, signal)
         adapters.set('qwen-subscription', adapter)
         handles.set('qwen-subscription', register('qwen-subscription', adapter))
         break

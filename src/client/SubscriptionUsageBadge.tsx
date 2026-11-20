@@ -37,6 +37,7 @@ import { callSubscriptionsAuth, usageBarColor } from './SubscriptionsSection.js'
 import type { AccountStatus, ProviderStatus, ProviderUsage, SubscriptionProvider, UsageWindow } from './SubscriptionsSection.js'
 import type { ModelDirectoriesLike } from './SpeedSelect.js'
 import { en } from './locales.js'
+import { QuotaExhaustionNotice, quotaExhaustionText } from './QuotaExhaustionNotice.js'
 import type { SubscriptionsKey } from './locales.js'
 import { hostIcon } from './host-icons.js'
 import { useUsageBadgeMode, useQuotaDisplayMode, type QuotaDisplayMode } from './usage-badge-preferences.js'
@@ -207,13 +208,19 @@ export function previewWindows(windows: readonly UsageWindow[], model?: string, 
 
 /** Bounded readout; Antigravity quotas belong to individual models, not the account. */
 export function compactSegment(d: ProviderUsageDisplay, model?: string, t: Translate = fallbackTranslate, mode: QuotaDisplayMode = 'used'): string {
-  if (d.accounts.length > 1) return `${d.name} · ${t('quotaSignedIn', { count: d.accounts.length })}`
+  if (d.accounts.length > 1) {
+    const exhausted = d.accounts.filter(account => account.usage?.quotaExhaustion !== undefined)
+    const warning = exhausted.length ? ` · ${t('quotaExhaustedAccounts', { count: exhausted.length })}` : ''
+    return `${d.name} · ${t('quotaSignedIn', { count: d.accounts.length })}${warning}`
+  }
   const account = pillAccountOf(d)
   if (!account) return `${d.name} · ${t('quotaUnknown')}`
   const windows = account.windows
   const source = t(account.isDefault ? 'quotaDefaultAccount' : 'quotaListedAccount')
   const freshness = account.usage && quotaIsStale(account.usage) ? ` · ${t('quotaStale')}` : ''
   const prefix = `${d.name} · ${source}`
+  const exhaustion = quotaExhaustionText(account.usage?.quotaExhaustion, t)
+  if (exhaustion !== undefined) return `${prefix} · ${exhaustion}`
   if (windows.length === 0) return `${prefix} · ${quotaUnavailableText(account.usage, account.loadFailed === true, t) ?? t('usageNoVisibleModels')}`
   if (d.provider === 'antigravity') {
     const matching = model === undefined ? [] : windows.filter(w => antigravityQuotaApplies(w.scope, model))
@@ -463,8 +470,27 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
     if (displayMode === 'hidden') return
     void refresh()
     const timer = setInterval(() => { void refresh() }, USAGE_POLL_INTERVAL_MS)
-    return () => { clearInterval(timer) }
-  }, [refresh, displayMode])
+    // Read only Qwen observation memory; do not poll other upstream APIs.
+    let disposed = false
+    let observationsInflight = false
+    const onFocus = () => {
+      if (!rpc || disposed || observationsInflight || inflightRef.current) return
+      const accounts = statusRef.current?.providers['qwen-subscription']?.accounts ?? []
+      if (accounts.length === 0) return
+      observationsInflight = true
+      void Promise.allSettled(accounts.map(account => callSubscriptionsAuth(rpc, 'usage', {
+        provider: 'qwen-subscription', account: account.key,
+      }))).finally(() => { observationsInflight = false })
+    }
+    const observationsTimer = setInterval(onFocus, 30_000)
+    window.addEventListener('focus', onFocus)
+    return () => {
+      disposed = true
+      clearInterval(timer)
+      clearInterval(observationsTimer)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [rpc, refresh, displayMode])
 
   useEffect(() => {
     if (currentRef.current === undefined) return
@@ -593,6 +619,7 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
                       <AccountMeta account={account} translate={translate} />
                     </div>
                   )}
+                  <QuotaExhaustionNotice exhaustion={account.usage?.quotaExhaustion} t={translate} />
                   <UsageFreshness usage={account.usage} failed={account.loadFailed === true} t={translate} />
                   {d.provider === 'codex' && creditBalanceText(account.usage?.credits, translate) !== undefined && (
                     <p style={styles.providerMeta}>{creditBalanceText(account.usage?.credits, translate)}</p>
