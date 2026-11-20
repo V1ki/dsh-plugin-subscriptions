@@ -94,6 +94,19 @@ export function llmErrorFromFailure(failure: LlmError['failure'], options?: Erro
   return new LegacyLlmError(failure.message, failure.code, { ...failure, ...options })
 }
 
+/**
+ * The code for an account Google has disabled for a terms-of-service violation.
+ *
+ * The cast is deliberate. `BuiltinLlmFailureCode` is a closed union of the
+ * codes dsh-llm ships, and none of them distinguishes a permanently suspended
+ * account from a broken credential; widening that union is upstream's call, not
+ * this plugin's. At runtime an LlmError accepts any non-empty string as its
+ * code, so the value survives construction and reaches the UI intact, where
+ * rendering previously showed every `AUTH` as an invalid API key and hid the
+ * real reason the account was rejected.
+ */
+export const ACCOUNT_SUSPENDED_CODE = 'ACCOUNT_SUSPENDED' as ConstructorParameters<typeof LlmError>[1]
+
 /** Optional per-call hooks {@link httpLlmError} uses to read a rate-limit window. */
 export interface HttpLlmErrorOptions {
   /**
@@ -105,6 +118,25 @@ export interface HttpLlmErrorOptions {
   rateLimitReset?: RateLimitResetReader
   /** Diagnostic sink for a 429 that disclosed no reset instant this code recognizes. */
   onWarn?: (message: string) => void
+}
+
+/**
+ * Decide whether a 403 body reports an account Google has disabled for a
+ * terms-of-service violation.
+ *
+ * Antigravity and Cloud Code Private API answer a ToS ban with a Google RPC
+ * error carrying `details[].reason: "TOS_VIOLATION"`, an appeal URL, and the
+ * wording "This service has been disabled in this account for violation of
+ * Terms of Service". That is a permanent state of the account, not a rejected
+ * request: re-authenticating cannot lift it and only an appeal can. Matching the
+ * reason token rather than parsing the envelope keeps this working across the
+ * response's positional variations, and the whole body is searched so a detail
+ * object beyond the displayed 500-character prefix still decides the code.
+ * @param body - the complete response body.
+ * @returns whether the body carries the ToS-violation reason.
+ */
+function googleAccountSuspended(body: string): boolean {
+  return body.includes('TOS_VIOLATION')
 }
 
 /**
@@ -139,7 +171,13 @@ export async function httpLlmError(
     ? `${label} error (HTTP ${String(response.status)}): ${shown}`
     : `${label} error (HTTP ${String(response.status)})`
   let code: ConstructorParameters<typeof LlmError>[1]
-  if (response.status === 401 || response.status === 403) code = 'AUTH'
+  // A 403 covers two unrelated failures: a credential this route will not
+  // accept, and an account Google has permanently disabled. Only the former is
+  // an authentication problem; classifying the ban as `AUTH` showed it to the
+  // user as an invalid API key, so the real reason never reached the surface.
+  // A 401 is always about the credential itself and is never a ToS ban.
+  if (response.status === 401) code = 'AUTH'
+  else if (response.status === 403) code = googleAccountSuspended(body) ? ACCOUNT_SUSPENDED_CODE : 'AUTH'
   else if (response.status === 429) code = 'RATE_LIMIT'
   else if (isQuotaExceededError(shown)) code = QUOTA_EXCEEDED_CODE
   else if (response.status === 400 && isContextWindowExceededError(shown)) code = CONTEXT_WINDOW_EXCEEDED_CODE

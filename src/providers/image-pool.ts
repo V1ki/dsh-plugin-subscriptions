@@ -1,7 +1,7 @@
 /** Account scheduling shared by image generation and editing, independent of chat catalogs/quota. */
 import { LlmError } from '@deepseek-ai/dsh-llm'
 import type { AccountTokenManager } from './accounts.js'
-import { httpLlmError } from './common.js'
+import { ACCOUNT_SUSPENDED_CODE, httpLlmError } from './common.js'
 import type { RateLimitResetReader } from './rate-limit.js'
 import { AUTH_COOLDOWN_MS, DEFAULT_QUOTA_COOLDOWN_MS, TRANSIENT_COOLDOWN_MS, PoolHealthRegistry, memberKey } from './pool-health.js'
 
@@ -76,13 +76,13 @@ export class ImageAccountPool {
         if (![401, 402, 403, 404, 429].includes(response.status)) throw failure
       } catch (error) {
         signal.throwIfAborted()
-        if (!(error instanceof LlmError) || !['AUTH', 'INVALID_CREDENTIAL', 'MISSING_CREDENTIAL', 'RATE_LIMIT', 'HTTP_402', 'HTTP_404'].includes(error.code)) throw error
+        if (!(error instanceof LlmError) || ![ACCOUNT_SUSPENDED_CODE, 'AUTH', 'INVALID_CREDENTIAL', 'MISSING_CREDENTIAL', 'RATE_LIMIT', 'HTTP_402', 'HTTP_404'].includes(error.code)) throw error
         failure = error
       }
       if (!pooling) throw failure
       const delay = failure.failure.providerRetryAfterMs ?? (failure.code === 'RATE_LIMIT'
         ? DEFAULT_QUOTA_COOLDOWN_MS
-        : ['AUTH', 'INVALID_CREDENTIAL', 'MISSING_CREDENTIAL'].includes(failure.code) ? AUTH_COOLDOWN_MS : TRANSIENT_COOLDOWN_MS)
+        : [ACCOUNT_SUSPENDED_CODE, 'AUTH', 'INVALID_CREDENTIAL', 'MISSING_CREDENTIAL'].includes(failure.code) ? AUTH_COOLDOWN_MS : TRANSIENT_COOLDOWN_MS)
       this.health.markUnavailable(key, delay, failure.code)
       this.options.onWarn?.(`image pool ${provider}: account ${members.indexOf(account) + 1}/${members.length} rejected (${failure.code}); checking remaining accounts`)
       lastError = failure
