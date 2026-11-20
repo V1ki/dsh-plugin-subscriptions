@@ -1066,7 +1066,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                           </div>
                         )
                       })}
-                      {id === 'codex' && (balance !== undefined || usage?.resetCredits !== undefined) && (
+                      {id === 'codex' && (balance !== undefined || usage?.resetCredits !== undefined || (resetAccount === account.key && !!resetMessage)) && (
                         <div className="subscriptions-credit-summary" style={styles.statusLine}>
                           {sortedCredits.length > 0 ? (
                             <details className="subscriptions-reset-credits">
@@ -1098,13 +1098,13 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                                     )}
                                   </div>
                                 ))}
-                                {resetAccount === account.key && resetMessage && <p role="status" style={styles.statusLine}>{resetMessage}</p>}
                               </div>
                             </details>
-                          ) : <div className="subscriptions-credit-line">
+                          ) : (balance !== undefined || usage?.resetCredits !== undefined) && <div className="subscriptions-credit-line">
                             {balance !== undefined && <span>{balance}</span>}
                             {usage?.resetCredits !== undefined && <span className="subscriptions-reset-count">{resetCount}</span>}
                           </div>}
+                          {resetAccount === account.key && resetMessage && <p role="status" style={styles.statusLine}>{resetMessage}</p>}
                         </div>
                       )}
                       {id === 'codex' && usage?.resetCreditsError !== undefined && (

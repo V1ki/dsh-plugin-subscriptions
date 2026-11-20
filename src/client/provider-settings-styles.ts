@@ -56,6 +56,9 @@ export const providerSettingsCss = `
   align-items: center;
   flex-wrap: wrap;
   gap: 4px 8px;
+}
+.subscriptions-credit-line > :not(.subscriptions-reset-count) ~ .subscriptions-reset-count,
+.subscriptions-reset-credits > summary > :not(.subscriptions-reset-count) ~ .subscriptions-reset-count {
   margin-inline-start: auto;
 }
 .subscriptions-reset-credits > summary { list-style: none; cursor: pointer; }

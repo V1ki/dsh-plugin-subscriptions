@@ -262,14 +262,37 @@ try {
   await waitState(false, false)
   assert.equal(await list.evaluate(el => el.scrollWidth <= el.clientWidth + 1), true, 'wide provider strip fits')
   await fullyVisible('Zulu', true)
+  // Select the last tab while wide, then shrink so it must scroll back into view.
+  await tab(narrow, 'Grok (X Premium)').click()
   await narrow.setViewportSize({ width: 280, height: 900 })
   await narrow.waitForFunction(() => {
     const el = document.querySelector('[role="tablist"]')
     return el.scrollWidth > el.clientWidth
   })
-  await fullyVisible('Zulu', true)
-  await narrow.waitForFunction(() => Array.from(document.querySelectorAll('.dsh-subscription-tabs-arrow')).some(button => !button.disabled))
-  assert.ok(await available(left) || await available(right), 'resize restores an available scroll direction')
+  await fullyVisible('Grok (X Premium)')
+  // Clicking the right chevron repeatedly from the start must reach the end even when
+  // a single tab (e.g. Google Antigravity) is wider than viewport - 2 * EDGE.
+  await scrollToFraction(0)
+  await waitState(false, true)
+  for (let steps = 0; steps < 10 && await available(right); steps++) {
+    const before = await list.evaluate(el => el.scrollLeft)
+    await right.click()
+    await narrow.waitForFunction(prev => document.querySelector('[role="tablist"]').scrollLeft > prev, before)
+  }
+  await waitState(true, false)
+  for (let steps = 0; steps < 10 && await available(left); steps++) {
+    const before = await list.evaluate(el => el.scrollLeft)
+    await left.click()
+    await narrow.waitForFunction(prev => document.querySelector('[role="tablist"]').scrollLeft < prev, before)
+  }
+  await waitState(false, true)
+  // Logging in on a disconnected tab at the far right reorders it into the connected group;
+  // the tab strip must keep the active tab visible without manual scrolling.
+  await tab(narrow, 'Grok (X Premium)').click()
+  await fullyVisible('Grok (X Premium)')
+  await narrow.locator('[role="tabpanel"]').filter({ visible: true }).getByRole('button', { name: 'Log in', exact: true }).click()
+  await narrow.waitForFunction(() => document.querySelectorAll('[role=tab]')[1]?.textContent?.includes('Grok'))
+  await fullyVisible('Grok (X Premium)')
   await narrow.close()
   assert.deepEqual(errors, [])
   console.log('Provider tabs browser checks passed')
