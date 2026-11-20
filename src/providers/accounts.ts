@@ -14,6 +14,8 @@ import type { GenerateOptions, LlmModelInfo, LlmResolvedModelInfo, StreamChunk }
 import { TokenManager, withTimeout } from './common.js'
 import type { TokenManagerOptions } from './common.js'
 import {
+  compareAndDeleteQwenAccount,
+  compareAndSaveQwenAccount,
   deleteAccountSession,
   getAccountSession,
   listAccounts,
@@ -123,6 +125,10 @@ export interface AccountStoreIo<S> {
   get(account?: string): Promise<S | undefined>
   save(account: string, session: S): Promise<void>
   remove(account: string): Promise<void>
+  /** Atomically compare the refresh token and save, returning the current session on conflict. */
+  compareAndSave?(account: string, expectedRefreshToken: string, next: S): Promise<S | undefined>
+  /** Atomically remove only if the refresh token matches. */
+  compareAndDelete?(account: string, expectedRefreshToken: string): Promise<boolean>
   /** Resolve a legacy alias to the canonical account key. */
   resolve?(account: string): Promise<string>
 }
@@ -150,6 +156,11 @@ export class AccountTokenManager<S extends TimedSession> {
       get: account => getAccountSession(provider, account) as Promise<S | undefined>,
       save: (account, session) => saveAccountSession(provider, account, session as never),
       remove: account => deleteAccountSession(provider, account),
+      ...provider === 'qwen-subscription' ? {
+        compareAndSave: (account: string, expected: string, next: S) =>
+          compareAndSaveQwenAccount(account, expected, next as import('../auth/store.js').QwenSession) as Promise<S | undefined>,
+        compareAndDelete: (account: string, expected: string) => compareAndDeleteQwenAccount(account, expected),
+      } : {},
       resolve: account => resolveAccountKey(provider, account),
     }
   }
@@ -177,6 +188,14 @@ export class AccountTokenManager<S extends TimedSession> {
     if (requested === undefined) throw this.missingCredential()
     const key = await this.resolveAccount(requested)
     return this.tokensFor(key).session(forceRefresh)
+  }
+
+  /** Retry after a 401 without forcing a newer token that replaced the rejected one. */
+  async sessionAfterRejected(account: string | undefined, rejectedToken: string): Promise<S> {
+    const requested = account ?? await this.defaultAccount()
+    if (requested === undefined) throw this.missingCredential()
+    const key = await this.resolveAccount(requested)
+    return this.tokensFor(key).sessionAfterRejected(rejectedToken)
   }
 
   /** Resolve a legacy alias before it reaches any per-account manager or cache. */
@@ -217,6 +236,10 @@ export class AccountTokenManager<S extends TimedSession> {
           }
         },
         remove: () => io.remove(boundAccount),
+        ...io.compareAndSave === undefined || io.compareAndDelete === undefined ? {} : {
+          compareAndSave: (expected: string, next: S) => io.compareAndSave!(boundAccount, expected, next),
+          compareAndDelete: (expected: string) => io.compareAndDelete!(boundAccount, expected),
+        },
         onRemoved: () => { this.options.onAccountRemoved?.(boundAccount) },
       })
       this.managers.set(account, manager)

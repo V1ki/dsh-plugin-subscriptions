@@ -25,6 +25,37 @@ export const providerSettingsCss = `
   line-height: 1.5;
   color-scheme: light;
 }
+.dsh-subscription-provider-area { min-width: 0; }
+.dsh-subscription-tabs {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  max-width: 100%;
+  padding: 4px 4px 10px;
+  margin-bottom: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+.dsh-subscription-tabs:hover,
+.dsh-subscription-tabs:focus-within {
+  scrollbar-color: var(--dsw-alias-label-tertiary, #888) transparent;
+}
+.dsh-subscription-tabs::-webkit-scrollbar { height: 6px; }
+.dsh-subscription-tabs::-webkit-scrollbar-track { background: transparent; }
+.dsh-subscription-tabs::-webkit-scrollbar-thumb { background: transparent; border-radius: 6px; }
+.dsh-subscription-tabs:hover::-webkit-scrollbar-thumb,
+.dsh-subscription-tabs:focus-within::-webkit-scrollbar-thumb {
+  background: var(--dsw-alias-label-tertiary, #888);
+}
+${formScope} .dsh-subscription-tabs button {
+  gap: 6px;
+  white-space: nowrap;
+}
+${formScope} .dsh-subscription-tabs button[aria-selected="true"] {
+  background: var(--dsw-alias-interactive-bg-active, var(--dsw-alias-bg-layer-3));
+  border-color: var(--dsw-alias-state-business-primary, var(--dsw-alias-brand-primary));
+  font-weight: 600;
+}
 body[data-ds-dark-theme] ${formScope} {
   color-scheme: dark;
 }
@@ -150,6 +181,58 @@ ${formScope} button:disabled {
   opacity: 0.4;
   cursor: default;
 }
+${formScope} button.dsh-subscription-setting-help {
+  min-height: 24px;
+  width: 24px;
+  padding: 4px;
+  border: 0;
+  border-radius: 50%;
+  color: var(--dsw-alias-label-tertiary);
+}
+${formScope} button.dsh-subscription-setting-help:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary, var(--dsw-alias-brand-primary));
+  outline-offset: 2px;
+}
+
+${formScope} button.dsh-subscription-model-toggle {
+  flex: 1 1 0;
+  min-width: 0;
+  justify-content: flex-start;
+  gap: 6px;
+  padding: 4px 6px;
+  border: 0;
+  text-align: left;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+.dsh-subscription-model-name { min-width: 0; overflow-wrap: anywhere; }
+.dsh-subscription-model-id {
+  min-width: 0;
+  padding-left: 6px;
+  color: var(--dsw-alias-label-tertiary, #888);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dsh-subscription-model-action {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  color: var(--dsw-alias-label-tertiary, #888);
+  font-size: 12px;
+}
+.dsh-subscription-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 26px;
+  min-width: 0;
+}
+.dsh-subscription-tools label { min-width: 0; overflow-wrap: anywhere; align-items: center; }
+.dsh-subscription-tools label input[type="checkbox"] { margin: 0 0 0 3px; }
+
 ${formScope} button.dsh-subscription-quiet {
   border-color: transparent;
   color: var(--dsw-alias-label-secondary, var(--dsw-alias-label-primary));

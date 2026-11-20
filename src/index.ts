@@ -9,7 +9,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { errorChain } from '@deepseek-ai/dsh-llm'
+import { errorChain, LlmError } from '@deepseek-ai/dsh-llm'
 import type {
   AdapterRegistrationHandle,
   GenerateOptions,
@@ -50,6 +50,7 @@ import {
 import {
   accountKeyOf,
   deleteAccountSession,
+  deleteAndReturnQwenAccount,
   listAccounts,
   saveAccountSession,
   setDefaultAccount,
@@ -61,6 +62,7 @@ import type {
   CopilotSession,
   AntigravitySession,
   GrokSession,
+  QwenSession,
   ProviderId,
   StoredSession,
 } from './auth/store.js'
@@ -136,6 +138,8 @@ import {
   resolveAntigravityOAuthConfig,
 } from './providers/antigravity.js'
 import type { AntigravityRuntimeConfig } from './providers/antigravity.js'
+import { QwenOAuthClient, QwenOAuthError, isQwenPermanentRefreshError } from './providers/qwen.js'
+import { QwenAccountAdapter } from './providers/qwen-accounts.js'
 import { createXSearchTool } from './tools/x-search.js'
 import { createImageGenerateTool } from './tools/image-generate.js'
 import { createVideoGenerateTool, videosDirectory } from './tools/video-generate.js'
@@ -146,7 +150,7 @@ import { ModelSpeeds } from './model-speeds.js'
 export type { ModelEntry, ProviderUsage, UsageWindow } from './providers/common.js'
 export type { RateLimitConfig, RateLimitWait } from './providers/rate-limit.js'
 export type { ProviderStatus } from './auth/rpc.js'
-export type { AntigravitySession, ClaudeSession, CodexSession, CopilotSession, GrokSession, ProviderId } from './auth/store.js'
+export type { AntigravitySession, ClaudeSession, CodexSession, CopilotSession, GrokSession, QwenSession, ProviderId } from './auth/store.js'
 
 export const name = 'dsh-plugin-subscriptions'
 export const inject = ['llm']
@@ -210,7 +214,7 @@ export interface Config {
   }
 }
 
-const providerIdSchema = z.union(['codex', 'claude', 'grok', 'copilot', 'antigravity'])
+const providerIdSchema = z.union(['codex', 'claude', 'grok', 'copilot', 'antigravity', 'qwen-subscription'])
 const modelEntrySchema: z<ModelEntry> = z.object({
   id: z.string().required(),
   name: z.string(),
@@ -227,7 +231,7 @@ const poolMemberSchema: z<PoolMemberRef> = z.object({
 })
 
 export const Config: z<Config> = z.object({
-  providers: z.array(providerIdSchema).default(['codex', 'claude', 'grok', 'copilot', 'antigravity']),
+  providers: z.array(providerIdSchema).default(['codex', 'claude', 'grok', 'copilot', 'antigravity', 'qwen-subscription']),
   codexClientVersion: z.string(),
   streamIdleTimeoutMs: z.number().min(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   claudePromptCacheTtl: z.union(['5m', '1h']).default(DEFAULT_PROMPT_CACHE_TTL),
@@ -294,13 +298,15 @@ const DEFAULT_MODELS: Record<ProviderId, ModelEntry[]> = {
     { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', inputModalities: ['text', 'image'] },
     { id: 'claude-opus-4-6-thinking', name: 'Claude Opus 4.6 Thinking', inputModalities: ['text', 'image'] },
   ],
+  // Never fabricate Qwen entitlements: populate only from the account catalog.
+  'qwen-subscription': [],
 }
 
 /** Validate and detach the model catalog for every provider. */
 function resolveCatalog(models: Config['models']): Record<ProviderId, ModelEntry[]> {  const resolve = (provider: ProviderId): ModelEntry[] => {
     // Schemastery injects `[]` for omitted array fields, so an empty list
     // cannot be told apart from an absent one: both mean the built-ins.
-    const configured = models?.[provider]
+    const configured = provider === 'qwen-subscription' ? undefined : models?.[provider]
     const entries = configured !== undefined && configured.length > 0 ? configured : DEFAULT_MODELS[provider]
     return validateModels(entries, `${name}: models.${provider}`)
   }
@@ -310,6 +316,7 @@ function resolveCatalog(models: Config['models']): Record<ProviderId, ModelEntry
     grok: resolve('grok'),
     copilot: resolve('copilot'),
     antigravity: resolve('antigravity'),
+    'qwen-subscription': resolve('qwen-subscription'),
   }
 }
 
@@ -327,6 +334,7 @@ function accountOf(provider: ProviderId, session: StoredSession | undefined): st
     case 'grok': return (session as GrokSession).account
     case 'copilot': return (session as CopilotSession).account
     case 'antigravity': return (session as AntigravitySession).account
+    case 'qwen-subscription': return (session as QwenSession).account
   }
 }
 
@@ -337,6 +345,7 @@ function planOf(provider: ProviderId, session: StoredSession): string | undefine
     case 'claude': return (session as ClaudeSession).subscriptionType
     case 'grok': return undefined
     case 'copilot': return undefined
+    case 'qwen-subscription': return (session as QwenSession).plan
   }
 }
 
@@ -392,6 +401,11 @@ export class SubscriptionsAuthController implements AuthController {
    */
   private claims = new Map<ProviderId, number>()
 
+  /** Owns device polling and profile lookup, including the initial code request. */
+  private qwenAttempt: AbortController | undefined
+  /** Once a store commit starts it cannot be rolled back safely. */
+  private qwenCommitting = false
+
   constructor(
     private readonly flows: OAuthFlowManager,
     /** Device-flow attempts (copilot); polled in the background like the loopback flows. */
@@ -428,6 +442,7 @@ export class SubscriptionsAuthController implements AuthController {
      * failure must not outlive an explicit re-check (issue #139).
      */
     private readonly onUsageForced?: (provider: ProviderId, account: string) => void,
+    private readonly qwenOAuth: QwenOAuthClient = new QwenOAuthClient(),
   ) {}
 
   prepareReset(account: string, signal: AbortSignal) {
@@ -441,9 +456,12 @@ export class SubscriptionsAuthController implements AuthController {
   }
 
   usage(provider: ProviderId, account: string, signal: AbortSignal, force = false): Promise<ProviderUsage> {
-    if (force) this.onUsageForced?.(provider, account)
+    if (force && provider !== 'qwen-subscription') this.onUsageForced?.(provider, account)
     const fetcher = this.usageFetchers[provider]
     if (fetcher === undefined) return Promise.resolve({ supported: false })
+    // Qwen reports observed rejections, not a pollable balance. Do not cache away
+    // newly observed failures or clear routing cooldowns by re-reading this state.
+    if (provider === 'qwen-subscription') return fetcher(account, signal)
     if (this.poolUsage === undefined) return fetcher(account, signal).then(snapshot => {
       const fetchedAt = Date.now()
       return { ...snapshot, fetchedAt, staleAt: fetchedAt + 5 * 60_000 }
@@ -473,7 +491,7 @@ export class SubscriptionsAuthController implements AuthController {
     const detail = this.lastError.get(provider)
     const clientVersion = await this.clientVersions[provider]?.()
     return {
-      busy: this.flows.isBusy(provider) || this.deviceFlows.isBusy(provider) || this.finalizing.has(provider),
+      busy: this.flows.isBusy(provider) || this.deviceFlows.isBusy(provider) || this.finalizing.has(provider) || (provider === 'qwen-subscription' && this.qwenAttempt !== undefined),
       accounts: entries.map(({ key, session }, index) => {
         const account = accountOf(provider, session)
         const plan = planOf(provider, session)
@@ -523,6 +541,7 @@ export class SubscriptionsAuthController implements AuthController {
       this.completions.set('claude', this.complete('claude', attempt, this.claim('claude')))
       return { authorizeUrl: attempt.authorizeUrl }
     }
+    if (provider === 'qwen-subscription') return this.startQwenLogin()
     if (provider === 'copilot') {
       // Device flow: no redirect URI — the UI shows the user code while the
       // background task polls GitHub for the token.
@@ -542,6 +561,62 @@ export class SubscriptionsAuthController implements AuthController {
     this.beginFinalizing(provider)
     this.completions.set(provider, this.complete(provider, attempt, this.claim(provider)))
     return { authorizeUrl: attempt.authorizeUrl }
+  }
+
+  /** Start the Qwen subscription device flow without exposing the device code. */
+  private async startQwenLogin(): Promise<{ authorizeUrl: string; userCode: string }> {
+    if (this.qwenAttempt !== undefined) throw new Error('a qwen login attempt is already in progress')
+    const abort = new AbortController()
+    this.qwenAttempt = abort
+    const claim = this.claim('qwen-subscription')
+    try {
+      const grant = await this.qwenOAuth.start(abort.signal)
+      abort.signal.throwIfAborted()
+      if (this.claims.get('qwen-subscription') !== claim) throw new Error('login cancelled')
+      this.beginFinalizing('qwen-subscription')
+      const completion = this.completeQwen(grant, abort, claim)
+      this.completions.set('qwen-subscription', completion)
+      return { authorizeUrl: grant.verificationUrl, userCode: grant.userCode }
+    } catch (error) {
+      if (this.qwenAttempt === abort) this.qwenAttempt = undefined
+      throw error
+    }
+  }
+
+  private async completeQwen(
+    grant: Awaited<ReturnType<QwenOAuthClient['start']>>,
+    abort: AbortController,
+    claim: number,
+  ): Promise<void> {
+    try {
+      const token = await this.qwenOAuth.poll(grant, abort.signal)
+      const info = await this.qwenOAuth.userInfo(token.accessToken, abort.signal)
+      abort.signal.throwIfAborted()
+      if (!['plus', 'pro'].includes(info.memberType.toLowerCase())) {
+        throw new Error('Qwen subscription login requires a Plus or Pro account')
+      }
+      if (this.claims.get('qwen-subscription') !== claim) return
+      // Subject is stable across refreshes and uniquely identifies the account.
+      const session: QwenSession = {
+        accessToken: token.accessToken,
+        refreshToken: token.refreshToken,
+        expiresAt: token.expiresAt,
+        account: info.sub,
+        plan: info.memberType,
+      }
+      this.qwenCommitting = true
+      await this.persist('qwen-subscription', session)
+      this.lastError.delete('qwen-subscription')
+      this.onAuthChanged('qwen-subscription', accountKeyOf('qwen-subscription', session))
+    } catch (error) {
+      if (this.claims.get('qwen-subscription') === claim && !abort.signal.aborted) {
+        this.lastError.set('qwen-subscription', errorChain(error))
+      }
+    } finally {
+      if (this.qwenAttempt === abort) this.qwenAttempt = undefined
+      this.qwenCommitting = false
+      this.endFinalizing('qwen-subscription')
+    }
   }
 
   /**
@@ -619,6 +694,8 @@ export class SubscriptionsAuthController implements AuthController {
         return exchangeClaudeCode(code, attempt.pkce.verifier, attempt.redirectUri, attempt.state)
       case 'grok':
         return exchangeGrokCode(code, attempt.pkce.verifier, attempt.redirectUri, attempt.pkce.challenge)
+      case 'qwen-subscription':
+        return Promise.reject(new Error('qwen uses the device flow; no authorization code to exchange'))
       case 'copilot':
         // Device flow: exchange happens in completeDevice, never here.
         return Promise.reject(new Error('copilot uses the device flow; no authorization code to exchange'))
@@ -660,11 +737,15 @@ export class SubscriptionsAuthController implements AuthController {
   }
 
   cancel(provider: ProviderId): Promise<void> {
+    if (provider === 'qwen-subscription' && this.qwenCommitting) {
+      return Promise.reject(new Error('Qwen login is already being saved; cannot cancel'))
+    }
     // Claiming covers the attempt whose code already arrived: it is no longer
     // pending, but its token exchange may still be on its way to a store write.
     this.claim(provider)
     this.flows.pending(provider)?.cancel()
     this.deviceFlows.pending(provider)?.cancel()
+    if (provider === 'qwen-subscription') this.qwenAttempt?.abort(new Error('login cancelled'))
     return Promise.resolve()
   }
 
@@ -672,9 +753,19 @@ export class SubscriptionsAuthController implements AuthController {
     this.claim(provider)
     this.flows.pending(provider)?.cancel()
     this.deviceFlows.pending(provider)?.cancel()
-    await deleteAccountSession(provider, account)
+    if (provider === 'qwen-subscription') this.qwenAttempt?.abort(new Error('login cancelled'))
+    const qwenSession = provider === 'qwen-subscription' ? await deleteAndReturnQwenAccount(account) : undefined
+    if (provider !== 'qwen-subscription') await deleteAccountSession(provider, account)
     this.lastError.delete(provider)
     this.onAuthChanged(provider, account)
+    if (qwenSession !== undefined) {
+      try {
+        // Local logout takes effect even when the upstream revocation fails.
+        await this.qwenOAuth.revoke(qwenSession.refreshToken, AbortSignal.timeout(15_000))
+      } catch {
+        throw new Error('Qwen signed out locally, but remote token revocation failed')
+      }
+    }
   }
 
   async setDefault(provider: ProviderId, account: string): Promise<void> {
@@ -736,7 +827,7 @@ export function apply(ctx: Context, config: Config): void {
   // discovery entirely (schemastery injects [] for omitted arrays, so only a
   // non-empty list counts as configured).
   const overridden = new Set<ProviderId>(
-    PROVIDER_IDS.filter(provider => (config.models?.[provider]?.length ?? 0) > 0),
+    PROVIDER_IDS.filter(provider => provider !== 'qwen-subscription' && (config.models?.[provider]?.length ?? 0) > 0),
   )
   const flows = new OAuthFlowManager()
   const deviceFlows = new DeviceFlowManager()
@@ -991,6 +1082,51 @@ export function apply(ctx: Context, config: Config): void {
         handles.set('copilot', register('copilot', copilotAdapter))
         break
       }
+      case 'qwen-subscription': {
+        const oauth = new QwenOAuthClient()
+        const tokens = new AccountTokenManager<QwenSession>({
+          provider: 'qwen-subscription',
+          displayName: 'Qwen Subscription',
+          makeOptions: () => ({
+            preemptMs: 60_000,
+            refresh: async session => {
+              try {
+                const next = await oauth.refresh(session.refreshToken)
+                return { ...session, accessToken: next.accessToken, refreshToken: next.refreshToken, expiresAt: next.expiresAt }
+              } catch (error) {
+                if (error instanceof QwenOAuthError) {
+                  const details = {
+                    ...(error.status === undefined ? {} : { status: error.status }),
+                    ...(error.retryAfterMs === undefined ? {} : { providerRetryAfterMs: error.retryAfterMs }),
+                    cause: error,
+                  }
+                  if (error.status === 429) throw new LlmError('Qwen token refresh rate limited', 'RATE_LIMIT', details)
+                  if (error.code === 'request_timeout') throw new LlmError('Qwen token refresh timed out', 'TIMEOUT', details)
+                  if (error.status !== undefined && error.status >= 500) throw new LlmError('Qwen token refresh server error', 'SERVER', details)
+                  throw error
+                }
+                throw new LlmError('Qwen token refresh transport error', 'TRANSPORT', { cause: error })
+              }
+            },
+            isPermanent: isQwenPermanentRefreshError,
+          }),
+          onAccountRemoved: account => { authChanged('qwen-subscription', account) },
+        })
+        accountTokens.set('qwen-subscription', tokens as AccountTokenManager<StoredSession>)
+        const adapter = new QwenAccountAdapter({
+          tokens,
+          streamIdleTimeoutMs,
+          resolveAttachments,
+          onWarn,
+          onCatalogChanged: catalogChanged,
+          defaultEffortOf: model => defaultEffortOf('qwen-subscription', model),
+          pool: () => poolAdapter,
+        })
+        usageFetchers['qwen-subscription'] = (account, signal) => adapter.usage(account, signal)
+        adapters.set('qwen-subscription', adapter)
+        handles.set('qwen-subscription', register('qwen-subscription', adapter))
+        break
+      }
       case 'antigravity': {
         const tokens = new AccountTokenManager<AntigravitySession>({
           provider: 'antigravity',
@@ -1072,6 +1208,7 @@ export function apply(ctx: Context, config: Config): void {
           )
         }
         case 'copilot':
+        case 'qwen-subscription':
           return undefined
       }
     }
@@ -1092,7 +1229,7 @@ export function apply(ctx: Context, config: Config): void {
               const models = await withTimeout(
                 signal => adapter.listOwnModels(provider, account, signal, true),
                 POOL_USAGE_TIMEOUT_MS,
-              )
+              ).catch(() => undefined)
               const settings = preferences.get(provider).accounts
               const policy = settings && Object.hasOwn(settings, account) ? settings[account] : undefined
               return models === undefined ? undefined : { account, models: models.filter(model => accountAllowsPool(policy, model.id)) }
@@ -1176,7 +1313,10 @@ export function apply(ctx: Context, config: Config): void {
         claudeVersion.invalidate()
         // This is not an auth transition: retain health, usage and Copilot
         // reasoning replay, but bypass every account's discovery cache.
-        for (const adapter of adapters.values()) adapter.clearAccountCatalog()
+        for (const adapter of adapters.values()) {
+          if (adapter instanceof QwenAccountAdapter) adapter.invalidateAccountCatalog()
+          else adapter.clearAccountCatalog()
+        }
         poolAdapter?.invalidate()
         for (const [route, handle] of handles) handle.replace([route])
       }
@@ -1288,7 +1428,8 @@ export function apply(ctx: Context, config: Config): void {
       if (force) {
         if (provider === 'codex') codexVersion.invalidate()
         if (provider === 'claude') claudeVersion.invalidate()
-        adapter.clearAccountCatalog()
+        if (adapter instanceof QwenAccountAdapter) adapter.invalidateAccountCatalog()
+        else adapter.clearAccountCatalog()
         poolAdapter?.invalidate()
       }
       const models = await fullCatalogs.get(provider)!(provider)

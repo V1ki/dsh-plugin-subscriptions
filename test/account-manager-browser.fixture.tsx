@@ -26,9 +26,11 @@ const rpc = { call: async (_channel: string, endpoint: string, payload: any) => 
 } } as any
 function App() {
   const [open, setOpen] = useState(false)
+  const [accountsVersion, setAccountsVersion] = useState(0)
+  state.changeAccounts = (accounts: unknown) => { state.accounts = accounts; setAccountsVersion(value => value + 1) }
   const dictionary = state.locale === 'zh' ? zh : en
   return <><button onClick={() => setOpen(true)}>Manage</button>{open && <ProviderAccountManager
-    provider={state.provider ?? 'codex'} name={state.provider === 'claude' ? 'Claude' : 'Codex (ChatGPT)'} rpc={rpc} onClose={() => setOpen(false)}
+    provider={state.provider ?? 'codex'} name={state.provider === 'claude' ? 'Claude' : 'Codex (ChatGPT)'} rpc={rpc} accountsVersion={String(accountsVersion)} onClose={() => setOpen(false)}
     t={(key, params) => Object.entries(params ?? {}).reduce((text, [name, value]) => text.replaceAll(`{${name}}`, String(value)), dictionary[key])} />}</>
 }
 createRoot(document.getElementById('root')!).render(<App />)

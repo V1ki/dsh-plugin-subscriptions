@@ -14,15 +14,17 @@
 import { creditBalanceText, quotaPercent, quotaText, UsageFreshness, useQuotaClock } from './quota-display.js'
 import { useQuotaDisplayMode } from './usage-badge-preferences.js'
 import { readUsageCache, subscribeUsage } from './usage-cache.js'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import { en } from './locales.js'
+import { QuotaExhaustionNotice } from './QuotaExhaustionNotice.js'
 import { resetActionBlock } from './reset-action.js'
 import { AntigravityQuotaSummary } from './AntigravityQuotaSummary.js'
 import { antigravityQuotaScope } from '../antigravity-model-id.js'
 import { visibleUsageWindows } from './usage-window-filter.js'
 import { ProviderAccountManager } from './ProviderAccountManager.js'
+import { SubscriptionTabs } from './SubscriptionTabs.js'
 import { providerSettingsCss } from './provider-settings-styles.js'
 import { UsageBadgeDisplaySetting } from './UsageBadgeDisplaySetting.js'
 import type { SubscriptionsKey } from './locales.js'
@@ -40,7 +42,7 @@ const POLL_INTERVAL_MS = 2000
 const MODEL_FILTER_THRESHOLD = 8
 
 /** Subscription provider ids, fixed by the node half's OAuth adapters. */
-export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity'
+export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity' | 'qwen-subscription'
 
 /** One logged-in account as answered by the `status` endpoint. */
 export interface AccountStatus {
@@ -59,6 +61,8 @@ export interface ProviderStatus {
   busy: boolean
   accounts: AccountStatus[]
   detail?: string
+  /** Status lookup failed; busy and accounts are not authoritative. */
+  statusUnavailable?: true
   /** The CLI version the route presents (Codex, Claude), and where it came from. */
   clientVersion?: { version: string; source: ClientVersionSource }
 }
@@ -74,7 +78,7 @@ const CLIENT_VERSION_SOURCES: Record<ClientVersionSource, SubscriptionsKey> = {
 
 /** `status` endpoint value: the node half owns this shape. */
 interface StatusResponse {
-  providers: Record<SubscriptionProvider, ProviderStatus>
+  providers: Partial<Record<SubscriptionProvider, ProviderStatus>>
 }
 
 /** Purchased Codex credit balance. Not a usage-limit reset card. */
@@ -105,6 +109,8 @@ export interface ProviderUsage {
   retryAt?: number
 
   supported: boolean
+  /** Observed upstream quota exhaustion, even without a usage-query endpoint. */
+  quotaExhaustion?: { observedAt: number; resetsAt?: number }
   windows?: UsageWindow[]
   plan?: string
   /** Remaining purchased Codex credits from `wham/usage`, when disclosed. */
@@ -151,7 +157,7 @@ export interface ProxyTestResult {
 /** `login` endpoint value: the URL the user completes OAuth at. */
 interface LoginResponse {
   authorizeUrl: string
-  /** Device-flow providers (copilot): the code the user types at authorizeUrl. */
+  /** Device-flow providers (Copilot, Qwen): the code the user types at authorizeUrl. */
   userCode?: string
 }
 
@@ -176,7 +182,17 @@ const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [
   { id: 'grok', name: 'Grok (X Premium)' },
   { id: 'copilot', name: 'GitHub Copilot' },
   { id: 'antigravity', name: 'Google Antigravity' },
+  { id: 'qwen-subscription', name: 'Qwen' },
 ]
+
+/** Sort the visible provider names within connected and disconnected groups. */
+export function sortedSubscriptionProviders(statuses: Partial<Record<SubscriptionProvider, ProviderStatus>>) {
+  return [...PROVIDERS].sort((a, b) => {
+    const connectionOrder = Number(hasAccount(statuses[b.id])) - Number(hasAccount(statuses[a.id]))
+    return connectionOrder || (statuses[a.id]?.displayName || a.name).localeCompare(statuses[b.id]?.displayName || b.name)
+      || a.id.localeCompare(b.id)
+  })
+}
 
 /** Human text of an action failure, SubscriptionsAuthError or not. */
 function messageOf(error: unknown): string {
@@ -486,11 +502,26 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const { rpc } = props
   const t = props.t ?? fallbackTranslate
   const [statuses, setStatuses] = useState<Partial<Record<SubscriptionProvider, ProviderStatus>>>({})
+  // Undefined until a status snapshot arrives or the user chooses a tab.
+  const [selectedProvider, setSelectedProvider] = useState<SubscriptionProvider>()
+  const tabIdPrefix = useId()
+  const tabRefs = useRef<Partial<Record<SubscriptionProvider, HTMLButtonElement>>>({})
+  const focusToRestore = useRef<{ element: HTMLElement; provider: SubscriptionProvider } | null>(null)
+  useLayoutEffect(() => {
+    const previous = focusToRestore.current
+    focusToRestore.current = null
+    if (!previous || (document.activeElement !== document.body && document.activeElement !== previous.element)) return
+    if (previous.element.isConnected) previous.element.focus()
+    else tabRefs.current[previous.provider]?.focus()
+  }, [statuses])
+  const sortedProviders = sortedSubscriptionProviders(statuses)
+  const activeProvider = selectedProvider ?? sortedProviders[0].id
   const [errors, setErrors] = useState<Partial<Record<SubscriptionProvider, string>>>({})
+  const [statusError, setStatusError] = useState<string>()
   const [manualDrafts, setManualDrafts] = useState<Record<SubscriptionProvider, string>>({
-    codex: '', claude: '', grok: '', copilot: '', antigravity: '',
+    codex: '', claude: '', grok: '', copilot: '', antigravity: '', 'qwen-subscription': '',
   })
-  /** Pending device-flow codes (copilot), shown while the attempt polls. */
+  /** Pending device-flow codes (Copilot, Qwen), shown while the attempt polls. */
   const [deviceCodes, setDeviceCodes] = useState<Partial<Record<SubscriptionProvider, { userCode: string; verificationUrl: string }>>>({})
   const [copiedCode, setCopiedCode] = useState<SubscriptionProvider | undefined>(undefined)
   /** Usage snapshots keyed `${provider}:${accountKey}` — every account tracks its own windows. */
@@ -510,6 +541,9 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const resetInflight = useRef(false)
   const mountedRef = useRef(true)
   const pollersRef = useRef(new Map<SubscriptionProvider, ReturnType<typeof setInterval>>())
+  const refreshGeneration = useRef(0)
+  const loginInflight = useRef(new Set<SubscriptionProvider>())
+  const [pendingLogins, setPendingLogins] = useState<Partial<Record<SubscriptionProvider, boolean>>>({})
   /** Accounts with a `usage` call in flight; guards the auto-fetch effect against re-entry. */
   const usageInflightRef = useRef(new Set<string>())
   /** Proxy config as last answered by `proxyGet`/`proxySet`. */
@@ -549,6 +583,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   /** Refetch every provider's status; stop a provider's poller once its attempt settles. */
   const refresh = useCallback(async (): Promise<void> => {
     if (rpc === undefined) return
+    const generation = ++refreshGeneration.current
     let response: StatusResponse
     try {
       response = await callSubscriptionsAuth<StatusResponse>(rpc, 'status', {})
@@ -557,16 +592,31 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       // the action paths report their own errors. But staying silent turns a
       // persistent failure into an endless "Checking…" — show it instead.
       const message = error instanceof Error ? error.message : String(error)
-      for (const { id } of PROVIDERS) setProviderError(id, message)
+      if (mountedRef.current && generation === refreshGeneration.current) setStatusError(message)
       return
     }
-    if (!mountedRef.current) return
-    setStatuses(response.providers)
+    if (!mountedRef.current || generation !== refreshGeneration.current) return
+    const focused = document.activeElement
+    const provider = focused instanceof HTMLElement ? focused.closest<HTMLElement>('[data-subscription-provider]')?.dataset.subscriptionProvider as SubscriptionProvider | undefined : undefined
+    focusToRestore.current = focused instanceof HTMLElement && provider ? { element: focused, provider } : null
+    // A missing or unavailable status does not prove that a login has settled.
+    setStatuses(previous => {
+      const next = { ...response.providers }
+      for (const { id } of PROVIDERS) {
+        const status = response.providers[id]
+        if (pollersRef.current.has(id) && (!status || status.statusUnavailable === true)) {
+          const prior = previous[id]
+          if (prior) next[id] = { ...prior, ...(status?.detail ? { detail: status.detail } : {}), busy: true }
+        }
+      }
+      return next
+    })
+    setSelectedProvider(current => current ?? sortedSubscriptionProviders(response.providers)[0].id)
     // The poll recovered: drop any error line a previous failed poll left.
-    for (const { id } of PROVIDERS) setProviderError(id, undefined)
+    setStatusError(undefined)
     for (const { id } of PROVIDERS) {
       const status = response.providers[id]
-      if (status.accounts.length > 0 || !status.busy) {
+      if (status && !status.busy && !status.statusUnavailable) {
         stopPolling(id)
         // The attempt settled (success, timeout, or cancel): drop the code card.
         setDeviceCodes((prev) => {
@@ -577,7 +627,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
         })
       }
     }
-  }, [rpc, stopPolling, setProviderError])
+  }, [rpc, stopPolling])
 
   const startPolling = useCallback((provider: SubscriptionProvider): void => {
     if (pollersRef.current.has(provider)) return
@@ -599,6 +649,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     })
     return () => {
       mountedRef.current = false
+      refreshGeneration.current++
       for (const poller of pollersRef.current.values()) clearInterval(poller)
       pollersRef.current.clear()
     }
@@ -650,6 +701,21 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     return () => { unsubscribe(); window.removeEventListener('focus', focus) }
   }, [rpc, statuses])
 
+  // Qwen usage reads only server-side observation memory (no usage endpoint).
+  // Re-read on open, focus and while Settings stays open: an old unsupported
+  // browser snapshot must not hide exhaustion observed by a later LLM request.
+  useEffect(() => {
+    const accounts = statuses['qwen-subscription']?.accounts ?? []
+    if (!rpc || accounts.length === 0) return
+    const readObservations = () => {
+      for (const account of accounts) void loadUsage('qwen-subscription', account.key)
+    }
+    readObservations()
+    const timer = setInterval(readObservations, 30_000)
+    window.addEventListener('focus', readObservations)
+    return () => { clearInterval(timer); window.removeEventListener('focus', readObservations) }
+  }, [rpc, statuses, loadUsage])
+
   async function prepareReset(account: string): Promise<void> {
     if (!rpc || resetInflight.current) return
     resetInflight.current = true
@@ -698,13 +764,17 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   }, [statuses, usages, usageErrors, loadUsage])
 
   const login = useCallback(async (provider: SubscriptionProvider, method?: 'oauth' | 'keychain'): Promise<void> => {
-    if (rpc === undefined) return
+    if (rpc === undefined || loginInflight.current.has(provider)) return
+    loginInflight.current.add(provider)
+    setPendingLogins(prev => ({ ...prev, [provider]: true }))
     setProviderError(provider, undefined)
     try {
       const response = await callSubscriptionsAuth<LoginResponse>(rpc, 'login', {
         provider,
         ...method === undefined ? {} : { method },
       })
+      // Any status started before this login response can describe the old attempt.
+      refreshGeneration.current++
       if (typeof response.authorizeUrl === 'string' && response.authorizeUrl === '') {
         // Instant login (e.g. imported from Claude Code credentials)
         await refresh()
@@ -729,19 +799,22 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       startPolling(provider)
     } catch (error) {
       setProviderError(provider, messageOf(error))
+    } finally {
+      loginInflight.current.delete(provider)
+      if (mountedRef.current) setPendingLogins(prev => ({ ...prev, [provider]: false }))
     }
-  }, [rpc, t, setProviderError, startPolling])
+  }, [rpc, t, setProviderError, startPolling, refresh])
 
   const cancel = useCallback(async (provider: SubscriptionProvider): Promise<void> => {
     if (rpc === undefined) return
-    stopPolling(provider)
+    setProviderError(provider, undefined)
     try {
       await callSubscriptionsAuth<{ ok: true }>(rpc, 'cancel', { provider })
     } catch (error) {
       setProviderError(provider, messageOf(error))
     }
     await refresh()
-  }, [rpc, stopPolling, setProviderError, refresh])
+  }, [rpc, setProviderError, refresh])
 
   const submitManual = useCallback(async (provider: SubscriptionProvider): Promise<void> => {
     if (rpc === undefined) return
@@ -880,34 +953,25 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     <div className="dsh-subscriptions-settings" style={styles.section}>
       <style>{providerSettingsCss}</style>
       <p style={styles.intro}>{t('intro')}</p>
-      <UsageBadgeDisplaySetting t={t} />
-      <div style={styles.proxyCard}>
-        <div style={styles.cardHeader}>
-          <span style={{
-            ...styles.dot,
-            background: proxy?.enabled === true
-              ? 'var(--dsw-alias-state-success-primary)'
-              : 'var(--dsw-alias-label-dimmed)',
-          }} />
-          <span style={styles.name}>{t('proxyTitle')}</span>
-          <button
-            type="button"
-            style={{ marginLeft: 'auto', flexShrink: 0 }}
-            onClick={openProxyDialog}
-          >
-            {t('proxyConfigure')}
-          </button>
-        </div>
-        <p style={styles.statusLine}>{proxyStatusText(t, proxy, proxyLoadError)}</p>
-      </div>
-      <div style={styles.separator} />
-      {PROVIDERS.map(({ id, name }) => {
+      <div className="dsh-subscription-provider-area">
+      <SubscriptionTabs prefix={tabIdPrefix} label={t('providerTabs')} active={activeProvider}
+        onSelect={setSelectedProvider} tabRefs={tabRefs} tabs={sortedProviders.map(({ id, name }) => {
+          const status = statuses[id]
+          const displayName = status?.displayName || name
+          return { key: id, id, label: displayName, provider: id,
+            ariaLabel: displayName + ' — ' + statusText(t, status),
+            content: <><span aria-hidden="true" style={{ ...styles.dot, background: dotColor(status) }} />{displayName}</> }
+        })} />
+      {sortedProviders.map(({ id, name }) => {
         const status = statuses[id]
         const busy = status?.busy === true
+        const loginPending = pendingLogins[id] === true
         const deviceCode = deviceCodes[id]
         const accounts = status?.accounts ?? []
         return (
-          <div key={id} style={styles.card}>
+          <div key={id} role="tabpanel" data-subscription-provider={id} id={`${tabIdPrefix}-panel-${id}`}
+            aria-labelledby={`${tabIdPrefix}-tab-${id}`} hidden={activeProvider !== id} tabIndex={0}>
+          <div style={styles.card}>
             <div style={styles.cardHeader}>
               <span style={{ ...styles.dot, background: dotColor(status) }} />
               <span style={styles.name}>{status?.displayName || name}</span>
@@ -918,6 +982,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
             {status?.detail !== undefined && status.detail !== '' && (
               <p style={styles.statusLine}>{status.detail}</p>
             )}
+            {statusError !== undefined && <p style={styles.errorLine}>{statusError}</p>}
             {errors[id] !== undefined && <p style={styles.errorLine}>{errors[id]}</p>}
             {accounts.map((account) => {
               const usageKey = `${id}:${account.key}`
@@ -967,7 +1032,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                         {usage?.plan !== undefined && (
                           <span style={styles.usagePlan}>{t('usagePlan', { plan: usage.plan })}</span>
                         )}
-                        {usage?.supported !== false && <button
+                        {(usage?.supported !== false || id === 'qwen-subscription' || usage.quotaExhaustion !== undefined) && <button
                           type="button"
                           style={styles.usageRefresh}
                           disabled={usageLoading[usageKey] === true}
@@ -976,6 +1041,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                           {t('usageRefresh')}
                         </button>}
                       </div>
+                      <QuotaExhaustionNotice exhaustion={usage?.quotaExhaustion} t={t} />
                       {usage && <UsageFreshness usage={usage} t={t} />}
                       {usage === undefined && usageError === undefined && (
                         <p style={styles.statusLine}>{t('usageLoading')}</p>
@@ -1058,22 +1124,22 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
             })}
             <div style={styles.actions}>
               {!busy && accounts.length === 0 && (
-                <button type="button" onClick={() => { void login(id) }}>
+                <button type="button" disabled={loginPending} onClick={() => { void login(id) }}>
                   {t('login')}
                 </button>
               )}
               {!busy && accounts.length > 0 && id === 'claude' && (
                 <>
-                  <button type="button" onClick={() => { void login(id, 'oauth') }}>
+                  <button type="button" disabled={loginPending} onClick={() => { void login(id, 'oauth') }}>
                     {t('addAccountOAuth')}
                   </button>
-                  <button type="button" onClick={() => { void login(id, 'keychain') }}>
+                  <button type="button" disabled={loginPending} onClick={() => { void login(id, 'keychain') }}>
                     {t('addAccountKeychain')}
                   </button>
                 </>
               )}
               {!busy && accounts.length > 0 && id !== 'claude' && (
-                <button type="button" onClick={() => { void login(id) }}>
+                <button type="button" disabled={loginPending} onClick={() => { void login(id) }}>
                   {t('addAccount')}
                 </button>
               )}
@@ -1110,7 +1176,10 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 </div>
               </div>
             )}
-            {busy && deviceCode === undefined && (
+            {busy && deviceCode === undefined && (id === 'qwen-subscription' || id === 'copilot') && (
+              <p style={styles.statusLine}>{t('deviceCodeUnavailable')}</p>
+            )}
+            {busy && deviceCode === undefined && id !== 'qwen-subscription' && id !== 'copilot' && (
               <details style={styles.manual}>
                 <summary>{t('manualSummary')}</summary>
                 <div style={styles.manualRow}>
@@ -1127,10 +1196,34 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
               </details>
             )}
           </div>
+          </div>
         )
       })}
+      </div>
+      <div style={styles.separator} />
+      <UsageBadgeDisplaySetting t={t} />
+      <div style={styles.proxyCard}>
+        <div style={styles.cardHeader}>
+          <span style={{
+            ...styles.dot,
+            background: proxy?.enabled === true
+              ? 'var(--dsw-alias-state-success-primary)'
+              : 'var(--dsw-alias-label-dimmed)',
+          }} />
+          <span style={styles.name}>{t('proxyTitle')}</span>
+          <button
+            type="button"
+            style={{ marginLeft: 'auto', flexShrink: 0 }}
+            onClick={openProxyDialog}
+          >
+            {t('proxyConfigure')}
+          </button>
+        </div>
+        <p style={styles.statusLine}>{proxyStatusText(t, proxy, proxyLoadError)}</p>
+      </div>
       {managedProvider && <ProviderAccountManager provider={managedProvider.id} name={managedProvider.name}
-        rpc={rpc} t={t} onClose={() => { setManagedProvider(undefined); void refresh() }} />}
+        rpc={rpc} t={t} accountsVersion={JSON.stringify((statuses[managedProvider.id]?.accounts ?? []).map(account => account.key).sort())}
+        onClose={() => { setManagedProvider(undefined); void refresh() }} />}
       <style>{'.subscriptions-reset-dialog::backdrop { background: var(--dsw-alias-bg-mask-1, #0006); backdrop-filter: var(--dsw-mask-blur, none); }'}</style>
       <dialog ref={resetDialogRef} className="subscriptions-reset-dialog"
         aria-labelledby="subscriptions-reset-title" onCancel={() => setResetConfirmation(undefined)}

@@ -345,6 +345,83 @@ test('streamChatCompletions: a stream without a finish chunk throws STREAM_CLOSE
   }, (error: unknown) => error instanceof LlmError && error.code === 'STREAM_CLOSED')
 })
 
+test('streamChatCompletions: [DONE] without finish_reason rejects partial text like EOF', async () => {
+  for (const end of ['[DONE]', 'EOF']) {
+    const stream = byteStream([
+      frame({
+        choices: [{ delta: { content: 'partial' } }],
+        usage: { prompt_tokens: 3, completion_tokens: 1 },
+      }),
+      ...end === '[DONE]' ? ['data: [DONE]\n\n'] : [],
+    ])
+    const chunks: StreamChunk[] = []
+    await assert.rejects(async () => {
+      for await (const chunk of streamChatCompletions(stream)) chunks.push(chunk)
+    }, (error: unknown) => error instanceof LlmError && error.code === 'STREAM_CLOSED', end)
+    assert.deepEqual(chunks, [
+      { type: 'block-start', index: 0, blockType: 'text' },
+      { type: 'text-delta', index: 0, text: 'partial' },
+      { type: 'usage', usage: { inputTokens: 3, outputTokens: 1 } },
+    ], end)
+  }
+})
+
+test('streamChatCompletions: unfinished tool call never emits a completed call', async () => {
+  for (const end of ['[DONE]', 'EOF']) {
+    // Even complete-looking JSON is not a finished tool call without finish_reason.
+    for (const args of ['{"cmd":"ls', '{"cmd":"ls"}']) {
+      const stream = byteStream([
+        frame({ choices: [{
+          delta: { tool_calls: [{ index: 0, id: 'call-1', function: { name: 'bash', arguments: args } }] },
+          finish_reason: null,
+        }] }),
+        ...end === '[DONE]' ? ['data: [DONE]\n\n'] : [],
+      ])
+      const chunks: StreamChunk[] = []
+      await assert.rejects(async () => {
+        for await (const chunk of streamChatCompletions(stream)) chunks.push(chunk)
+      }, (error: unknown) => error instanceof LlmError && error.code === 'STREAM_CLOSED', end)
+      assert.deepEqual(chunks, [
+        { type: 'block-start', index: 0, blockType: 'tool-call' },
+        { type: 'tool-call-delta', index: 0, id: ToolCallId('call-1'), name: 'bash', argumentsDelta: '' },
+        { type: 'tool-call-delta', index: 0, id: ToolCallId('call-1'), argumentsDelta: args },
+      ], end)
+    }
+  }
+})
+
+test('streamChatCompletions: [DONE] and EOF flush valid finishes without usage', async () => {
+  for (const end of ['[DONE]', 'EOF']) {
+    const textStream = byteStream([
+      frame({ choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }] }),
+      ...end === '[DONE]' ? ['data: [DONE]\n\n'] : [],
+    ])
+    const textChunks: StreamChunk[] = []
+    for await (const chunk of streamChatCompletions(textStream)) textChunks.push(chunk)
+    assert.deepEqual(textChunks, [
+      { type: 'block-start', index: 0, blockType: 'text' },
+      { type: 'text-delta', index: 0, text: 'ok' },
+      { type: 'block-end', index: 0, block: { type: 'text', text: 'ok' } },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ], end)
+
+    const toolStream = byteStream([
+      frame({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-1', function: { name: 'bash', arguments: '{"cmd":"ls"}' } }] } }] }),
+      frame({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }),
+      ...end === '[DONE]' ? ['data: [DONE]\n\n'] : [],
+    ])
+    const toolChunks: StreamChunk[] = []
+    for await (const chunk of streamChatCompletions(toolStream)) toolChunks.push(chunk)
+    assert.deepEqual(toolChunks, [
+      { type: 'block-start', index: 0, blockType: 'tool-call' },
+      { type: 'tool-call-delta', index: 0, id: ToolCallId('call-1'), name: 'bash', argumentsDelta: '' },
+      { type: 'tool-call-delta', index: 0, id: ToolCallId('call-1'), argumentsDelta: '{"cmd":"ls"}' },
+      { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('call-1'), name: 'bash', arguments: '{"cmd":"ls"}' } },
+      { type: 'finish', reason: { kind: 'tool-calls' } },
+    ], end)
+  }
+})
+
 test('streamChatCompletions: malformed payload throws MALFORMED_RESPONSE', async () => {
   const stream = byteStream(['data: {not json\n\n'])
   await assert.rejects(async () => {

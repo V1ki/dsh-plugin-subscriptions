@@ -35,6 +35,7 @@ import type { SubscriptionUsageBadgeInjected } from './SubscriptionUsageBadge.js
 import { en, zh } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
 import { fastCommandDescription } from './fast-command.js'
+import { SubscriptionNavIcon } from './SubscriptionNavIcon.js'
 
 export type { SubscriptionsSectionInjected, SubscriptionsSectionProps } from './SubscriptionsSection.js'
 export type { ImageGenerateToolviewInjected, ImageGenerateToolviewProps } from './ImageGenerateToolview.js'
@@ -44,6 +45,10 @@ export type { SubscriptionUsageBadgeInjected, SubscriptionUsageBadgeProps } from
 export type { SubscriptionsKey } from './locales.js'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
+  // DSH 0.2.2 exposes this optional icon slot; older hosts simply never declare it.
+  interface SlotMap {
+    'settings.section.icon': { kind: 'list'; scope: 'root'; inline: true; owner: { size: number; active: boolean } }
+  }
   interface LocaleNamespaceMap {
     /** The Subscriptions settings page copy. */
     'settings.subscriptions': SubscriptionsKey
@@ -92,6 +97,10 @@ export function apply(ctx: ClientContext): void {
     label: () => t('nav'),
     inject: injected,
   }, SubscriptionsSection))
+  // Wait for the optional host slot; older hosts keep their default icon.
+  ctx.slots.inject('settings.section.icon', () => ctx.slots.register({
+    name: 'settings.section.icon', id: 'subscriptions',
+  }, SubscriptionNavIcon))
 
   // The image_generate keyed toolview owns how image calls render inline; its
   // gallery bytes ride the same channel through the injected loader. The

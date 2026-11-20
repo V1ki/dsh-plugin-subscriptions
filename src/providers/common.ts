@@ -350,6 +350,11 @@ export interface TokenManagerOptions<S extends TimedSession> {
   load(): Promise<S | undefined>
   save(session: S): Promise<void>
   remove(): Promise<void>
+  /** Atomically save only if the stored refresh token still matches.
+   * Returns the saved/current session, or undefined when the account was removed. */
+  compareAndSave?(expectedRefreshToken: string, next: S): Promise<S | undefined>
+  /** Atomically delete only if the stored refresh token still matches. */
+  compareAndDelete?(expectedRefreshToken: string): Promise<boolean>
   /** Perform the provider's refresh-token grant. */
   refresh(session: S): Promise<S>
   /** Whether a refresh failure is permanent (re-login required). */
@@ -357,6 +362,14 @@ export interface TokenManagerOptions<S extends TimedSession> {
   /** Called after a permanent refresh failure deleted the stored session. */
   onRemoved?(): void
 }
+
+/** Outcome shared by waiters on the same CAS-guarded refresh. */
+type GuardedRefresh<S> =
+  | { kind: 'session'; session: S }
+  | { kind: 'missing' }
+  | { kind: 'changed' }
+  | { kind: 'invalid'; cause: unknown }
+  | { kind: 'transient'; cause: unknown; attempted: S }
 
 /**
  * Per-provider session freshness: loads the stored session, refreshes
@@ -369,6 +382,8 @@ export class TokenManager<S extends TimedSession> {
   private inflight: Promise<S> | undefined
   /** The session whose refresh token the in-flight refresh is spending. */
   private attempted: S | undefined
+  /** CAS-backed refreshes are keyed by the token being spent, including across re-login. */
+  private readonly guardedInflight = new Map<string, Promise<GuardedRefresh<S>>>()
 
   constructor(private readonly options: TokenManagerOptions<S>) {
     this.options = options
@@ -399,6 +414,9 @@ export class TokenManager<S extends TimedSession> {
    *   when the refresh grant is permanently rejected.
    */
   async session(forceRefresh = false): Promise<S> {
+    if (this.options.compareAndSave !== undefined && this.options.compareAndDelete !== undefined) {
+      return this.guardedSession(forceRefresh)
+    }
     const session = await this.options.load()
     if (session === undefined) {
       throw new LlmError(
@@ -441,6 +459,88 @@ export class TokenManager<S extends TimedSession> {
         ? error
         : new LlmError(`${this.options.displayName} token refresh failed`, 'AUTH', { cause: error })
     }
+  }
+
+  /** Refresh only if the access token rejected by the server is still current. */
+  async sessionAfterRejected(rejectedToken: string): Promise<S> {
+    if (this.options.compareAndSave !== undefined && this.options.compareAndDelete !== undefined) {
+      return this.guardedSession(true, rejectedToken)
+    }
+    const current = await this.options.load()
+    return this.session(current?.accessToken === rejectedToken)
+  }
+
+  private missingCredential(): LlmError {
+    return new LlmError(
+      `dsh-plugin-subscriptions: not logged in to ${this.options.displayName}; `
+      + 'log in via Settings → Subscriptions in the dsh web app',
+      'MISSING_CREDENTIAL',
+    )
+  }
+
+  /** Only Qwen currently opts into this path. Re-evaluate when a login wins a race. */
+  private async guardedSession(forceRefresh: boolean, rejectedToken?: string): Promise<S> {
+    for (;;) {
+      const session = await this.options.load()
+      if (session === undefined) throw this.missingCredential()
+      const force = forceRefresh && (rejectedToken === undefined || session.accessToken === rejectedToken)
+      if (!force && session.expiresAt - Date.now() > this.options.preemptMs) return session
+
+      let inflight = this.guardedInflight.get(session.refreshToken)
+      if (inflight === undefined) {
+        const token = session.refreshToken
+        inflight = this.doGuardedRefresh(session).finally(() => {
+          this.guardedInflight.delete(token)
+        })
+        this.guardedInflight.set(token, inflight)
+      }
+      const result = await inflight
+      if (result.kind === 'session') return result.session
+      if (result.kind === 'missing') throw this.missingCredential()
+      if (result.kind === 'changed') continue
+      if (result.kind === 'invalid') {
+        throw new LlmError(
+          `${this.options.displayName} login expired or was revoked; log in again via Settings → Subscriptions`,
+          'INVALID_CREDENTIAL', { cause: result.cause },
+        )
+      }
+      // A transient error must not send a stale access token after logout/relogin.
+      const current = await this.options.load()
+      if (current === undefined) throw this.missingCredential()
+      if (current.refreshToken !== result.attempted.refreshToken || current.accessToken !== result.attempted.accessToken) continue
+      if (!force && current.expiresAt > Date.now()) return current
+      throw result.cause instanceof LlmError
+        ? result.cause
+        : new LlmError(`${this.options.displayName} token refresh failed`, 'AUTH', { cause: result.cause })
+    }
+  }
+
+  private async doGuardedRefresh(session: S): Promise<GuardedRefresh<S>> {
+    // Re-read immediately before spending the token. This also prevents a delayed
+    // 401 from forcing a refresh of a newly installed session.
+    const current = await this.options.load()
+    if (current === undefined) return { kind: 'missing' }
+    if (current.refreshToken !== session.refreshToken || current.accessToken !== session.accessToken) return { kind: 'changed' }
+    let next: S
+    try {
+      next = await this.options.refresh(current)
+    } catch (error) {
+      if (!this.options.isPermanent(error)) return { kind: 'transient', cause: error, attempted: current }
+      const removed = await this.options.compareAndDelete!(current.refreshToken)
+      if (removed) {
+        this.options.onRemoved?.()
+        return { kind: 'invalid', cause: error }
+      }
+      return (await this.options.load()) === undefined ? { kind: 'missing' } : { kind: 'changed' }
+    }
+    const persisted = await this.options.compareAndSave!(current.refreshToken, next)
+    if (persisted === undefined) return { kind: 'missing' }
+    // The CAS returns the current session on conflict. It may be expired or
+    // carry the very access token rejected by this request, so re-evaluate it
+    // rather than returning it as a successful rotation.
+    if (persisted.accessToken !== next.accessToken || persisted.refreshToken !== next.refreshToken
+      || persisted.expiresAt !== next.expiresAt) return { kind: 'changed' }
+    return { kind: 'session', session: persisted }
   }
 
   private async doRefresh(session: S): Promise<S> {
@@ -544,6 +644,8 @@ export interface CreditBalance {
 
 /** Subscription usage of one provider, as served by the `usage` RPC endpoint. */
 export interface ProviderUsage {
+  /** Observed Qwen rejection, not a queried remaining balance or a percentage. */
+  quotaExhaustion?: { observedAt: number; resetsAt?: number }
   /** Display-only telemetry; does not affect routing or cooldown decisions. */
   fetchedAt?: number
   staleAt?: number

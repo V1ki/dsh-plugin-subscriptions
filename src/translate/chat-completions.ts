@@ -412,10 +412,9 @@ export async function* streamChatCompletions(
 ): AsyncGenerator<StreamChunk> {
   const translator = new ChatCompletionsStreamTranslator()
   for await (const sseEvent of parseSse(stream, onActivity)) {
-    if (sseEvent.data === '[DONE]') {
-      yield* translator.flush()
-      return
-    }
+    // [DONE] is a transport terminator, not a substitute for finish_reason.
+    // Share EOF's flush and validation so truncated responses fail identically.
+    if (sseEvent.data === '[DONE]') break
     let event: ChatCompletionsStreamEvent
     try {
       event = JSON.parse(sseEvent.data) as ChatCompletionsStreamEvent
