@@ -15,14 +15,17 @@
  * the selected provider has no logged-in accounts. Unknown quotas stay explicit.
  *
  * The collapsed pill summarizes signed-in accounts, never an aggregate pool
- * percentage. A single account readout identifies its default/listed source.
+ * percentage. A single account readout stays down to the provider name and its
+ * percentages: the default/listed source, the window labels, the freshness note
+ * and the overflow count all live in the dialog the pill opens, because the
+ * composer stats row leaves very little horizontal room.
  * Every color resolves through a `--dsw-*` design token and every
  * user-visible string goes through the locale `t` of the
  * 'settings.subscriptions' namespace.
  */
 import { antigravityQuotaApplies, antigravityQuotaScope } from '../antigravity-model-id.js'
 import { AntigravityQuotaSummary } from './AntigravityQuotaSummary.js'
-import { creditBalanceText, quotaPercent, quotaText, quotaIsStale, quotaUnavailableText, UsageFreshness, useQuotaClock } from './quota-display.js'
+import { creditBalanceText, quotaPercent, quotaText, quotaUnavailableText, UsageFreshness, useQuotaClock } from './quota-display.js'
 import { readUsageCache, subscribeUsage, failUsage } from './usage-cache.js'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ComponentType, CSSProperties } from 'react'
@@ -147,8 +150,9 @@ const PROVIDER_NAMES: Record<SubscriptionProvider, string> = {
  * The `currentModel` half of the inject face: the session's effective
  * model selection through ui-model-selection's `modelDirectories` service,
  * resolved lazily per call (the service may register after this plugin, and
- * a shell without it reports "unknown"; the badge keeps the most recent
- * subscription selected in this view, or stays hidden).
+ * a shell without it reports "unknown"; an unknown model keeps whatever
+ * subscription this view already showed, while a model that is known and is
+ * not a subscription hides the badge).
  */
 export function createCurrentModelReader(
   models: () => ModelDirectoriesLike | undefined,
@@ -204,45 +208,61 @@ export function previewWindows(windows: readonly UsageWindow[], model?: string, 
   return { shown: ordered.slice(0, limit), hidden: ordered.slice(limit) }
 }
 
-/** Bounded readout; Antigravity quotas belong to individual models, not the account. */
+/**
+ * Order the pill's percentages by how soon they bind: the rolling session
+ * window first, then the weekly window, then anything else. Catalog order holds
+ * within a rank.
+ */
+function compactWindows(windows: readonly UsageWindow[]): UsageWindow[] {
+  const rank = (w: UsageWindow): number => w.kind === 'session' ? 0 : w.kind === 'weekly' ? 1 : 2
+  return [...windows].sort((a, b) => rank(a) - rank(b))
+}
+
+/** At most two percentages, session window first; the rest of the readout lives in the dialog. */
+function compactPercentages(windows: readonly UsageWindow[], t: Translate, mode: QuotaDisplayMode): string {
+  return compactWindows(windows).slice(0, 2).map(w => quotaText(w.usedPercent, mode, t)).join(' / ')
+}
+
+/**
+ * Bounded readout; Antigravity quotas belong to individual models, not the
+ * account. The composer stats row is narrow, so the pill carries only the
+ * provider name and at most two percentages ("Gemini · 13% / 15%"): the
+ * default/listed source, the window labels, the freshness note and the
+ * remaining windows are all one click away in the dialog.
+ */
 export function compactSegment(d: ProviderUsageDisplay, model?: string, t: Translate = fallbackTranslate, mode: QuotaDisplayMode = 'used'): string {
   if (d.accounts.length > 1) return `${d.name} · ${t('quotaSignedIn', { count: d.accounts.length })}`
   const account = pillAccountOf(d)
   if (!account) return `${d.name} · ${t('quotaUnknown')}`
   const windows = account.windows
-  const source = t(account.isDefault ? 'quotaDefaultAccount' : 'quotaListedAccount')
-  const freshness = account.usage && quotaIsStale(account.usage) ? ` · ${t('quotaStale')}` : ''
-  const prefix = `${d.name} · ${source}`
-  if (windows.length === 0) return `${prefix} · ${quotaUnavailableText(account.usage, account.loadFailed === true, t) ?? t('usageNoVisibleModels')}`
+  if (windows.length === 0) return `${d.name} · ${quotaUnavailableText(account.usage, account.loadFailed === true, t) ?? t('usageNoVisibleModels')}`
   if (d.provider === 'antigravity') {
     const matching = model === undefined ? [] : windows.filter(w => antigravityQuotaApplies(w.scope, model))
     if (matching.length === 0) {
-      return `${prefix} ${t(model === undefined ? 'usageBadgeModelCount' : 'usageBadgeModelUnavailable', {
+      return `${d.name} · ${t(model === undefined ? 'usageBadgeModelCount' : 'usageBadgeModelUnavailable', {
         count: new Set(windows.map(w => w.scope).filter(Boolean)).size,
-      })}${freshness}`
+      })}`
     }
-    const parts = matching.slice(0, 2).map(w => {
-      const label = w.resetsAt !== undefined && w.resetsAt <= Date.now() ? t('quotaExpiredWindow')
-        : w.kind === 'weekly' ? t('usageWeekly')
-        : w.kind === 'session' ? t('usageFiveHourLimit') : t('usageWindow')
-      return `${label} ${quotaText(w.usedPercent, mode, t)}`
-    })
-    return `${prefix} ${parts.join(' · ')}${freshness}`
+    return `${d.name} · ${compactPercentages(matching, t, mode)}`
   }
-  const parts = windows.slice(0, 2).map(w => `${w.resetsAt !== undefined && w.resetsAt <= Date.now() ? t('quotaExpiredWindow') : windowLabel(w)} ${quotaText(w.usedPercent, mode, t)}`)
-  if (windows.length > 2) parts.push(`+${windows.length - 2}`)
-  const credits = d.provider === 'codex' ? creditBalanceText(account.usage?.credits, t) : undefined
-  return `${prefix} ${parts.join(' · ')}${credits === undefined ? '' : ` · ${credits}`}${freshness}`
+  return `${d.name} · ${compactPercentages(windows, t, mode)}`
 }
 
 type ModelSelection = { provider: string; model: string }
 
-/** Remember only the most recent subscription in this view, including its model scope. */
+/**
+ * Remember the most recent subscription in this view, including its model
+ * scope, and drop it as soon as the session settles on a provider that is not
+ * a subscription: a pill naming a provider the session stopped using is noise,
+ * not history. An unknown current model (the shell may not report one yet)
+ * keeps the last known selection so the pill does not flicker between polls.
+ */
 export function retainSubscriptionSelection(
   previous: ModelSelection | undefined,
   current: ModelSelection | undefined,
 ): ModelSelection | undefined {
-  return current !== undefined && Object.hasOwn(PROVIDER_NAMES, current.provider) ? current : previous
+  if (current === undefined) return previous
+  return Object.hasOwn(PROVIDER_NAMES, current.provider) ? current : undefined
 }
 
 /** At most one provider; no known selection or no usage means no badge. */
@@ -289,9 +309,9 @@ function usageWindowLabel(t: Translate, window: UsageWindow): string {
 }
 
 /**
- * The composer subscription-usage badge: a pill reading e.g.
- * `Codex 6d 1h 25%` for the current model's provider, opening a dialog with
- * every provider's accounts and their windows, including unavailable telemetry.
+ * The composer subscription-usage badge: a pill reading e.g. `Codex 13% / 25%`
+ * for the current model's provider, opening a dialog with every provider's
+ * accounts and their windows, including unavailable telemetry.
  */
 export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsageBadgeProps) {
   const translate: Translate = t ?? fallbackTranslate
@@ -531,7 +551,8 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
 
   const label = compactSegment(collapsed[0]!, badgeSelection?.model, translate, quotaMode)
   // The dialog opens from the badge, so it follows the provider and model the
-  // badge shows (a retained subscription when the current model is not one).
+  // badge shows (the subscription this view retained while the shell reports no
+  // current model at all).
   const expanded = expandedDisplays(displays, badgeSelection?.provider)
   const title = translate('usageBadgeTitle')
 
