@@ -13,6 +13,7 @@
 
 import { CONTEXT_WINDOW_EXCEEDED_CODE, LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import type { ProviderId } from '../auth/store.js'
+import { ACCOUNT_SUSPENDED_CODE } from './common.js'
 
 /** Registry key for one pool member. */
 export function memberKey(provider: ProviderId, account: string, model: string): string {
@@ -82,6 +83,17 @@ export function classifyPoolFailure(error: unknown, provider: ProviderId): PoolF
         reason: error.code,
         scope: MODEL_SCOPED_QUOTA_PROVIDERS.has(provider) ? 'member' : 'account',
       }
+    case ACCOUNT_SUSPENDED_CODE:
+      // A ToS ban is a permanent state of the account, not a credential fault
+      // that a re-login clears, and retrying the same account can never succeed:
+      // only a Google appeal lifts it. The pool therefore has to park it exactly
+      // as it parks a rejected credential — switch away from every member of the
+      // account — while the surfaced code keeps the real reason visible. The
+      // cooldown deliberately stays AUTH_COOLDOWN_MS rather than something
+      // longer: nothing here can tell a banned account from one whose appeal
+      // succeeded, and a day-long park is already long enough that the member is
+      // not retried within a session.
+      return { action: 'switch', cooldownMs: AUTH_COOLDOWN_MS, reason: error.code, scope: 'account' }
     case 'AUTH':
     case 'INVALID_CREDENTIAL':
     case 'MISSING_CREDENTIAL':
