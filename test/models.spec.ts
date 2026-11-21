@@ -1555,10 +1555,72 @@ test('copilot resolveModel serves discovered context windows and modalities', as
   const resolved = await adapter.resolveModel('copilot', 'gpt-4.1')
   assert.equal(resolved.context?.contextWindow, 1_000_000)
   assert.deepEqual(resolved.inputModalities, ['text', 'image'])
+  assert.equal(resolved.defaultMaxTokens, 16_000)
   // A model the catalog filtered out falls back to static/defaults.
   const missing = await adapter.resolveModel('copilot', 'policy-disabled')
   assert.equal(missing.context?.contextWindow, 128_000)
   assert.deepEqual(missing.inputModalities, ['text'])
+  assert.equal(missing.defaultMaxTokens, 16_000)
+})
+
+test('copilot discovery reads max_output_tokens and clamps defaultMaxTokens', async () => {
+  const payload = {
+    data: [
+      {
+        id: 'gemini-4-hydrogen',
+        name: 'Gemini 4 Hydrogen',
+        model_picker_enabled: true,
+        policy: { state: 'enabled' },
+        supported_endpoints: ['/chat/completions'],
+        capabilities: {
+          supports: { vision: true },
+          limits: { max_context_window_tokens: 1_000_000, max_output_tokens: 8_192 },
+        },
+      },
+      {
+        id: 'claude-sonnet-5.5',
+        name: 'Claude Sonnet 5.5',
+        model_picker_enabled: true,
+        policy: { state: 'enabled' },
+        supported_endpoints: ['/chat/completions'],
+        capabilities: {
+          supports: { vision: true },
+          limits: { max_context_window_tokens: 200_000, max_output_tokens: 64_000 },
+        },
+      },
+      {
+        id: 'odd-cap',
+        name: 'Odd Cap',
+        model_picker_enabled: true,
+        policy: { state: 'enabled' },
+        supported_endpoints: ['/chat/completions'],
+        capabilities: {
+          limits: { max_output_tokens: -10 },
+        },
+      },
+    ],
+  }
+  const discovered = await fetchCopilotModels(copilotSession, fakeFetch(payload).fetchFn)
+  assert.equal(discovered[0]?.maxOutputTokens, 8_192)
+  assert.equal(discovered[1]?.maxOutputTokens, 64_000)
+  assert.equal(discovered[2]?.maxOutputTokens, undefined)
+
+  const adapter = new CopilotAdapter({
+    models: [
+      { id: 'gemini-4-hydrogen', maxTokens: 32_000 },
+      { id: 'claude-sonnet-5.5', maxTokens: 12_000 },
+    ],
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens(copilotSession),
+    discovery: true,
+    fetchFn: fakeFetch(payload).fetchFn,
+  })
+  assert.equal((await adapter.resolveModel('copilot', 'gemini-4-hydrogen')).defaultMaxTokens, 8_192,
+    'discovered max_output_tokens clamps a higher configured cap')
+  assert.equal((await adapter.resolveModel('copilot', 'claude-sonnet-5.5')).defaultMaxTokens, 12_000,
+    'configured maxTokens may lower below discovered max_output_tokens')
+  assert.equal((await adapter.resolveModel('copilot', 'odd-cap')).defaultMaxTokens, 16_000,
+    'invalid/missing max_output_tokens falls back to default')
 })
 
 test('copilot listModels falls back to the static catalog on discovery failure', async () => {

@@ -137,6 +137,25 @@ export function toChatMessages(
 }
 
 /**
+ * Minimal, non-mutating parameter schema hygiene for Chat Completions gateways:
+ * strip top-level JSON Schema meta-keywords (`$schema`, `$id`) and default a
+ * missing root `type` to `'object'` so strict backends (Gemini/Claude via
+ * Copilot) do not reject valid tool definitions.
+ */
+function sanitizeChatToolParameters(parameters: Record<string, unknown>): Record<string, unknown> {
+  const hasMeta = '$schema' in parameters || '$id' in parameters
+  const missingType = parameters.type === undefined
+  if (!hasMeta && !missingType) return parameters
+  const sanitized: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(parameters)) {
+    if (key === '$schema' || key === '$id') continue
+    sanitized[key] = value
+  }
+  if (sanitized.type === undefined) sanitized.type = 'object'
+  return sanitized
+}
+
+/**
  * Map harness tool schemas to chat completions function tools.
  * @param tools - tool schemas from the request.
  * @returns the wire `tools` array.
@@ -147,7 +166,7 @@ export function toChatTools(tools: readonly ToolSchema[]): Record<string, unknow
     function: {
       name: tool.name,
       description: tool.description,
-      parameters: tool.parameters,
+      parameters: sanitizeChatToolParameters(tool.parameters),
     },
   }))
 }

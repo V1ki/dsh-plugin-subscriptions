@@ -14,6 +14,7 @@
  * unchanged.
  */
 
+import { createHash } from 'node:crypto'
 import { EMPTY_RESPONSE_CODE, errorChain, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
@@ -28,6 +29,7 @@ import type { ProviderId } from '../auth/store.js'
 import type { PoolAdapter } from './pool.js'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { resolveImages } from '../translate/resolved.js'
+import type { TranslatableBlock, TranslatableMessage } from '../translate/resolved.js'
 import {
   streamChatCompletions,
   toChatMessages,
@@ -286,7 +288,10 @@ interface CopilotWireModel {
       /** Supported reasoning efforts, present only on models that reason. */
       reasoning_effort?: string[] | null
     }
-    limits?: { max_context_window_tokens?: number }
+    limits?: {
+      max_context_window_tokens?: number
+      max_output_tokens?: number
+    }
   }
 }
 
@@ -362,12 +367,18 @@ export async function fetchCopilotModels(
     }
     seen.add(entry.id)
     const reasoning = copilotReasoning(entry)
+    const maxOutputTokens = entry.capabilities?.limits?.max_output_tokens
     discovered.push({
       id: entry.id,
       name: typeof entry.name === 'string' && entry.name.length > 0 ? entry.name : entry.id,
       ...typeof entry.capabilities?.limits?.max_context_window_tokens === 'number'
         && entry.capabilities.limits.max_context_window_tokens > 0
         ? { contextWindow: entry.capabilities.limits.max_context_window_tokens }
+        : {},
+      ...typeof maxOutputTokens === 'number'
+        && Number.isSafeInteger(maxOutputTokens)
+        && maxOutputTokens > 0
+        ? { maxOutputTokens }
         : {},
       inputModalities: entry.capabilities?.supports?.vision === true ? ['text', 'image'] : ['text'],
       ...reasoning === undefined ? {} : { reasoning },
@@ -422,6 +433,327 @@ export function copilotRequestWire(
   return 'responses'
 }
 
+const COPILOT_CHAT_CALL_ID_MAX_LENGTH = 40
+const COPILOT_RESPONSES_CALL_ID_MAX_LENGTH = 64
+const COPILOT_CALL_ID_PREFIX = 'call_'
+const COPILOT_CALL_ID_PATTERN = /^[a-zA-Z0-9_-]+$/
+
+/** Text marking a repaired tool output as an unknown outcome; the model must verify before retrying. */
+export const COPILOT_UNKNOWN_TOOL_OUTCOME = 'The tool call has no recorded result. Its outcome is unknown; verify external state before retrying any operation that may have side effects.'
+
+/**
+ * The output cap for one Copilot model: configuration may lower the default,
+ * but never exceeds a server-advertised `max_output_tokens` ceiling; the
+ * built-in constant is the last resort.
+ */
+function copilotMaxTokens(
+  configured: ModelEntry | undefined,
+  discovered: DiscoveredModel | undefined,
+): number {
+  const outputLimit = discovered?.maxOutputTokens
+  const preferred = configured?.maxTokens ?? outputLimit ?? COPILOT_DEFAULT_MAX_TOKENS
+  return outputLimit === undefined ? preferred : Math.min(preferred, outputLimit)
+}
+
+/** Whether any block (including nested legacy `tool-result` blocks) carries an image. */
+function hasImageBlock(blocks: readonly TranslatableBlock[]): boolean {
+  return blocks.some(block => block.type === 'image'
+    || (block.type === 'tool-result' && hasImageBlock(block.content)))
+}
+
+/** Whether any message in the request carries image input (top-level or inside tool results). */
+function hasVisionBlocks(messages: readonly TranslatableMessage[]): boolean {
+  return messages.some(message => hasImageBlock(message.content))
+}
+
+/**
+ * Request-local, prefix-stable, collision-safe tool-call ID normalizer.
+ * Already-valid IDs matching `^[a-zA-Z0-9_-]+$` within `maxLength` are kept
+ * verbatim when unused (preserving prompt-cache prefixes for all-valid
+ * histories). Invalid, empty, overlong, or colliding IDs receive deterministic
+ * SHA-256-derived wire IDs without altering any earlier assignment.
+ */
+function createCopilotCallIdNormalizer(maxLength: number): (rawId: string) => string {
+  const mapping = new Map<string, string>()
+  const used = new Set<string>()
+  const hashLength = maxLength - COPILOT_CALL_ID_PREFIX.length
+  return (rawId: string): string => {
+    const existing = mapping.get(rawId)
+    if (existing !== undefined) return existing
+    if (
+      rawId.length > 0
+      && rawId.length <= maxLength
+      && COPILOT_CALL_ID_PATTERN.test(rawId)
+      && !used.has(rawId)
+    ) {
+      mapping.set(rawId, rawId)
+      used.add(rawId)
+      return rawId
+    }
+    let attempt = 0
+    let candidate: string
+    do {
+      const hash = createHash('sha256')
+      if (attempt > 0) hash.update(String(attempt)).update('\0')
+      const digest = hash.update(rawId).digest('hex')
+      candidate = `${COPILOT_CALL_ID_PREFIX}${digest.slice(0, hashLength)}`
+      attempt += 1
+    } while (used.has(candidate))
+    mapping.set(rawId, candidate)
+    used.add(candidate)
+    return candidate
+  }
+}
+
+/**
+ * Ensure a Chat Completions tool call's `function.arguments` is a valid JSON
+ * object string. Valid JSON object strings are returned verbatim to preserve
+ * prompt-cache bytes; empty, whitespace, malformed, or non-object payloads
+ * degrade to `'{}'` so Copilot's Gemini/Claude bridges never fail JSON parsing.
+ */
+function normalizeChatToolArguments(raw: unknown): string {
+  if (typeof raw !== 'string') return '{}'
+  const trimmed = raw.trim()
+  if (trimmed.length === 0) return '{}'
+  try {
+    const parsed: unknown = JSON.parse(trimmed)
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      return raw
+    }
+  } catch {
+    // Malformed JSON falls back to an empty JSON object string.
+  }
+  return '{}'
+}
+
+/** Drop empty/whitespace-only text parts from a content-part array without mutating it. */
+function filterNonEmptyContentParts(parts: readonly unknown[]): unknown[] {
+  return parts.filter((part) => {
+    if (typeof part !== 'object' || part === null) return false
+    const record = part as Record<string, unknown>
+    if (record.type === 'text') {
+      return typeof record.text === 'string' && record.text.trim().length > 0
+    }
+    return true
+  })
+}
+
+/**
+ * Request-local sanitization and reconciliation for Copilot `/chat/completions`
+ * messages. Durable history and the pure `toChatMessages` translator stay
+ * unchanged; this boundary repair ensures cross-provider histories (e.g.
+ * Codex → Copilot Gemini/Claude) satisfy Copilot gateway invariants:
+ * 1. Drop empty-text-only `assistant` (no `tool_calls`) and `user` messages
+ *    (e.g. silent `{ type: 'text', text: '' }` blocks from Responses).
+ * 2. Downgrade `developer` messages to `user` so non-OpenAI Copilot models do
+ *    not reject them on hosts that do not strip them upstream.
+ * 3. Normalize `tool_calls[].function.arguments` to valid JSON object strings.
+ * 4. Normalize `tool_call_id`s (`^[a-zA-Z0-9_-]+$`, ≤40 chars) deterministically
+ *    and prefix-stably without collisions.
+ * 5. Regroup every `role: 'tool'` answering an `assistant.tool_calls` batch
+ *    immediately after that assistant message, deferring spliced non-`tool`
+ *    messages (e.g. `goal` / `model-selection` context injections) until after
+ *    the contiguous `tool` run; synthesize unknown-outcome `role: 'tool'`
+ *    messages for missing call IDs and drop orphan/duplicate `role: 'tool'`
+ *    messages.
+ * @param messages - translated Chat Completions wire messages.
+ * @returns sanitized wire messages ready for Copilot `/chat/completions`.
+ */
+export function sanitizeCopilotChatMessages(
+  messages: readonly Record<string, unknown>[],
+): Record<string, unknown>[] {
+  const normalizeId = createCopilotCallIdNormalizer(COPILOT_CHAT_CALL_ID_MAX_LENGTH)
+  const cleaned: Record<string, unknown>[] = []
+  for (const message of messages) {
+    const role = message.role
+    if (role === 'system') {
+      cleaned.push(message)
+      continue
+    }
+    if (role === 'user' || role === 'developer') {
+      const content = message.content
+      let nextContent: unknown
+      if (typeof content === 'string') {
+        if (content.trim().length === 0) continue
+        nextContent = content
+      } else if (Array.isArray(content)) {
+        const filtered = filterNonEmptyContentParts(content)
+        if (filtered.length === 0) continue
+        nextContent = filtered.length === content.length ? content : filtered
+      } else {
+        continue
+      }
+      if (role === 'user' && nextContent === content) {
+        cleaned.push(message)
+      } else {
+        cleaned.push({ ...message, role: 'user', content: nextContent })
+      }
+      continue
+    }
+    if (role === 'tool') {
+      if (typeof message.tool_call_id !== 'string') continue
+      const nextId = normalizeId(message.tool_call_id)
+      cleaned.push(nextId === message.tool_call_id ? message : { ...message, tool_call_id: nextId })
+      continue
+    }
+    if (role === 'assistant') {
+      const rawCalls = Array.isArray(message.tool_calls)
+        ? (message.tool_calls as Record<string, unknown>[])
+        : undefined
+      if (rawCalls === undefined || rawCalls.length === 0) {
+        const content = message.content
+        if (typeof content === 'string') {
+          if (content.trim().length === 0) continue
+          cleaned.push(message)
+        } else if (Array.isArray(content)) {
+          const filtered = filterNonEmptyContentParts(content)
+          if (filtered.length === 0) continue
+          cleaned.push(filtered.length === content.length ? message : { ...message, content: filtered })
+        }
+        continue
+      }
+      let callsChanged = false
+      const normalizedCalls = rawCalls.map((call) => {
+        const rawId = typeof call.id === 'string' ? call.id : ''
+        const nextId = normalizeId(rawId)
+        const fn = typeof call.function === 'object' && call.function !== null
+          ? (call.function as Record<string, unknown>)
+          : undefined
+        const nextArgs = fn === undefined ? undefined : normalizeChatToolArguments(fn.arguments)
+        const idChanged = nextId !== call.id
+        const argsChanged = fn !== undefined && nextArgs !== fn.arguments
+        if (!idChanged && !argsChanged) return call
+        callsChanged = true
+        return {
+          ...call,
+          id: nextId,
+          ...fn === undefined ? {} : { function: argsChanged ? { ...fn, arguments: nextArgs } : fn },
+        }
+      })
+      cleaned.push(callsChanged ? { ...message, tool_calls: normalizedCalls } : message)
+      continue
+    }
+    cleaned.push(message)
+  }
+
+  const out: Record<string, unknown>[] = []
+  let index = 0
+  while (index < cleaned.length) {
+    const current = cleaned[index]!
+    if (current.role === 'tool') {
+      // Orphan tool result with no preceding assistant tool_calls batch.
+      index += 1
+      continue
+    }
+    const toolCalls = current.role === 'assistant' && Array.isArray(current.tool_calls)
+      ? (current.tool_calls as Record<string, unknown>[])
+      : undefined
+    if (toolCalls === undefined || toolCalls.length === 0) {
+      out.push(current)
+      index += 1
+      continue
+    }
+    out.push(current)
+    const expectedOrder: string[] = []
+    const expectedSet = new Set<string>()
+    for (const call of toolCalls) {
+      if (typeof call.id === 'string' && !expectedSet.has(call.id)) {
+        expectedSet.add(call.id)
+        expectedOrder.push(call.id)
+      }
+    }
+    const matchedTools: Record<string, unknown>[] = []
+    const answered = new Set<string>()
+    const deferred: Record<string, unknown>[] = []
+    index += 1
+    while (index < cleaned.length && cleaned[index]!.role !== 'assistant') {
+      const next = cleaned[index]!
+      if (next.role === 'tool') {
+        const id = typeof next.tool_call_id === 'string' ? next.tool_call_id : undefined
+        if (id !== undefined && expectedSet.has(id) && !answered.has(id)) {
+          answered.add(id)
+          matchedTools.push(next)
+        }
+      } else {
+        deferred.push(next)
+      }
+      index += 1
+    }
+    out.push(...matchedTools)
+    for (const id of expectedOrder) {
+      if (!answered.has(id)) {
+        out.push({
+          role: 'tool',
+          tool_call_id: id,
+          content: COPILOT_UNKNOWN_TOOL_OUTCOME,
+        })
+      }
+    }
+    out.push(...deferred)
+  }
+  return out
+}
+
+/**
+ * Request-local normalization and tool-call reconciliation for Copilot
+ * `/responses` input items: bounds/sanitizes `call_id`s (`^[a-zA-Z0-9_-]+$`,
+ * ≤64 chars, prefix-stable and collision-safe), inserts an unknown-outcome
+ * `function_call_output` immediately after any `function_call` missing one,
+ * and drops orphan or duplicate `function_call_output` items.
+ * @param input - translated Responses input items.
+ * @returns sanitized and balanced Responses input items.
+ */
+export function sanitizeCopilotResponsesInput(
+  input: ResponsesRequestInput['input'],
+): ResponsesRequestInput['input'] {
+  const normalizeId = createCopilotCallIdNormalizer(COPILOT_RESPONSES_CALL_ID_MAX_LENGTH)
+  const normalized = input.map((item) => {
+    if ((item.type === 'function_call' || item.type === 'function_call_output')
+      && typeof item.call_id === 'string') {
+      const nextId = normalizeId(item.call_id)
+      return nextId === item.call_id ? item : { ...item, call_id: nextId }
+    }
+    return item
+  })
+  const calls = new Set<string>()
+  const outputs = new Set<string>()
+  let hasDuplicateOutput = false
+  for (const item of normalized) {
+    if (item.type === 'function_call' && typeof item.call_id === 'string') {
+      calls.add(item.call_id)
+    } else if (item.type === 'function_call_output' && typeof item.call_id === 'string') {
+      if (outputs.has(item.call_id)) hasDuplicateOutput = true
+      outputs.add(item.call_id)
+    }
+  }
+  const missing = new Set([...calls].filter(callId => !outputs.has(callId)))
+  if (missing.size === 0 && !hasDuplicateOutput && [...outputs].every(callId => calls.has(callId))) {
+    return normalized
+  }
+  const balanced: ResponsesRequestInput['input'] = []
+  const emittedOutputs = new Set<string>()
+  for (const item of normalized) {
+    if (item.type === 'function_call_output') {
+      if (typeof item.call_id !== 'string' || !calls.has(item.call_id) || emittedOutputs.has(item.call_id)) {
+        continue
+      }
+      emittedOutputs.add(item.call_id)
+      balanced.push(item)
+      continue
+    }
+    balanced.push(item)
+    if (item.type === 'function_call' && typeof item.call_id === 'string' && missing.delete(item.call_id)) {
+      emittedOutputs.add(item.call_id)
+      balanced.push({
+        type: 'function_call_output',
+        call_id: item.call_id,
+        output: COPILOT_UNKNOWN_TOOL_OUTCOME,
+      })
+    }
+  }
+  return balanced
+}
+
 /**
  * The chat completions request body for one generation. The output cap rides
  * `max_completion_tokens` — the newer OpenAI-family models on Copilot reject
@@ -437,7 +769,7 @@ export function copilotChatRequestBody(
 ): Record<string, unknown> {
   return {
     model: options.model,
-    messages,
+    messages: sanitizeCopilotChatMessages(messages),
     ...options.tools !== undefined && options.tools.length > 0
       ? { tools: toChatTools(options.tools), tool_choice: 'auto' }
       : {},
@@ -468,7 +800,7 @@ export function copilotResponsesRequestBody(
   return {
     model: options.model,
     ...resolved.instructions !== undefined ? { instructions: resolved.instructions } : {},
-    input: resolved.input,
+    input: sanitizeCopilotResponsesInput(resolved.input),
     ...options.tools !== undefined && options.tools.length > 0
       ? { tools: toResponsesTools(options.tools, { strict: false }), tool_choice: 'auto' }
       : {},
@@ -945,7 +1277,7 @@ export class CopilotAdapter extends LlmAdapter {
       ...discovered?.description === undefined ? {} : { description: discovered.description },
       inputModalities: discovered?.inputModalities ?? configured?.inputModalities ?? ['text'],
       context: { contextWindow: discovered?.contextWindow ?? configured?.contextWindow ?? COPILOT_CONTEXT_WINDOW },
-      defaultMaxTokens: configured?.maxTokens ?? COPILOT_DEFAULT_MAX_TOKENS,
+      defaultMaxTokens: copilotMaxTokens(configured, discovered),
       ...reasoning === undefined ? {} : { reasoning },
     }
   }
@@ -972,16 +1304,16 @@ export class CopilotAdapter extends LlmAdapter {
       // dual-protocol models reroute there once the request combines function
       // tools with a reasoning effort (gpt-5.4 400s on the chat wire then).
       // A configured `wire` outranks the catalog (see configuredWireEntry).
-      const wire = copilotRequestWire(
-        this.configuredWireEntry(options.model) ?? await this.discovered(options.model),
-        options,
-      )
+      const configuredWire = this.configuredWireEntry(options.model)
+      const discovered = configuredWire === undefined ? await this.discovered(options.model) : undefined
+      const wire = copilotRequestWire(configuredWire ?? discovered, options)
+      const maxOutputTokens = discovered?.maxOutputTokens
       let session = await this.options.tokens.session(account)
       // Replay scope: account identity × conversation × model (see
       // replayScope); a Copilot-token refresh preserves the GitHub token, so
       // the 401 retry below reuses it too.
       const scope = this.replayScope(session.refreshToken, options)
-      let response = await this.request(options, session, watchdog.signal, wire, scope)
+      let response = await this.request(options, session, watchdog.signal, wire, scope, maxOutputTokens)
       if (response.status === 401) {
         // One forced refresh + retry on an unexpired-but-rejected token. The
         // editor version is force-refreshed too: a 401 `IDE token expired`
@@ -989,7 +1321,7 @@ export class CopilotAdapter extends LlmAdapter {
         // Editor-Version header fixes that (a new token does not).
         await latestVsCodeVersion(this.options.fetchFn ?? proxiedFetch, true)
         session = await this.options.tokens.session(account, true)
-        response = await this.request(options, session, watchdog.signal, wire, scope)
+        response = await this.request(options, session, watchdog.signal, wire, scope, maxOutputTokens)
       }
       if (!response.ok) {
         throw await httpLlmError(response, 'copilot API', {
@@ -997,6 +1329,7 @@ export class CopilotAdapter extends LlmAdapter {
           // mapper still honors its generic retry-after header and warns with
           // rate-limit-shaped headers/body when GitHub sends another signal.
           ...this.options.onWarn === undefined ? {} : { onWarn: this.options.onWarn },
+          requestIdHeader: 'x-github-request-id',
         })
       }
       if (response.body === null) {
@@ -1025,17 +1358,23 @@ export class CopilotAdapter extends LlmAdapter {
     signal: AbortSignal,
     wire: CopilotWire,
     replayScopeKey: string | undefined,
+    maxOutputTokens?: number,
   ): Promise<Response> {
     const messages = await resolveImages(options.messages, this.options.resolveAttachments?.(), signal)
-    const hasVision = messages.some(message => message.content.some(block => block.type === 'image'))
+    const hasVision = hasVisionBlocks(messages)
+    const effectiveOptions = maxOutputTokens !== undefined
+      && options.maxTokens !== undefined
+      && options.maxTokens > maxOutputTokens
+      ? { ...options, maxTokens: maxOutputTokens }
+      : options
     const body = wire === 'responses'
-      ? copilotResponsesRequestBody(options, toResponsesInput(
+      ? copilotResponsesRequestBody(effectiveOptions, toResponsesInput(
         messages,
-        options.system,
+        effectiveOptions.system,
         // Captured completed reasoning replays ahead of its tool call.
         callId => this.replayFor(replayScopeKey, callId),
       ))
-      : copilotChatRequestBody(options, toChatMessages(messages, options.system))
+      : copilotChatRequestBody(effectiveOptions, toChatMessages(messages, effectiveOptions.system))
     return proxiedFetch(wire === 'responses' ? COPILOT_RESPONSES_URL : COPILOT_API_URL, {
       method: 'POST',
       headers: {

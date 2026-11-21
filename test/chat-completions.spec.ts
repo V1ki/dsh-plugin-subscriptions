@@ -129,6 +129,29 @@ test('toChatTools maps schemas to function tools', () => {
   }])
 })
 
+test('toChatTools strips top-level $schema/$id and defaults missing root type without mutating input', () => {
+  const withMeta = {
+    $schema: 'https://json-schema.org/draft/2020-12/schema',
+    $id: 'tool://search',
+    type: 'object',
+    properties: { q: { type: 'string' } },
+  }
+  const bareEmpty: Record<string, unknown> = {}
+  const missingType = { properties: { path: { type: 'string' } } }
+  const snapshot = structuredClone([withMeta, bareEmpty, missingType])
+  const tools = toChatTools([
+    { name: 'search', description: 'search', parameters: withMeta },
+    { name: 'ping', description: 'ping', parameters: bareEmpty },
+    { name: 'read', description: 'read', parameters: missingType },
+  ])
+  assert.deepEqual(tools.map(t => (t.function as Record<string, unknown>).parameters), [
+    { type: 'object', properties: { q: { type: 'string' } } },
+    { type: 'object' },
+    { type: 'object', properties: { path: { type: 'string' } } },
+  ])
+  assert.deepEqual([withMeta, bareEmpty, missingType], snapshot, 'caller schemas must stay untouched')
+})
+
 test('mapChatCompletionsUsage subtracts cached input and reports reasoning output', () => {
   assert.deepEqual(mapChatCompletionsUsage({
     prompt_tokens: 100,
