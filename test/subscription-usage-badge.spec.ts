@@ -12,7 +12,7 @@ const css = registerHooks({ load(url, context, nextLoad) {
     : nextLoad(url, context)
 } })
 const { AccountWindows, CodexExhaustionNotice, compactSegment, createCurrentModelReader, previewWindows,
-  collapsedDisplays, expandedDisplays, retainSubscriptionSelection, usageBadgeIcon, compactQuotaRows, budgetTargetRemaining, budgetTargetTone } = await import('../src/client/SubscriptionUsageBadge.js')
+  collapsedDisplays, expandedDisplays, retainSubscriptionSelection, usageBadgeIcon, compactQuotaRows, budgetTargetRemaining, budgetTargetTone, compactQuotaColor } = await import('../src/client/SubscriptionUsageBadge.js')
 const { ImageGenerateToolview } = await import('../src/client/ImageGenerateToolview.js')
 const { VideoGenerateToolview } = await import('../src/client/VideoGenerateToolview.js')
 css.deregister()
@@ -332,11 +332,37 @@ test('budget line tracks elapsed time within the reset duration, hiding invalid 
   assert.equal(budgetTargetRemaining({ kind: 'session', resetsAt: now + hour, durationMs: 0 }, now), undefined)
 })
 
-test('budget marker tone is white when safe, yellow when near, red when over', () => {
+test('budget marker tone is white when safe, orange when near, red when over', () => {
   assert.equal(budgetTargetTone(75, 60), 'safe')
   assert.equal(budgetTargetTone(70.01, 60), 'safe')
   assert.equal(budgetTargetTone(70, 60), 'near')
   assert.equal(budgetTargetTone(60, 60), 'near')
   assert.equal(budgetTargetTone(59.999, 60), 'over')
   assert.equal(budgetTargetTone(40, 50), 'over')
+})
+
+test('compact quota fill uses no green and bright warning colors', () => {
+  assert.equal(compactQuotaColor(100), '#cbd5e1')
+  assert.equal(compactQuotaColor(60), '#cbd5e1')
+  assert.equal(compactQuotaColor(40), '#ffda24')
+  assert.equal(compactQuotaColor(20), '#ffaa00')
+  assert.equal(compactQuotaColor(0), '#ff244c')
+})
+
+test('subagent badge uses only the actual latest completed request route', async () => {
+  const { latestSubagentSubscriptionModel } = await import('../src/client/SubagentSubscriptionUsageBadge.js')
+  const nodes = [
+    { kind: 'turn-tail', anchorSeq: 100, data: { tokenUsage: { routes: [{ provider: 'claude', model: 'claude-opus-5-5' }] } } },
+    { kind: 'turn-tail', anchorSeq: 200, data: { tokenUsage: { routes: [
+      { provider: 'claude', model: 'claude-opus-5-5' },
+      { provider: 'dsh-opencode-go', model: 'deepseek-v4.1-flash' },
+    ] } } },
+  ]
+  const chat = { nodes: { values: () => nodes } }
+  assert.deepEqual(latestSubagentSubscriptionModel(chat),
+    { provider: 'dsh-opencode-go', model: 'deepseek-v4.1-flash' })
+  assert.equal(latestSubagentSubscriptionModel(null), undefined)
+  assert.equal(latestSubagentSubscriptionModel({ nodes: { values: () => [
+    { kind: 'turn-tail', anchorSeq: 9, data: { tokenUsage: { routes: undefined } } },
+  ] } }), undefined)
 })

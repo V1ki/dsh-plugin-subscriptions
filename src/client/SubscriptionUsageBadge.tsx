@@ -287,12 +287,12 @@ export function budgetTargetTone(remainingPercent: number, targetPercent: number
   return 'safe'
 }
 
-/** Visual indicator agrees with Codex Connect's remaining-quota thresholds. */
-function compactQuotaColor(remaining: number): string {
-  if (remaining >= 60) return 'var(--dsw-alias-state-success-primary, #22c55e)'
-  if (remaining >= 40) return 'var(--dsw-alias-state-warn-primary, #eab308)'
-  if (remaining >= 20) return '#f97316'
-  return 'var(--dsw-alias-state-error-primary, #ef4444)'
+/** Neutral healthy fill; vivid warm tones indicate reduced remaining quota. */
+export function compactQuotaColor(remaining: number): string {
+  if (remaining >= 60) return '#cbd5e1'
+  if (remaining >= 40) return '#ffda24'
+  if (remaining >= 20) return '#ffaa00'
+  return '#ff244c'
 }
 
 type ModelSelection = { provider: string; model: string }
@@ -353,7 +353,7 @@ function usageWindowLabel(t: Translate, window: UsageWindow): string {
  * `Codex 6d 1h 25%` for the current model's provider, opening a dialog with
  * every provider's accounts and their windows, including unavailable telemetry.
  */
-export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsageBadgeProps) {
+export function SubscriptionUsageBadge({ rpc, currentModel, t, headerPlacement = false }: Pick<SubscriptionUsageBadgeProps, 'rpc' | 'currentModel' | 't'> & { headerPlacement?: boolean }) {
   const translate: Translate = t ?? fallbackTranslate
   const [displays, setDisplays] = useState<ProviderUsageDisplay[]>([])
   const [selection, setSelection] = useState<ModelSelection | undefined>(undefined)
@@ -364,7 +364,7 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
   const quotaMode = useQuotaDisplayMode()
   const now = useQuotaClock()
   const current = selection?.provider
-  const badgeSelection = retainSubscriptionSelection(lastSubscription, selection)
+  const badgeSelection = headerPlacement ? selection : retainSubscriptionSelection(lastSubscription, selection)
   const [open, setOpen] = useState(false)
   const [hover, setHover] = useState(false)
   const inflightRef = useRef(false)
@@ -573,7 +573,7 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
   const [statsRow, setStatsRow] = useState<HTMLElement | null>(null)
   useEffect(() => {
     const seat = seatRef.current
-    if (seat === null) return
+    if (seat === null || headerPlacement) return
     const scope = statsScopeOf(seat)
     if (scope === null) return
     const find = (): HTMLElement | null => scope.querySelector<HTMLElement>('[data-composer-stats]')
@@ -581,7 +581,7 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
     const observer = new MutationObserver(() => { setStatsRow(find()) })
     observer.observe(scope, { childList: true, subtree: true })
     return () => { observer.disconnect() }
-  }, [])
+  }, [headerPlacement])
 
   useEffect(() => {
     if (displayMode === 'hidden') setOpen(false)
@@ -594,7 +594,7 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
   const label = compactSegment(collapsed[0]!, badgeSelection?.model, translate, quotaMode)
   const compactRows = styleMode === 'compact' ? compactQuotaRows(collapsed[0]!) : []
   const compact = compactRows.length > 0
-  // The compact bars always encode REMAINING quota, like Codex Connect.
+  // The compact bars always encode REMAINING quota.
   // Keep full account information in the screen-reader label and popup.
   const compactSummary = compactRows.map(row => {
     const target = budgetTargetEnabled ? budgetTargetRemaining(row, now) : undefined
@@ -850,10 +850,10 @@ const styles: Record<string, CSSProperties> = {
     pointerEvents: 'none',
   },
   budgetTargetNear: {
-    backgroundColor: '#f97316',
+    backgroundColor: '#ffba08',
   },
   budgetTargetOver: {
-    backgroundColor: '#ff4545',
+    backgroundColor: '#ff244c',
     boxShadow: '0 0 3px 1px rgba(0,0,0,.85), 0 0 6px 2px rgba(0,0,0,.45)',
   },
   compactFill: {
