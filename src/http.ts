@@ -135,7 +135,8 @@ export function proxyFilePath(): string {
   return dshHomePath('plugins', 'subscriptions', 'proxy.json')
 }
 
-function errorMessage(error: unknown): string {
+/** The message of a thrown value, for warnings and error results. */
+export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 

@@ -372,10 +372,20 @@ interface CodexUsageWindow {
 /** Seconds of the canonical 5-hour session and 7-day weekly windows. */
 const SESSION_WINDOW_SECONDS = 5 * 60 * 60
 const WEEKLY_WINDOW_SECONDS = 7 * 24 * 60 * 60
+/**
+ * Relative tolerance of a window-length match (±5%, both ends included).
+ * The usage window tracker's 5-hour and weekly classification ranges
+ * use it too, through {@link matchesWindow}.
+ */
+const WINDOW_LENGTH_TOLERANCE = 0.05
 
-/** Whether a reported duration approximately matches the expected window length. */
-function matchesWindow(seconds: number, expected: number): boolean {
-  return seconds >= expected * 0.95 && seconds <= expected * 1.05
+/**
+ * Whether a reported duration approximately matches the expected window
+ * length: within ±5%, both ends included. Unit-free (seconds here, ms in the
+ * usage window tracker, which reuses it for classification).
+ */
+export function matchesWindow(value: number, expected: number): boolean {
+  return value >= expected * (1 - WINDOW_LENGTH_TOLERANCE) && value <= expected * (1 + WINDOW_LENGTH_TOLERANCE)
 }
 
 /**

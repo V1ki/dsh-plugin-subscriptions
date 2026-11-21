@@ -1,5 +1,4 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
-import type { CSSProperties } from 'react'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import type { AccountPreferences, PromptCacheTtlSetting, ProviderPreferences } from '../provider-settings.js'
 import type { SubscriptionProvider } from './SubscriptionsSection.js'
@@ -10,7 +9,7 @@ import type { AccountCatalogRow } from './account-preferences.js'
 import { ProviderModelEditor } from './ProviderModelEditor.js'
 import type { ProviderModelEditorHandle } from './ProviderModelEditor.js'
 import { notifyDisplayNameChange } from './display-name-events.js'
-import { providerSettingsCss } from './provider-settings-styles.js'
+import { dialogLayout, providerSettingsCss } from './provider-settings-styles.js'
 import { SubscriptionTabs } from './SubscriptionTabs.js'
 import { SettingHelp } from './SettingHelp.js'
 import { CODEX_DEFAULT_MAX_TOKENS } from '../codex-budget-defaults.js'
@@ -31,9 +30,7 @@ interface Props {
   t: (key: SubscriptionsKey, params?: Record<string, unknown>) => string
   onClose: () => void
 }
-const border = '0.5px solid var(--dsw-alias-border-l2)'
-const stack: CSSProperties = { display: 'grid', gap: 12, minWidth: 0 }
-const actions: CSSProperties = { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }
+const { border, stack, actions } = dialogLayout
 
 /** Native top-layer dialog provides keyboard containment, Escape and focus restoration. */
 export function ProviderAccountManager({ provider, name, accountsVersion, rpc, t, onClose }: Props) {
