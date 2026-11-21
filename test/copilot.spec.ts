@@ -9,14 +9,16 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { MessageId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { LlmError, MessageId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '../src/compat.js'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import {
   completeCopilotLogin,
+  COPILOT_API_URL,
   COPILOT_MODELS_URL,
   COPILOT_RESPONSES_URL,
   COPILOT_TOKEN_URL,
+  COPILOT_UNKNOWN_TOOL_OUTCOME,
   CopilotAdapter,
   CopilotResponsesItemNormalizer,
   copilotChatRequestBody,
@@ -29,8 +31,11 @@ import {
   isCopilotPermanentRefreshError,
   latestVsCodeVersion,
   refreshCopilot,
+  sanitizeCopilotChatMessages,
+  sanitizeCopilotResponsesInput,
   VSCODE_RELEASES_URL,
 } from '../src/providers/copilot.js'
+import { toChatMessages } from '../src/translate/chat-completions.js'
 import { OAuthEndpointError, validateModels } from '../src/providers/common.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
 import type { DiscoveredModel, FetchFn, ModelEntry } from '../src/providers/common.js'
@@ -1223,6 +1228,522 @@ test('hand-built requests anchor replay on the first message id', async () => {
       inputOf(calls, 2).some(item => item.type === 'reasoning'),
       false,
       'a different first message is a different conversation scope',
+    )
+  } finally {
+    restore()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Issue #224: Copilot request-body sanitization, tool-call reconciliation,
+// adjacency regrouping, ID normalization, vision header & error diagnostics.
+// ---------------------------------------------------------------------------
+
+/** Encode chat-completions SSE frames as one stream body. */
+function chatSseBody(text = 'ok'): string {
+  const frames = [
+    { choices: [{ index: 0, delta: { role: 'assistant', content: text } }] },
+    { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+    { choices: [], usage: { prompt_tokens: 10, completion_tokens: 2 } },
+  ]
+  return frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join('') + 'data: [DONE]\n\n'
+}
+
+/** Global fetch stub that captures URL, headers, and parsed JSON body per call. */
+function recordingHeaderFetch(
+  queued: Array<{ body: string; status?: number; headers?: Record<string, string> }>,
+): {
+  calls: { url: string; headers: Record<string, string>; body: Record<string, unknown> }[]
+  restore(): void
+} {
+  const original = globalThis.fetch
+  const calls: { url: string; headers: Record<string, string>; body: Record<string, unknown> }[] = []
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    if (url === VSCODE_RELEASES_URL) {
+      return Promise.resolve(new Response(JSON.stringify(['1.9.9']), { status: 200 }))
+    }
+    const headers: Record<string, string> = {}
+    new Headers(init?.headers).forEach((value, key) => { headers[key.toLowerCase()] = value })
+    calls.push({ url, headers, body: JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown> })
+    const next = queued.shift()
+    if (next === undefined) return Promise.reject(new Error(`unexpected fetch to ${url}`))
+    return Promise.resolve(new Response(next.body, {
+      status: next.status ?? 200,
+      ...next.headers === undefined ? {} : { headers: next.headers },
+    }))
+  }) as typeof globalThis.fetch
+  return { calls, restore: () => { globalThis.fetch = original } }
+}
+
+test('sanitizeCopilotChatMessages preserves already-valid histories byte-identically', () => {
+  const valid: Record<string, unknown>[] = [
+    { role: 'system', content: 'be concise' },
+    { role: 'user', content: 'list files' },
+    {
+      role: 'assistant',
+      content: '',
+      tool_calls: [{ id: 'call_abc-123', type: 'function', function: { name: 'bash', arguments: '{"cmd":"ls"}' } }],
+    },
+    { role: 'tool', tool_call_id: 'call_abc-123', content: 'file-a' },
+    { role: 'assistant', content: 'Found file-a.' },
+  ]
+  const snapshot = structuredClone(valid)
+  const sanitized = sanitizeCopilotChatMessages(valid)
+  assert.deepEqual(sanitized, snapshot)
+  assert.deepEqual(valid, snapshot, 'input history must not be mutated')
+})
+
+test('sanitizeCopilotChatMessages regroups spliced context injections after contiguous tool results', () => {
+  const messages = toChatMessages([
+    { role: 'user', content: [{ type: 'text', text: 'check repo' }] },
+    {
+      role: 'assistant',
+      content: [
+        { type: 'tool-call', id: ToolCallId('call-1'), name: 'read', arguments: '{"path":"a"}' },
+        { type: 'tool-call', id: ToolCallId('call-2'), name: 'read', arguments: '{"path":"b"}' },
+      ],
+    },
+    { role: 'tool', toolCallId: 'call-1', content: [{ type: 'text', text: 'contents-a' }] },
+    { role: 'user', content: [{ type: 'text', text: 'Context injection goal' }] },
+    { role: 'user', content: [{ type: 'text', text: 'Context injection model-selection gemini-4-hydrogen → claude-sonnet-5.5' }] },
+    { role: 'tool', toolCallId: 'call-2', content: [{ type: 'text', text: 'contents-b' }] },
+    // Legacy user message mixing text before tool-result.
+    {
+      role: 'assistant',
+      content: [{ type: 'tool-call', id: ToolCallId('call-3'), name: 'bash', arguments: '{}' }],
+    },
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: 'spliced notice before legacy tool result' },
+        { type: 'tool-result', toolCallId: ToolCallId('call-3'), content: [{ type: 'text', text: 'ok' }] },
+      ],
+    },
+  ])
+  const sanitized = sanitizeCopilotChatMessages(messages)
+  assert.deepEqual(
+    sanitized.map(entry => `${String(entry.role)}${entry.tool_call_id ? `:${String(entry.tool_call_id)}` : ''}`),
+    [
+      'user',
+      'assistant',
+      'tool:call-1',
+      'tool:call-2',
+      'user',
+      'user',
+      'assistant',
+      'tool:call-3',
+      'user',
+    ],
+  )
+  assert.equal(sanitized[4]?.content, 'Context injection goal')
+  assert.equal(sanitized[5]?.content, 'Context injection model-selection gemini-4-hydrogen → claude-sonnet-5.5')
+  assert.equal(sanitized[8]?.content, 'spliced notice before legacy tool result')
+})
+
+test('sanitizeCopilotChatMessages reconciles missing tool outputs and drops orphans/duplicates', () => {
+  const raw: Record<string, unknown>[] = [
+    { role: 'tool', tool_call_id: 'leading-orphan', content: 'stale' },
+    { role: 'user', content: 'start' },
+    {
+      role: 'assistant',
+      content: '',
+      tool_calls: [
+        { id: 'call-ok', type: 'function', function: { name: 'a', arguments: '{}' } },
+        { id: 'call-missing', type: 'function', function: { name: 'b', arguments: '{}' } },
+      ],
+    },
+    { role: 'tool', tool_call_id: 'call-ok', content: 'first' },
+    { role: 'tool', tool_call_id: 'call-ok', content: 'duplicate' },
+    { role: 'tool', tool_call_id: 'mid-orphan', content: 'wrong-id' },
+    { role: 'user', content: 'continue' },
+    { role: 'assistant', content: 'done' },
+    { role: 'tool', tool_call_id: 'trailing-orphan', content: 'stray' },
+  ]
+  const sanitized = sanitizeCopilotChatMessages(raw)
+  assert.deepEqual(sanitized, [
+    { role: 'user', content: 'start' },
+    {
+      role: 'assistant',
+      content: '',
+      tool_calls: [
+        { id: 'call-ok', type: 'function', function: { name: 'a', arguments: '{}' } },
+        { id: 'call-missing', type: 'function', function: { name: 'b', arguments: '{}' } },
+      ],
+    },
+    { role: 'tool', tool_call_id: 'call-ok', content: 'first' },
+    { role: 'tool', tool_call_id: 'call-missing', content: COPILOT_UNKNOWN_TOOL_OUTCOME },
+    { role: 'user', content: 'continue' },
+    { role: 'assistant', content: 'done' },
+  ])
+})
+
+test('sanitizeCopilotChatMessages normalizes empty/malformed tool arguments to JSON objects', () => {
+  const raw: Record<string, unknown>[] = [
+    {
+      role: 'assistant',
+      content: '',
+      tool_calls: [
+        { id: 'c1', type: 'function', function: { name: 'ok', arguments: '{"a": 1}' } },
+        { id: 'c2', type: 'function', function: { name: 'empty', arguments: '' } },
+        { id: 'c3', type: 'function', function: { name: 'ws', arguments: '   ' } },
+        { id: 'c4', type: 'function', function: { name: 'bad', arguments: '{not json' } },
+        { id: 'c5', type: 'function', function: { name: 'arr', arguments: '[1,2]' } },
+        { id: 'c6', type: 'function', function: { name: 'prim', arguments: '"hello"' } },
+      ],
+    },
+    ...['c1', 'c2', 'c3', 'c4', 'c5', 'c6'].map(id => ({ role: 'tool', tool_call_id: id, content: 'ok' })),
+  ]
+  const sanitized = sanitizeCopilotChatMessages(raw)
+  const calls = sanitized[0]?.tool_calls as { function: { arguments: string } }[]
+  assert.deepEqual(
+    calls.map(call => call.function.arguments),
+    ['{"a": 1}', '{}', '{}', '{}', '{}', '{}'],
+  )
+})
+
+test('sanitizeCopilotChatMessages normalizes call IDs collision-safely and prefix-stably (<=40 chars)', () => {
+  const overlongA = `call_${'x'.repeat(50)}-a`
+  const overlongB = `call_${'x'.repeat(50)}-b`
+  const ids = ['call.a', 'call:a', 'call_a', '', '.', ':', '_', overlongA, overlongB]
+  const raw: Record<string, unknown>[] = [
+    {
+      role: 'assistant',
+      content: '',
+      tool_calls: ids.map((id, i) => ({
+        id,
+        type: 'function',
+        function: { name: `tool_${String(i)}`, arguments: '{}' },
+      })),
+    },
+    ...ids.map((id, i) => ({ role: 'tool', tool_call_id: id, content: `res-${String(i)}` })),
+  ]
+  const first = sanitizeCopilotChatMessages(raw)
+  const wireIds = (first[0]?.tool_calls as { id: string }[]).map(call => call.id)
+  const resultIds = first.slice(1).map(msg => String(msg.tool_call_id))
+
+  assert.deepEqual(resultIds, wireIds, 'every tool result stays paired with its call')
+  assert.equal(new Set(wireIds).size, ids.length, 'all distinct original IDs map to distinct wire IDs')
+  for (const id of wireIds) {
+    assert.ok(id.length > 0 && id.length <= 40, `length out of bounds: ${id}`)
+    assert.match(id, /^[a-zA-Z0-9_-]+$/)
+  }
+  assert.equal(wireIds[2], 'call_a', 'valid IDs stay verbatim')
+  assert.equal(wireIds[6], '_', 'valid IDs stay verbatim')
+
+  // Prefix stability: appending a turn whose valid original ID collides with
+  // an earlier generated wire ID keeps the earlier assignment intact and
+  // remaps only the newcomer.
+  const collidingValid = wireIds[0]!
+  const extended = sanitizeCopilotChatMessages([
+    ...raw,
+    {
+      role: 'assistant',
+      content: '',
+      tool_calls: [{ id: collidingValid, type: 'function', function: { name: 'late', arguments: '{}' } }],
+    },
+    { role: 'tool', tool_call_id: collidingValid, content: 'late-res' },
+  ])
+  const earlierCalls = (extended[0]?.tool_calls as { id: string }[]).map(call => call.id)
+  assert.deepEqual(earlierCalls, wireIds, 'earlier prefix assignments never change')
+  const lateAssistant = extended[1 + ids.length]
+  const lateCallId = ((lateAssistant?.tool_calls as { id: string }[])[0])?.id
+  const lateResultId = String(extended[2 + ids.length]?.tool_call_id)
+  assert.notEqual(lateCallId, collidingValid, 'newcomer colliding with earlier generated ID is remapped')
+  assert.equal(lateResultId, lateCallId, 'newcomer call and result stay paired')
+})
+
+test('sanitizeCopilotChatMessages drops empty-text messages, cleans multipart text, and maps developer to user', () => {
+  const raw: Record<string, unknown>[] = [
+    { role: 'user', content: '' },
+    { role: 'user', content: '   \n\t ' },
+    { role: 'user', content: [{ type: 'text', text: '' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,aGk=' } }] },
+    { role: 'assistant', content: '' },
+    { role: 'assistant', content: '   ' },
+    { role: 'developer', content: 'Tool inventory changed.' },
+    { role: 'developer', content: '   ' },
+    { role: 'assistant', content: 'real answer' },
+  ]
+  const sanitized = sanitizeCopilotChatMessages(raw)
+  assert.deepEqual(sanitized, [
+    { role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,aGk=' } }] },
+    { role: 'user', content: 'Tool inventory changed.' },
+    { role: 'assistant', content: 'real answer' },
+  ])
+})
+
+test('sanitizeCopilotResponsesInput reconciles orphaned tool calls and normalizes call_ids (<=64 chars)', () => {
+  const overlong = `call_${'z'.repeat(70)}`
+  const body = copilotResponsesRequestBody(
+    { ...BODY_OPTIONS, model: 'gpt-5.6-sol' },
+    {
+      input: [
+        { type: 'function_call', call_id: 'call.missing', name: 'lookup', arguments: '{}' },
+        { type: 'function_call_output', call_id: 'call-orphan', output: 'stale' },
+        { type: 'function_call', call_id: overlong, name: 'read', arguments: '{}' },
+        { type: 'function_call_output', call_id: overlong, output: 'done' },
+        { type: 'function_call_output', call_id: overlong, output: 'dup' },
+      ],
+    },
+  )
+  const input = body.input as Record<string, unknown>[]
+  assert.equal(input.length, 4)
+  assert.equal(input[0]?.type, 'function_call')
+  assert.equal(input[1]?.type, 'function_call_output')
+  assert.equal(input[1]?.call_id, input[0]?.call_id)
+  assert.equal(input[1]?.output, COPILOT_UNKNOWN_TOOL_OUTCOME)
+  assert.equal(input[2]?.type, 'function_call')
+  assert.equal(input[3]?.type, 'function_call_output')
+  assert.equal(input[3]?.call_id, input[2]?.call_id)
+  assert.equal(input[3]?.output, 'done')
+  for (const item of input) {
+    const id = String(item.call_id)
+    assert.ok(id.length > 0 && id.length <= 64)
+    assert.match(id, /^[a-zA-Z0-9_-]+$/)
+  }
+  assert.notEqual(input[0]?.call_id, input[2]?.call_id)
+  assert.equal(sanitizeCopilotResponsesInput([]).length, 0)
+})
+
+test('CopilotAdapter.stream (/chat/completions) sanitizes Codex→Copilot switched sessions for gemini-4-hydrogen and claude-sonnet-5.5', async () => {
+  const discovery: FetchFn = ((input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url === VSCODE_RELEASES_URL) return Promise.resolve(new Response(JSON.stringify(['1.9.9'])))
+    if (url === COPILOT_MODELS_URL) {
+      return Promise.resolve(new Response(JSON.stringify({
+        data: [
+          {
+            id: 'gemini-4-hydrogen',
+            name: 'Gemini 4 Hydrogen',
+            model_picker_enabled: true,
+            policy: { state: 'enabled' },
+            supported_endpoints: ['/chat/completions'],
+            capabilities: {
+              supports: { vision: true, tool_calls: true },
+              limits: { max_context_window_tokens: 1_000_000, max_output_tokens: 8_192 },
+            },
+          },
+          {
+            id: 'claude-sonnet-5.5',
+            name: 'Claude Sonnet 5.5',
+            model_picker_enabled: true,
+            policy: { state: 'enabled' },
+            supported_endpoints: ['/chat/completions'],
+            capabilities: {
+              supports: { vision: true, tool_calls: true },
+              limits: { max_context_window_tokens: 200_000, max_output_tokens: 16_384 },
+            },
+          },
+        ],
+      })))
+    }
+    return Promise.reject(new Error(`unexpected discovery fetch to ${url}`))
+  }) as FetchFn
+
+  const longCodexId = `call_${'a'.repeat(48)}`
+  const history: GenerateOptions['messages'] = [
+    {
+      id: MessageId('m-u1'),
+      role: 'user',
+      content: [{ type: 'text', text: 'inspect the project' }],
+      source: { kind: 'user' },
+    },
+    {
+      id: MessageId('m-a1'),
+      role: 'assistant',
+      content: [
+        { type: 'reasoning', text: 'codex reasoning' },
+        { type: 'tool-call', id: ToolCallId(longCodexId), name: 'read', arguments: '' },
+        { type: 'tool-call', id: ToolCallId('call.orphan:missing'), name: 'search', arguments: '{broken' },
+      ],
+      source: { kind: 'model', provider: 'codex', model: 'gpt-5.6-sol' },
+    },
+    {
+      id: MessageId('m-t1'),
+      role: 'tool',
+      toolCallId: ToolCallId(longCodexId),
+      content: [{ type: 'text', text: 'README contents' }],
+      source: { kind: 'tool', callId: ToolCallId(longCodexId) },
+    },
+    // Spliced context injections during model switch.
+    {
+      id: MessageId('m-ctx1'),
+      role: 'user',
+      content: [{ type: 'text', text: 'Context injection goal' }],
+      source: { kind: 'user' },
+    },
+    {
+      id: MessageId('m-ctx2'),
+      role: 'user',
+      content: [{ type: 'text', text: 'Context injection model-selection gemini-4-hydrogen → claude-sonnet-5.5' }],
+      source: { kind: 'user' },
+    },
+    // PR #207 explicit silent assistant text block from Codex Responses.
+    {
+      id: MessageId('m-a2'),
+      role: 'assistant',
+      content: [{ type: 'text', text: '' }],
+      source: { kind: 'model', provider: 'codex', model: 'gpt-5.6-sol' },
+    },
+    {
+      id: MessageId('m-u2'),
+      role: 'user',
+      content: [{ type: 'text', text: 'now summarize' }],
+      source: { kind: 'user' },
+    },
+  ]
+  const historyBefore = structuredClone(history)
+  const tools = [
+    {
+      name: 'read',
+      description: 'read file',
+      parameters: { $schema: 'https://json-schema.org/draft/2020-12/schema', type: 'object', properties: { path: { type: 'string' } } },
+    },
+    { name: 'ping', description: 'ping', parameters: {} },
+  ]
+
+  const { calls, restore } = recordingHeaderFetch([
+    { body: chatSseBody('gemini ok') },
+    { body: chatSseBody('claude ok') },
+  ])
+  try {
+    const adapter = new CopilotAdapter({
+      models: [],
+      streamIdleTimeoutMs: 1000,
+      tokens: memoryTokens(copilotSession),
+      discovery: true,
+      fetchFn: discovery,
+    })
+
+    for (const [callIndex, model, expectedCap] of [
+      [0, 'gemini-4-hydrogen', 8_192],
+      [1, 'claude-sonnet-5.5', 16_384],
+    ] as const) {
+      const texts: string[] = []
+      for await (const chunk of adapter.stream({
+        provider: 'copilot',
+        model,
+        messages: history,
+        tools,
+        maxTokens: 32_000,
+      })) {
+        if (chunk.type === 'text-delta') texts.push(chunk.text)
+      }
+      assert.ok(texts.join('').includes('ok'))
+      const sent = calls[callIndex]!
+      assert.equal(sent.url, COPILOT_API_URL)
+      assert.equal(sent.body.model, model)
+      assert.equal(sent.body.max_completion_tokens, expectedCap, `${model} clamps max_completion_tokens to catalog cap`)
+
+      const sentMessages = sent.body.messages as Record<string, unknown>[]
+      assert.deepEqual(
+        sentMessages.map(m => m.role),
+        ['user', 'assistant', 'tool', 'tool', 'user', 'user', 'user'],
+        'tool results are adjacent to assistant tool_calls, spliced context follows, and empty assistant turn is dropped',
+      )
+      const assistantCalls = sentMessages[1]?.tool_calls as { id: string; function: { arguments: string } }[]
+      assert.equal(assistantCalls.length, 2)
+      for (const tc of assistantCalls) {
+        assert.ok(tc.id.length > 0 && tc.id.length <= 40)
+        assert.match(tc.id, /^[a-zA-Z0-9_-]+$/)
+        assert.equal(tc.function.arguments, '{}')
+      }
+      assert.equal(sentMessages[2]?.tool_call_id, assistantCalls[0]?.id)
+      assert.equal(sentMessages[2]?.content, 'README contents')
+      assert.equal(sentMessages[3]?.tool_call_id, assistantCalls[1]?.id)
+      assert.equal(sentMessages[3]?.content, COPILOT_UNKNOWN_TOOL_OUTCOME)
+
+      const sentTools = sent.body.tools as { function: { parameters: Record<string, unknown> } }[]
+      assert.equal('$schema' in sentTools[0]!.function.parameters, false)
+      assert.equal(sentTools[1]!.function.parameters.type, 'object')
+    }
+    assert.deepEqual(history, historyBefore, 'durable history must remain completely untouched')
+  } finally {
+    restore()
+  }
+})
+
+test('CopilotAdapter.stream sets copilot-vision-request header for images nested inside legacy tool-result blocks', async () => {
+  const ref = { attachmentId: 'img-nested', mediaType: 'image/png', bytes: 2, width: 1, height: 1 }
+  const { calls, restore } = recordingHeaderFetch([{ body: chatSseBody('saw image') }])
+  try {
+    const adapter = new CopilotAdapter({
+      models: [{ id: 'gemini-4-hydrogen' }],
+      streamIdleTimeoutMs: 1000,
+      tokens: memoryTokens(copilotSession),
+      discovery: false,
+      resolveAttachments: () => ({
+        readImage: async () => ({ ref, data: new Uint8Array([104, 105]) }),
+      }) as never,
+    })
+    for await (const chunk of adapter.stream({
+      provider: 'copilot',
+      model: 'gemini-4-hydrogen',
+      messages: [
+        {
+          id: MessageId('m-a'),
+          role: 'assistant',
+          content: [{ type: 'tool-call', id: ToolCallId('call-img'), name: 'read_image', arguments: '{}' }],
+          source: { kind: 'model', provider: 'codex', model: 'gpt-5.6-sol' },
+        },
+        {
+          id: MessageId('m-tr'),
+          role: 'user',
+          content: [{
+            type: 'tool-result',
+            toolCallId: ToolCallId('call-img'),
+            content: [{ type: 'image', attachment: ref }],
+          }] as never,
+          source: { kind: 'tool', callId: ToolCallId('call-img') },
+        },
+      ],
+    })) {
+      void chunk
+    }
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0]?.headers['copilot-vision-request'], 'true')
+  } finally {
+    restore()
+  }
+})
+
+test('CopilotAdapter.stream includes x-github-request-id on HTTP errors for diagnostics', async () => {
+  const { restore } = recordingHeaderFetch([
+    {
+      status: 400,
+      headers: { 'x-github-request-id': 'GH-REQ-4242' },
+      body: '{"error":{"message":"invalid request body","code":"invalid_request_body"}}',
+    },
+    {
+      status: 400,
+      body: '{"error":{"message":"invalid request body","code":"invalid_request_body"}}',
+    },
+  ])
+  try {
+    const adapter = new CopilotAdapter({
+      models: [{ id: 'gemini-4-hydrogen' }],
+      streamIdleTimeoutMs: 1000,
+      tokens: memoryTokens(copilotSession),
+      discovery: false,
+    })
+    await assert.rejects(
+      async () => {
+        for await (const chunk of adapter.stream({ ...STREAM_OPTIONS, model: 'gemini-4-hydrogen' })) void chunk
+      },
+      (error: unknown) => error instanceof LlmError
+        && error.code === 'HTTP_400'
+        && error.failure.requestId === 'GH-REQ-4242'
+        && error.message.includes('x-github-request-id: GH-REQ-4242')
+        && error.message.includes('invalid_request_body'),
+    )
+    await assert.rejects(
+      async () => {
+        for await (const chunk of adapter.stream({ ...STREAM_OPTIONS, model: 'gemini-4-hydrogen' })) void chunk
+      },
+      (error: unknown) => error instanceof LlmError
+        && error.code === 'HTTP_400'
+        && error.failure.requestId === undefined
+        && !error.message.includes('x-github-request-id'),
     )
   } finally {
     restore()

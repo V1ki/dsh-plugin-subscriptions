@@ -15,6 +15,7 @@ import {
   QUOTA_EXCEEDED_CODE,
   ReasoningEffortId,
 } from '@deepseek-ai/dsh-llm'
+import type { ProviderRequestId } from '@deepseek-ai/dsh-llm'
 import { durationMs, rateLimitDiagnostics, retryAfterInstant, waitFromReset } from './rate-limit.js'
 import type { RateLimitResetReader } from './rate-limit.js'
 
@@ -107,7 +108,7 @@ export function llmErrorFromFailure(failure: LlmError['failure'], options?: Erro
  */
 export const ACCOUNT_SUSPENDED_CODE = 'ACCOUNT_SUSPENDED' as ConstructorParameters<typeof LlmError>[1]
 
-/** Optional per-call hooks {@link httpLlmError} uses to read a rate-limit window. */
+/** Optional per-call hooks {@link httpLlmError} uses to read a rate-limit window or diagnostic headers. */
 export interface HttpLlmErrorOptions {
   /**
    * The calling provider's reader for the instant its rate-limit window
@@ -118,6 +119,13 @@ export interface HttpLlmErrorOptions {
   rateLimitReset?: RateLimitResetReader
   /** Diagnostic sink for a 429 that disclosed no reset instant this code recognizes. */
   onWarn?: (message: string) => void
+  /**
+   * Non-secret response header carrying a provider-issued request id (e.g.
+   * `x-github-request-id` for Copilot). When present and non-empty, attached
+   * to `LlmError.failure.requestId` and included in the error message for
+   * diagnostics.
+   */
+  requestIdHeader?: string
 }
 
 /**
@@ -167,9 +175,16 @@ export async function httpLlmError(
   }
   // Truncated for display only; the readers below need the whole body to parse it.
   const shown = body.slice(0, 500)
+  const rawRequestId = options.requestIdHeader === undefined
+    ? undefined
+    : response.headers.get(options.requestIdHeader)?.trim()
+  const requestId = rawRequestId !== undefined && rawRequestId.length > 0 ? rawRequestId : undefined
+  const requestTag = requestId === undefined || options.requestIdHeader === undefined
+    ? ''
+    : ` [${options.requestIdHeader}: ${requestId}]`
   const message = shown.length > 0
-    ? `${label} error (HTTP ${String(response.status)}): ${shown}`
-    : `${label} error (HTTP ${String(response.status)})`
+    ? `${label} error (HTTP ${String(response.status)})${requestTag}: ${shown}`
+    : `${label} error (HTTP ${String(response.status)})${requestTag}`
   let code: ConstructorParameters<typeof LlmError>[1]
   // A 403 covers two unrelated failures: a credential this route will not
   // accept, and an account Google has permanently disabled. Only the former is
@@ -207,6 +222,7 @@ export async function httpLlmError(
   return new LlmError(message, code, {
     status: response.status,
     ...reset === undefined ? {} : { providerRetryAfterMs: waitFromReset(reset, now) },
+    ...requestId === undefined ? {} : { requestId: requestId as ProviderRequestId },
   })
 }
 
