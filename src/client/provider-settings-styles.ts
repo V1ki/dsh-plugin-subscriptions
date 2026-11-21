@@ -1,9 +1,17 @@
+import type { CSSProperties } from 'react'
+
 /**
  * The host loads one JS client bundle, so keep this small, scoped stylesheet
  * with the dialog instead of relying on a separate CSS asset. Geometry and
  * theme tokens follow the host's settings-form and ui-primitives controls.
  */
 const formScope = ':is(.dsh-subscription-manager, .dsh-subscriptions-settings)'
+
+export const dialogLayout = {
+  border: '0.5px solid var(--dsw-alias-border-l2)',
+  stack: { display: 'grid', gap: 12, minWidth: 0 },
+  actions: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' },
+} satisfies { border: string, stack: CSSProperties, actions: CSSProperties }
 
 export const providerSettingsCss = `
 .dsh-subscription-manager {

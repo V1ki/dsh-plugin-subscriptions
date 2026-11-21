@@ -5,7 +5,7 @@ import type { ProviderSettingsStore, AccountPreferences } from '../provider-sett
 import type { AccountAwareAdapter } from './accounts.js'
 import { DISCOVERY_TIMEOUT_MS, withAbortSignal, withTimeout } from './common.js'
 import type { PoolAdapter } from './pool.js'
-import { streamAccountWithReplay } from './replay.js'
+import { streamAccountWithReplay, type RequestEndObserver } from './replay.js'
 
 /** Reserved namespace, recognized even when malformed or no longer enabled. */
 export const ACCOUNT_MODEL_PREFIX = '~account:'
@@ -34,6 +34,8 @@ interface Options {
   pool: () => PoolAdapter | undefined
   /** Per-account discovery bound (defaults to {@link DISCOVERY_TIMEOUT_MS}; tests shorten it). */
   discoveryTimeoutMs?: number
+  /** Usage tracking: told about every request this route serves on one account (pool requests report through the pool). */
+  onRequestEnd?: RequestEndObserver
 }
 
 /** Keeps the registered route separate from raw adapters and pool member seams. */
@@ -147,7 +149,7 @@ export class AccountPreferencesAdapter extends LlmAdapter {
         // Keep the capability-bearing account; revoked permission must fail instead of rerouting.
         await owner.requireAccount(account, model, independent !== undefined, options.signal)
         options.signal?.throwIfAborted()
-        yield* streamAccountWithReplay(owner.options.adapter, options, account, model)
+        yield* streamAccountWithReplay(owner.options.adapter, options, account, model, owner.options.onRequestEnd)
       },
     }
   }
@@ -160,7 +162,7 @@ export class AccountPreferencesAdapter extends LlmAdapter {
     if (independent) {
       await this.requireAccount(independent.account, independent.model, true, options.signal)
       options.signal?.throwIfAborted()
-      yield* streamAccountWithReplay(this.options.adapter, options, independent.account, independent.model)
+      yield* streamAccountWithReplay(this.options.adapter, options, independent.account, independent.model, this.options.onRequestEnd)
       return
     }
     const pool = this.options.pool()
@@ -170,6 +172,6 @@ export class AccountPreferencesAdapter extends LlmAdapter {
     }
     const account = await this.fallback(options.model, options.signal)
     options.signal?.throwIfAborted()
-    yield* streamAccountWithReplay(this.options.adapter, options, account)
+    yield* streamAccountWithReplay(this.options.adapter, options, account, options.model, this.options.onRequestEnd)
   }
 }

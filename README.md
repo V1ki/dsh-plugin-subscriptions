@@ -70,6 +70,12 @@ The `video_generate` tool plays the generated clip inline:
 
 ![video_generate plays the clip inline](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/video-generate-inline.png)
 
+## Token usage history
+
+Open **Settings → Subscriptions**, select a provider tab, then click **Usage** next to an account. If no account is signed in, the provider's **Usage** button still opens any saved history. The dialog shows reported input, output, cache-read and cache-write tokens by model and by UTC date within the selected quota window. Reasoning tokens, when reported, are part of output. Before the provider reports a quota window, the dialog shows a pending window. Quota windows can overlap, so do not add their totals together. Copilot is not tracked.
+
+The plugin saves aggregate counts and window metadata locally under `~/.dsh/plugins/subscriptions/usage/`; it does not store prompts, credentials, or per-request logs there. If DSH session history is available, the dialog can also show a separate provider-wide total from before per-account tracking began. **Clear history** removes this plugin's usage history for the selected provider, not DSH sessions, accounts, or live quota. This view does not make an extra quota request or estimate cost.
+
 ## Providers
 
 | Route    | Subscription      | Models |

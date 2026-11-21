@@ -22,6 +22,7 @@ import { resetActionBlock } from './reset-action.js'
 import { AntigravityQuotaSummary } from './AntigravityQuotaSummary.js'
 import { antigravityQuotaScope } from '../antigravity-model-id.js'
 import { visibleUsageWindows } from './usage-window-filter.js'
+import { AccountUsageDialog } from './AccountUsageDialog.js'
 import { ProviderAccountManager } from './ProviderAccountManager.js'
 import { ProviderActionIcon } from './ProviderActionIcon.js'
 import { ProviderRefreshButton } from './ProviderRefreshButton.js'
@@ -45,6 +46,7 @@ const MODEL_FILTER_THRESHOLD = 8
 
 /** Subscription provider ids, fixed by the node half's OAuth adapters. */
 export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity'
+export type UsageProvider = Exclude<SubscriptionProvider, 'copilot'>
 
 /** One logged-in account as answered by the `status` endpoint. */
 export interface AccountStatus {
@@ -543,6 +545,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [proxyLoadError, setProxyLoadError] = useState<string | undefined>(undefined)
   /** Proxy dialog state (draft fields; the password never pre-fills). */
   const [proxyOpen, setProxyOpen] = useState(false)
+  const [usageDialog, setUsageDialog] = useState<{ id: UsageProvider, name: string, account?: string }>()
   const [managedProvider, setManagedProvider] = useState<{ id: SubscriptionProvider; name: string }>()
   const [proxyEnabled, setProxyEnabled] = useState(false)
   const [proxyUrl, setProxyUrl] = useState('')
@@ -966,6 +969,10 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                     </button>
                   </div>
                 )}
+                {!busy && accounts.length === 0 && id !== 'copilot' && <button type="button" aria-haspopup="dialog"
+                  onClick={() => setUsageDialog({ id, name: status?.displayName || name })}>
+                  {t('usageOpen')}
+                </button>}
                 {/* 与同排其它按钮一致：登录/取消进行中不开第二个写配置的弹窗。 */}
                 {!busy && <button type="button" aria-haspopup="dialog"
                   onClick={() => setManagedProvider({ id, name })}>
@@ -1018,6 +1025,10 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                         {t('accountExpires', { date: new Date(account.expiresAt).toLocaleString() })}
                       </span>
                     )}
+                    {!busy && id !== 'copilot' && <button type="button" aria-haspopup="dialog"
+                      onClick={() => setUsageDialog({ id, name: status?.displayName || name, account: account.key })}>
+                      {t('usageOpen')}
+                    </button>}
                     <button
                       type="button"
                       style={{ marginLeft: 'auto', flexShrink: 0 }}
@@ -1174,6 +1185,9 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
         </div>
         <p style={styles.statusLine}>{proxyStatusText(t, proxy, proxyLoadError)}</p>
       </div>
+      {usageDialog && <AccountUsageDialog provider={usageDialog.id} name={usageDialog.name}
+        {...usageDialog.account === undefined ? {} : { account: usageDialog.account }}
+        rpc={rpc} t={t} onClose={() => setUsageDialog(undefined)} />}
       {managedProvider && <ProviderAccountManager provider={managedProvider.id} name={managedProvider.name}
         rpc={rpc} t={t} accountsVersion={JSON.stringify((statuses[managedProvider.id]?.accounts ?? []).map(account => account.key).sort())}
         onClose={() => { setManagedProvider(undefined); void refresh() }} />}
