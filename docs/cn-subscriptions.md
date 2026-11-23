@@ -53,7 +53,9 @@ GLM 的 Coding Plan 没有对第三方开放的 OAuth 应用，但官方 ZCode �
       station: bigmodel   # 国内站（默认）；国际站填 zai
 ```
 
-**思考等级**：GLM-5.3 / GLM-5.3-Flash 强制思考，支持 `reasoning_effort: low | high | max`（默认 max）；请求同时带 `thinking: {type:"enabled"}`，插件会把选中的等级写进 `reasoning_effort`。
+**模型目录**：登录后用套餐 Key 调用 `GET {站点}/api/paas/v4/models` 读取账号当前模型；只保留 `glm-5*` 这一代（过滤掉 4.x 和 `-legal` 专用变体），所以 GLM-5.4 这类新模型不需要等插件发版。端点失败时回退到内置清单（`glm-5.4`、`glm-5.3`、`glm-5.3-flash`）。
+
+**思考等级**：GLM-5.* 强制思考，支持 `reasoning_effort: low | high | max`（默认 max）；请求同时带 `thinking: {type:"enabled"}`，插件会把选中的等级写进 `reasoning_effort`。
 
 **重要边界**
 

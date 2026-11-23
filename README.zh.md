@@ -80,7 +80,7 @@ Antigravity 用量优先读取 `retrieveUserQuotaSummary`，只展示服务端�
 | `copilot` | GitHub Copilot  | 从 `api.githubcopilot.com/models` 实时获取(两种 wire 的对话模型,含按模型的视觉标记与推理等级);登录使用 OAuth 设备码流程(在 `github.com/login/device` 输入页面显示的验证码) |
 | `antigravity` | Google Antigravity | 从 Antigravity `v1internal:fetchAvailableModels` 实时获取;请求使用 `generateContent` / `streamGenerateContent`,支持文本、图片、流式推理与工具调用转换 |
 | `kimi` | Kimi Code(Moonshot) | 从 `api.kimi.com/coding/v1/models` 实时获取;登录走 `auth.kimi.com` 的 OAuth 设备码 |
-| `glm` | 智谱 GLM Coding Plan | 内置 `glm-5.3` / `glm-5.3-flash`;用 ZCode 浏览器授权自动签发套餐 Key。`glm.station` 选 `bigmodel`(国内,默认)或 `zai`(国际) |
+| `glm` | 智谱 GLM Coding Plan | 从 `{站点}/api/paas/v4/models` 实时获取(GLM-5.4、GLM-5.3-FlashX 等),失败时用内置清单兜底;用 ZCode 浏览器授权自动签发套餐 Key。`glm.station` 选 `bigmodel`(国内,默认)或 `zai`(国际) |
 | `qwen` | Qwen 千问AI平台(Token Plan / 按量计费) | 内置文档模型清单(平台没有 `GET /models`);在 `platform.qianwenai.com/home/api-keys` 生成 Key 后粘贴,`sk-sp-` 走 Token Plan 端点,`sk-ws-`/`sk-` 走按量计费。**不是**阿里云百炼 Coding Plan |
 
 Kimi 和 GLM 用浏览器登录,不需要粘贴 Key:Kimi 使用官方 CLI 的公开 OAuth 设备码(界面显示验证码),GLM 走官方 ZCode 授权链路并自动签发账号的 `zcode-api-key`。Qwen 千问AI平台的模型调用没有 OAuth,卡片里粘贴一次平台 API Key(不写入插件配置),插件按 Key 产品类型自动选择端点;卡片上再点一次“登录查询额度”即可开启额度显示。凭据与其它路由共用同一份存储、刷新与多账号逻辑。每条路由也会声明官方文档给出的思考档位(Kimi `reasoning_effort` low/high/max,GLM 强制思考的 low/high/max,Qwen3.8 的 low/medium/xhigh),请求时应用选中档位或设置页里的默认档位。GLM 的授权链路和 Kimi 的客户端身份不属于官方文档承诺的第三方接入方式,可能随服务端调整而变化;端点、拒绝语义、用量来源和 bigmodel 计费注意项见[国内订阅说明](docs/cn-subscriptions.md)。

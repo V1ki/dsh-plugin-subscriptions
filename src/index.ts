@@ -44,6 +44,7 @@ import {
 } from './auth/qwen.js'
 import { isGlmPermanentRefreshError, refreshGlm, startGlmLogin } from './auth/zcode.js'
 import { fetchGlmUsage } from './providers/glm-usage.js'
+import { fetchGlmModels } from './providers/glm-models.js'
 import { fetchKimiUsage } from './providers/kimi-usage.js'
 import { exchangeQwenCliToken, listQwenConsoleModels, startQwenConsoleLogin } from './auth/qwen-console.js'
 import type { QwenConsoleAttempt } from './auth/qwen-console.js'
@@ -359,8 +360,10 @@ const DEFAULT_MODELS: Record<ProviderId, ModelEntry[]> = {
     { id: 'k3.1-pro', name: 'K3.1 Pro', contextWindow: 1_048_576 },
     { id: 'k3.1-pro-highspeed', name: 'K3.1 Pro Highspeed', contextWindow: 1_048_576 },
   ],
-  // Coding Plan models; glm-5.3 is text-only, glm-5.3-flash takes images.
+  // Static fallback; `GET /api/paas/v4/models` replaces it after login.
   glm: [
+    { id: 'glm-5.4', name: 'GLM-5.4', contextWindow: 1_000_000, maxTokens: 128_000,
+      inputModalities: ['text', 'image'] },
     { id: 'glm-5.3', name: 'GLM-5.3', contextWindow: 1_000_000, maxTokens: 128_000 },
     { id: 'glm-5.3-flash', name: 'GLM-5.3 Flash', contextWindow: 1_000_000, maxTokens: 128_000,
       inputModalities: ['text', 'image'] },
@@ -412,7 +415,7 @@ const GLM_REASONING = [
 
 /** @internal Exported for tests only. */
 export function glmReasoning(model: string): ChatSubscriptionReasoning | undefined {
-  if (model !== 'glm-5.3' && model !== 'glm-5.3-flash') return undefined
+  if (!/^glm-5(?:[.-]|$)/i.test(model) || /-legal$/i.test(model)) return undefined
   return {
     efforts: GLM_REASONING,
     defaultEffort: 'max',
@@ -1465,6 +1468,21 @@ export function apply(ctx: Context, config: Config): void {
               : 'https://open.bigmodel.cn/api/coding/paas/v4/chat/completions',
             replayReasoning: true,
             reasoning: glmReasoning,
+            discover: async (session, fetchFn, signal) => {
+              const known = new Map(catalog.glm.map(entry => [entry.id, entry]))
+              return (await fetchGlmModels(session as GlmSession, fetchFn, signal)).map(id => {
+                const entry = known.get(id)
+                return {
+                  id,
+                  name: entry?.name ?? id,
+                  // New GLM-5 releases share the same 1M/128k coding window;
+                  // vision stays opt-in unless the catalog entry says so.
+                  contextWindow: entry?.contextWindow ?? 1_000_000,
+                  maxTokens: entry?.maxTokens ?? 128_000,
+                  inputModalities: entry?.inputModalities ?? ['text'],
+                }
+              })
+            },
           },
           tokens: tokens as unknown as AccountTokenManager<ChatSubscriptionSession>,
           models: catalog.glm,

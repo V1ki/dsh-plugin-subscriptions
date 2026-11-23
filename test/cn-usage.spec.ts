@@ -15,6 +15,7 @@ import { createFakeConnection } from './fake-connection.js'
 import './keep-alive.js'
 import { fetchKimiUsage } from '../src/providers/kimi-usage.js'
 import { fetchGlmUsage } from '../src/providers/glm-usage.js'
+import { fetchGlmModels } from '../src/providers/glm-models.js'
 import type { GlmSession, KimiSession } from '../src/auth/store.js'
 
 const KIMI_USAGES = 'https://api.kimi.com/coding/v1/usages'
@@ -252,6 +253,14 @@ test('host: a pool-enabled profile reads Kimi/GLM usage instead of reporting uns
     if (url.includes('/customer-package-reset/list')) {
       return json({ code: 200, success: true, data: { fiveHourResets: [], weekResets: [] } })
     }
+    if (url.endsWith('/api/paas/v4/models')) {
+      return json({ data: [
+        { id: 'glm-5.4' },
+        { id: 'glm-5.3-flashx' },
+        { id: 'glm-4.7' },
+        { id: 'glm-5.3-flashx-legal' },
+      ] })
+    }
     if (url.startsWith('https://cli.qianwenai.com/data/v2/api.json')) {
       return json({ code: '200', data: { Data: [{ Models: [
         { Model: 'qwen4-max-preview' },
@@ -283,6 +292,11 @@ test('host: a pool-enabled profile reads Kimi/GLM usage instead of reporting uns
     // the platform shows appear in the picker.
     const qwenModels = await llm.listModels('qwen')
     assert.deepEqual(qwenModels.map(model => model.id), ['qwen4-max-preview', 'qwen3.8-max'])
+    // The account's live list wins over the static fallback: GLM-5.4 and the
+    // FlashX variant appear without a plugin release; glm-4.7 and legal-only
+    // variants stay out.
+    const glmModels = await llm.listModels('glm')
+    assert.deepEqual(glmModels.map(model => model.id), ['glm-5.4', 'glm-5.3-flashx'])
   } finally {
     await runtime.dispose()
     globalThis.fetch = originalFetch
@@ -290,4 +304,20 @@ test('host: a pool-enabled profile reads Kimi/GLM usage instead of reporting uns
     else process.env.DSH_HOME = previousHome
     await rm(home, { recursive: true, force: true })
   }
+})
+
+test('glm models: the account list is filtered to the coding-plan generation', async () => {
+  const { fetchFn } = stubFetch({
+    'https://open.bigmodel.cn/api/paas/v4/models': [{
+      status: 200,
+      body: { data: [
+        { id: 'glm-5.4' },
+        { id: 'glm-5.3-flashx' },
+        { id: 'glm-4.7' },
+        { id: 'glm-5.3-flashx-legal' },
+        { id: 'glm-5.4' },
+      ] },
+    }],
+  })
+  assert.deepEqual(await fetchGlmModels(glmSession, fetchFn), ['glm-5.4', 'glm-5.3-flashx'])
 })

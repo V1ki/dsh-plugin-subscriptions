@@ -423,7 +423,9 @@ test('reasoning configs: the advertised efforts and wire fields match the vendor
     reasoning_effort: 'max',
   })
   assert.equal(glmReasoning('glm-5.3-flash')?.defaultEffort, 'max')
-  assert.equal(glmReasoning('glm-5.2'), undefined)
+  assert.deepEqual(glmReasoning('glm-5.4')?.efforts.map(effort => effort.id), ['low', 'high', 'max'])
+  assert.equal(glmReasoning('glm-5.4')?.defaultEffort, 'max')
+  assert.equal(glmReasoning('glm-4.7'), undefined)
 
   assert.deepEqual(qwenReasoning('qwen3.8-max')?.efforts.map(effort => effort.id), ['low', 'medium', 'xhigh'])
   assert.equal(qwenReasoning('qwen3.8-max')?.defaultEffort, 'xhigh')
