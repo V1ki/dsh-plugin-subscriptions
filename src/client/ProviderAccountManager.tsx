@@ -233,8 +233,8 @@ export function ProviderAccountManager({ provider, name, accountsVersion, rpc, t
           })} />}
         {catalog.accounts.map(account => {
           const preferences = changes[account.key] ?? catalog.settings.accounts?.[account.key] ?? {}
-          const selected = accountPoolSelection(preferences, account.models)
-          const models = accountModelRows(account, preferences).sort((a, b) =>
+          const selected = accountPoolSelection(preferences, account.models, provider)
+          const models = accountModelRows(account, preferences, provider).sort((a, b) =>
             b.name.localeCompare(a.name, undefined, { sensitivity: 'base', numeric: true }) || b.id.localeCompare(a.id))
           return <div key={account.key} role="tabpanel" id={`${tabIdPrefix}-panel-${accountId(account.key)}`}
             aria-labelledby={`${tabIdPrefix}-tab-${accountId(account.key)}`} hidden={activeAccount !== account.key} tabIndex={0}>
@@ -258,7 +258,7 @@ export function ProviderAccountManager({ provider, name, accountsVersion, rpc, t
             <p className="dsh-subscription-hint">{t('accountsIndependentHint')}</p>
             <details>
               <summary style={{ cursor: 'pointer', fontSize: 13 }}>{t('accountsModels')} · {preferences.poolModels === undefined
-                ? t('accountsModelsAll') : t('accountsModelsCount', { count: preferences.poolModels.length })}</summary>
+                ? t('accountsModelsAll') : t('accountsModelsCount', { count: selected.size })}</summary>
               <div style={{ ...stack, marginTop: 12 }}>
                 <p className="dsh-subscription-hint">{t('accountsModelsHint')}</p>
                 <label><input type="checkbox" checked={preferences.poolModels === undefined} onChange={event => {
