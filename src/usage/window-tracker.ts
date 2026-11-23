@@ -85,6 +85,12 @@ export interface WindowUsageEntry {
   endReason?: 'detected' | 'redemption'
   countedFrom: number
   lastAddedAt?: number
+  /** Latest observed provider quota utilization for this window (0–100). */
+  quotaUsedPercent?: number
+  /** Peak observed provider quota utilization during this window (0–100). */
+  quotaPeakPercent?: number
+  /** Epoch ms when `quotaUsedPercent` was observed (used for multi-process freshest-wins reconciliation). */
+  quotaObservedAt?: number
   models: Record<string, TokenCounts>
   /** Actual UTC dates of recorded requests; legacy entries need not have any. */
   days?: Record<string, Record<string, TokenCounts>>
@@ -188,6 +194,14 @@ export interface Reclassification {
   ids: string[]
 }
 
+/** A series' held counts were promoted into a real window entry on reopen. */
+export interface HeldPromotion {
+  provider: TrackedProvider
+  account: string
+  seriesKey: string
+  entryId: string
+}
+
 export interface WindowTrackerOptions {
   /** When tracking started; nothing earlier is counted or anchors a window. */
   trackingStartedAt: number
@@ -202,6 +216,8 @@ export interface WindowTrackerOptions {
   onClose?: (entry: WindowUsageEntry) => void
   /** Called when a series is classified, naming its entries, drained ones included. */
   onReclassify?: (change: Reclassification) => void
+  /** Called when a series' held sum is promoted into a newly opened real entry. */
+  onHeldPromote?: (promotion: HeldPromotion) => void
   /** Rejected counts and callback errors. */
   onWarn?: (message: string) => void
 }
@@ -347,7 +363,10 @@ export class WindowTracker {
         state.snapshotSeen = true
         this.splitPending(state)
       }
-      for (const { window, series } of observed) this.applyReset(state, series, window, at)
+      for (const { window, series } of observed) {
+        this.applyReset(state, series, window, at)
+        this.recordQuotaPercent(series, window, at)
+      }
     })
   }
 
@@ -721,6 +740,19 @@ export class WindowTracker {
     else this.anchor(state, series, start, reset, at)
   }
 
+  /** Record the snapshot's observed quota utilization % (0–100) onto the series' active entry. */
+  private recordQuotaPercent(series: SeriesState, window: UsageWindow, at: number): void {
+    const pct = clampPercent(window.usedPercent)
+    if (pct === undefined) return
+    const target = this.openEntry(series) ?? (!series.anchored ? this.lookup(series.window0) : undefined)
+    if (target === undefined) return
+    if (target.quotaObservedAt === undefined || at >= target.quotaObservedAt) {
+      target.quotaUsedPercent = pct
+      target.quotaObservedAt = at
+    }
+    target.quotaPeakPercent = target.quotaPeakPercent === undefined ? pct : Math.max(target.quotaPeakPercent, pct)
+  }
+
   /** An open entry with a known reset sees `reset`: jitter of the same window, or an early reset. */
   private compareReset(
     state: AccountState, series: SeriesState, open: WindowUsageEntry, knownReset: number, reset: number, start: Start | undefined, at: number,
@@ -756,6 +788,16 @@ export class WindowTracker {
       addModels(entry.models, held.models)
       if (held.days !== undefined) entry.days = structuredClone(held.days)
       entry.lastAddedAt = held.lastAddedAt
+      const notify = this.options.onHeldPromote
+      if (notify !== undefined) {
+        const promotion: HeldPromotion = {
+          provider: state.provider,
+          account: state.account,
+          seriesKey: series.key,
+          entryId: entry.id,
+        }
+        this.notifications.push(() => { notify(promotion) })
+      }
     }
   }
 
@@ -1008,6 +1050,12 @@ function learnReset(open: WindowUsageEntry, reset: number, start: Start | undefi
   open.resetsAt = reset
   open.resetRange = [reset, reset]
   if (start !== undefined && open.startSource === 'previous-reset' && start.startSource !== 'nominal') Object.assign(open, start)
+}
+
+/** Clamp a finite provider percentage to [0, 100]; ignore NaN/Infinity. */
+function clampPercent(value: number | undefined): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined
+  return Math.min(100, Math.max(0, value))
 }
 
 /** Use the disclosed or nominal start; otherwise the series waits for an observed reset. */

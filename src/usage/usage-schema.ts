@@ -7,6 +7,7 @@
  * cannot feed the tracker malformed state.
  */
 import { CACHE_WRITE_SPLIT_PROVIDER, type TrackedProvider } from './constants.js'
+export type { TrackedProvider } from './constants.js'
 import {
   REQUIRED_BUCKETS, SPLIT_BUCKETS, isTrackedProvider,
   type AccountState, type SeriesState, type TokenCounts, type WindowUsageEntry,
@@ -55,6 +56,10 @@ function isInstant(value: unknown): value is number {
 
 function isCount(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0
+}
+
+function isPercent(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100
 }
 
 function oneOf(value: unknown, allowed: readonly string[]): boolean {
@@ -142,6 +147,9 @@ export function sanitizeEntry(provider: TrackedProvider, value: unknown): Window
     ['endedAt', isInstant],
     ['endReason', field => oneOf(field, END_REASONS)],
     ['lastAddedAt', isInstant],
+    ['quotaUsedPercent', isPercent],
+    ['quotaPeakPercent', isPercent],
+    ['quotaObservedAt', isInstant],
   ]
   if (!optional.every(([key, valid]) => copyOptional(entry, value, key, valid))) return undefined
   if (Array.isArray(entry.resetRange)) entry.resetRange = [...entry.resetRange]

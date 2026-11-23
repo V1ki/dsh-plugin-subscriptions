@@ -29,7 +29,7 @@ import {
 } from './constants.js'
 import { requestCounts, servedModel } from './request-counts.js'
 import {
-  closedYear, combineDays, combineModels, parseOpenFile, pruneModels, sanitizeEntry, zeroModels,
+  closedYear, combineDays, combineModels, parseOpenFile, pruneModels, sanitizeAccount, sanitizeEntry, zeroModels,
   type DaySums, type ModelSums, type OpenFile, type UsageMeta,
 } from './usage-schema.js'
 import {
@@ -37,8 +37,8 @@ import {
   type UsageFileSystem,
 } from './usage-files.js'
 import {
-  WindowTracker, emptyCounts, isTrackedProvider, validCounts,
-  type AccountState, type EntryKind, type SeriesState, type TrackerState, type WindowUsageEntry,
+  REQUIRED_BUCKETS, SPLIT_BUCKETS, WindowTracker, emptyCounts, isTrackedProvider, validCounts,
+  type AccountState, type EntryKind, type SeriesState, type TokenCounts, type TrackerState, type WindowUsageEntry,
 } from './window-tracker.js'
 
 export { nodeUsageFileSystem, type UsageFileSystem } from './usage-files.js'
@@ -95,6 +95,8 @@ export class WindowStore {
   private readonly baselines = new Map<TrackedProvider, Map<string, Aggregate>>()
   /** Last committed local view of held sums, by account and series. */
   private readonly heldBaselines = new Map<TrackedProvider, Map<string, Held>>()
+  /** Unsaved held-sum promotions: heldKey(account, seriesKey) -> entryId that received the held counts. */
+  private readonly heldPromotions = new Map<TrackedProvider, Map<string, string>>()
   /** Ids found both open and closed on disk at load (a crash between the two writes); removed from `open.json` at the next save. */
   private readonly staleOpen = new Map<TrackedProvider, Set<string>>()
   /** Set once loading finished, whether or not tracking is enabled. */
@@ -454,6 +456,7 @@ export class WindowStore {
     }
     this.reclassified.delete(provider)
     this.heldBaselines.delete(provider)
+    this.heldPromotions.delete(provider)
     tracker.clear(provider, clearedAt)
   }
 
@@ -475,16 +478,16 @@ export class WindowStore {
 
     const current = stateUnderClear(file, cutoff)
     const otherAccounts = current.filter(account => !accounts.some(own => own.account === account.account))
-    const held = mergeHeldAccounts(accounts, current, this.heldBaselines.get(provider), stored)
+    const held = mergeHeldAccounts(
+      accounts, current, this.heldBaselines.get(provider), this.heldPromotions.get(provider), stored,
+    )
 
-    // Shared entries (previously saved/loaded, or chained from a reset) may
-    // have been closed by another process even if a stale open copy remains. Its
-    // closed line is the stored copy, and only this process's delta is
-    // added to it; re-adding it as open would let a later close overwrite
-    // the other process's sums.
-    const shareable = inMemory.filter(entry => baseline.has(entry.id) || entry.startSource === 'previous-reset')
-    const closedElsewhere = shareable.length === 0 ? new Set<string>() : await this.closedIds(provider, shareable)
-    const vanished = new Set(shareable.filter(entry => !stored.has(entry.id) && baseline.has(entry.id)).map(entry => entry.id))
+    // Any in-memory entry (even one never saved by this process whose deterministic
+    // id was independently derived by another process) may have been closed
+    // elsewhere. Check closed year files for all in-memory entries so late deltas
+    // merge into the closed line instead of being written back as stale open rows.
+    const closedElsewhere = inMemory.length === 0 ? new Set<string>() : await this.closedIds(provider, inMemory)
+    const vanished = new Set(inMemory.filter(entry => !stored.has(entry.id) && baseline.has(entry.id)).map(entry => entry.id))
     const open = new Map<string, WindowUsageEntry>()
     const closed: ClosedWrite[] = []
     for (const entry of inMemory) {
@@ -496,7 +499,10 @@ export class WindowStore {
       else open.set(entry.id, withSums(entry, stored.get(entry.id), delta))
     }
     for (const entry of closing) {
-      if (entry.countedFrom >= cutoff) closed.push({ entry, delta: aggregateDelta(entry, baseline.get(entry.id)) })
+      if (entry.countedFrom >= cutoff) {
+        const delta = mergeAggregates(aggregateDelta(entry, baseline.get(entry.id)), held.transfers.get(entry.id))
+        closed.push({ entry, delta })
+      }
     }
     for (const entry of file.entries) {
       if (mine.has(entry.id) || stale.has(entry.id) || entry.countedFrom < cutoff) continue
@@ -514,7 +520,8 @@ export class WindowStore {
     await this.writeClosed(provider, closed, stored, reclassified)
     const next: OpenFile = {
       v: 1, ...Number.isFinite(cutoff) ? { clearedAt: cutoff } : {},
-      entries: [...open.values()].map(entry => this.allowed(entry)).filter(isEntry), accounts: [...otherAccounts, ...held.accounts],
+      entries: [...open.values()].map(entry => this.allowed(entry)).filter(isEntry),
+      accounts: [...otherAccounts, ...held.accounts].map(account => this.allowedAccount(provider, account)).filter(isAccount),
     }
     const text = `${JSON.stringify(next, null, 2)}\n`
     if (text !== file.text) {
@@ -527,6 +534,7 @@ export class WindowStore {
     // entries are final, so only the open ones in memory keep one.
     this.baselines.set(provider, new Map(inMemory.filter(entry => entry.countedFrom >= cutoff).map(entry => [entry.id, pickAggregate(entry)])))
     this.heldBaselines.set(provider, heldState(accounts))
+    this.heldPromotions.delete(provider)
     // The rest of the snapshot: entries counted before the cut-off, dropped.
     for (const entry of closing) this.closingOf(provider).delete(entry.id)
     this.staleOpen.delete(provider)
@@ -589,7 +597,8 @@ export class WindowStore {
         if (intoExisting === true) {
           const line = at === undefined ? undefined : lines[at].entry
           if (line === undefined || at === undefined) continue
-          const final = this.allowed(withSums(line, line, delta))
+          const merged = withSums(line, line, delta)
+          const final = this.allowed({ ...merged, ...mergeQuotaFields(merged, entry) })
           if (final === undefined) continue
           lines[at] = { text: JSON.stringify(final), entry: final }
           rewrite = true
@@ -638,6 +647,13 @@ export class WindowStore {
   private allowed(entry: WindowUsageEntry): WindowUsageEntry | undefined {
     const clean = sanitizeEntry(entry.provider, entry)
     if (clean === undefined) this.warn(`usage entry ${entry.id} failed validation and was not saved`)
+    return clean
+  }
+
+  /** The allowlisted copy of an account state; an invalid account state is not written to `open.json`. */
+  private allowedAccount(provider: TrackedProvider, account: AccountState): AccountState | undefined {
+    const clean = sanitizeAccount(provider, account)
+    if (clean === undefined) this.warn(`usage account state ${provider}/${account.account} failed validation and was not saved`)
     return clean
   }
 
@@ -723,6 +739,10 @@ export class WindowStore {
         for (const id of change.ids) map.set(id, change.kind)
         this.reclassified.set(change.provider, map)
         this.markDirty(change.provider)
+      },
+      onHeldPromote: promotion => {
+        const map = getOrCreate(this.heldPromotions, promotion.provider, () => new Map())
+        map.set(heldKey(promotion.account, promotion.seriesKey), promotion.entryId)
       },
     })
     this.meta = meta
@@ -818,7 +838,8 @@ export class WindowStore {
     try {
       const meta = await this.readMeta() ?? this.meta
       if (meta === undefined) throw new Error('usage tracking is not active')
-      meta.clearedAt[provider] = Math.max(meta.clearedAt[provider] ?? Number.NEGATIVE_INFINITY, at)
+      const prev = meta.clearedAt[provider]
+      meta.clearedAt[provider] = prev === undefined ? at : Math.max(prev + 1, at)
       await writeAtomic(this.fs, join(this.dir, USAGE_FILES.meta), `${JSON.stringify(meta, null, 2)}\n`)
       this.meta = { ...meta, clearedAt: { ...meta.clearedAt } }
     } finally {
@@ -841,6 +862,7 @@ export class WindowStore {
     const tracker = this.live
     this.baselines.delete(provider)
     this.heldBaselines.delete(provider)
+    this.heldPromotions.delete(provider)
     this.staleOpen.delete(provider)
     this.closing.delete(provider)
     this.reclassified.delete(provider)
@@ -923,16 +945,62 @@ function stateUnderClear(file: OpenFile, cutoff: number): AccountState[] {
   return (file.clearedAt ?? Number.NEGATIVE_INFINITY) === cutoff ? file.accounts : []
 }
 
-/** `entry` (this process's view) with the stored copy's sums plus `delta`, and the later `lastAddedAt`. */
+/** Reconcile latest & peak observed quota utilization across two copies of one entry. */
+function mergeQuotaFields(
+  a: Pick<WindowUsageEntry, 'quotaUsedPercent' | 'quotaPeakPercent' | 'quotaObservedAt'>,
+  b: Pick<WindowUsageEntry, 'quotaUsedPercent' | 'quotaPeakPercent' | 'quotaObservedAt'> | undefined,
+): Pick<WindowUsageEntry, 'quotaUsedPercent' | 'quotaPeakPercent' | 'quotaObservedAt'> {
+  const peaks = [a.quotaPeakPercent, a.quotaUsedPercent, b?.quotaPeakPercent, b?.quotaUsedPercent]
+    .filter((v): v is number => v !== undefined)
+  const quotaPeakPercent = peaks.length === 0 ? undefined : Math.max(...peaks)
+
+  let quotaUsedPercent: number | undefined
+  let quotaObservedAt: number | undefined
+  const aObs = a.quotaObservedAt
+  const bObs = b?.quotaObservedAt
+  if (a.quotaUsedPercent !== undefined && b?.quotaUsedPercent !== undefined) {
+    if (aObs !== undefined && bObs !== undefined) {
+      if (bObs > aObs) {
+        quotaUsedPercent = b.quotaUsedPercent
+        quotaObservedAt = bObs
+      } else {
+        quotaUsedPercent = a.quotaUsedPercent
+        quotaObservedAt = aObs
+      }
+    } else if (bObs !== undefined) {
+      quotaUsedPercent = b.quotaUsedPercent
+      quotaObservedAt = bObs
+    } else {
+      quotaUsedPercent = a.quotaUsedPercent
+      quotaObservedAt = aObs
+    }
+  } else if (a.quotaUsedPercent !== undefined) {
+    quotaUsedPercent = a.quotaUsedPercent
+    quotaObservedAt = aObs
+  } else if (b?.quotaUsedPercent !== undefined) {
+    quotaUsedPercent = b.quotaUsedPercent
+    quotaObservedAt = bObs
+  }
+
+  return {
+    ...quotaUsedPercent === undefined ? {} : { quotaUsedPercent },
+    ...quotaPeakPercent === undefined ? {} : { quotaPeakPercent },
+    ...quotaObservedAt === undefined ? {} : { quotaObservedAt },
+  }
+}
+
+/** `entry` (this process's view) with the stored copy's sums plus `delta`, reconciled quota %, and the later `lastAddedAt`. */
 function withSums(entry: WindowUsageEntry, stored: WindowUsageEntry | undefined, delta: Aggregate): WindowUsageEntry {
   const lastAddedAt = Math.max(entry.lastAddedAt ?? Number.NEGATIVE_INFINITY, stored?.lastAddedAt ?? Number.NEGATIVE_INFINITY)
-  const { days: _localDays, ...base } = entry
+  const { days: _localDays, quotaUsedPercent: _lu, quotaPeakPercent: _lp, quotaObservedAt: _lo, ...base } = entry
   const days = combineDays(stored?.days, delta.days)
+  const quota = mergeQuotaFields(entry, stored)
   return {
     ...base,
     models: combineModels(stored?.models ?? {}, delta.models),
     ...Object.keys(days).length === 0 ? {} : { days },
     ...Number.isFinite(lastAddedAt) ? { lastAddedAt } : {},
+    ...quota,
   }
 }
 
@@ -961,42 +1029,70 @@ function mergeAggregates(a: Aggregate, b: Aggregate | undefined): Aggregate {
   return { models: combineModels(a.models, b.models), days: combineDays(a.days, b.days) }
 }
 
+function clampNonNegativeModels(models: ModelSums): ModelSums {
+  const clamped: ModelSums = {}
+  for (const [model, counts] of Object.entries(models)) {
+    const next = Object.fromEntries(REQUIRED_BUCKETS.map(bucket => [bucket, Math.max(0, counts[bucket])])) as unknown as TokenCounts
+    for (const bucket of SPLIT_BUCKETS) {
+      if (counts[bucket] !== undefined) next[bucket] = Math.max(0, counts[bucket])
+    }
+    if (!zeroModels({ next })) clamped[model] = next
+  }
+  return clamped
+}
+
+function clampNonNegativeDays(days: DaySums | undefined): DaySums | undefined {
+  if (days === undefined) return undefined
+  const clamped: DaySums = {}
+  for (const [day, models] of Object.entries(days)) {
+    const sums = clampNonNegativeModels(models)
+    if (!zeroModels(sums)) clamped[day] = sums
+  }
+  return Object.keys(clamped).length === 0 ? undefined : clamped
+}
+
 /**
  * A held sum is shared on disk, but each process holds its own snapshot of
  * it. Merge just the unsaved model/day deltas. If a peer has already moved
  * this held period into an open successor, route stale-process deltas to
- * that successor and keep the disk series. Otherwise the process opening
- * the successor moves the disk held remainder as part of the same save.
+ * that successor and keep the disk series. Otherwise, when this process
+ * promoted its held sum into a tracked entry id, route the disk held
+ * adjustment to that exact entry (even if it already closed before flush),
+ * never into an unrelated newer open window.
  */
 function mergeHeldAccounts(
   own: readonly AccountState[], stored: readonly AccountState[], baseline: ReadonlyMap<string, Held> | undefined,
+  promotions: ReadonlyMap<string, string> | undefined,
   entries: ReadonlyMap<string, WindowUsageEntry>,
 ): { accounts: AccountState[], transfers: ReadonlyMap<string, Aggregate> } {
   const current = new Map(stored.map(account => [account.account, new Map(account.series.map(series => [series.key, series]))]))
   const transfers = new Map<string, Aggregate>()
   const transfer = (id: string, sums: Aggregate) => transfers.set(id, mergeAggregates(transfers.get(id) ?? { models: {} }, sums))
   const accounts = own.map(account => ({ ...account, series: account.series.map(series => {
+    const key = heldKey(account.account, series.key)
     const disk = current.get(account.account)?.get(series.key)
     const other = disk?.held
-    const previous = baseline?.get(heldKey(account.account, series.key))
+    const previous = baseline?.get(key)
     const local = series.held
+    const promotedId = promotions?.get(key)
     const diskOpen = disk?.open === undefined ? undefined : entries.get(disk.open)
 
     if (local !== undefined && diskOpen !== undefined && diskOpen.countedFrom >= (series.lastEnd ?? local.countedFrom)) {
       transfer(diskOpen.id, aggregateDelta(local, previous))
       return disk ?? series
     }
-    if (local === undefined && series.open !== undefined && (other !== undefined || previous !== undefined)) {
-      // The local tracker already included `previous` in its successor.
-      // Replace that committed snapshot with the current disk allocation,
-      // which is empty if another process already promoted the same hold.
-      transfer(series.open, aggregateDelta(other ?? { models: {} }, previous))
+    if (local === undefined && promotedId !== undefined && (other !== undefined || previous !== undefined)) {
+      // The local tracker already included `previous` in `promotedId` (which
+      // may still be open or may have closed before this flush). Replace that
+      // committed snapshot with the current disk allocation, which is empty if
+      // another process already promoted the same hold.
+      transfer(promotedId, aggregateDelta(other ?? { models: {} }, previous))
       return series
     }
 
     const delta = aggregateDelta(local ?? { models: {} }, previous)
-    const models = pruneModels(combineModels(other?.models ?? {}, delta.models))
-    const days = combineDays(other?.days, delta.days)
+    const models = clampNonNegativeModels(combineModels(other?.models ?? {}, delta.models))
+    const days = clampNonNegativeDays(combineDays(other?.days, delta.days))
     const output = { ...series }
     if ((local === undefined && other === undefined) || zeroModels(models)) {
       delete output.held
@@ -1004,7 +1100,8 @@ function mergeHeldAccounts(
       output.held = {
         countedFrom: Math.min(local?.countedFrom ?? Infinity, other?.countedFrom ?? Infinity),
         lastAddedAt: Math.max(local?.lastAddedAt ?? -Infinity, other?.lastAddedAt ?? -Infinity),
-        models, days,
+        models,
+        ...days === undefined ? {} : { days },
       }
     }
     return output
@@ -1030,6 +1127,10 @@ function getOrCreate<K, V>(map: Map<K, V>, key: K, create: () => V): V {
 
 function isEntry(entry: WindowUsageEntry | undefined): entry is WindowUsageEntry {
   return entry !== undefined
+}
+
+function isAccount(account: AccountState | undefined): account is AccountState {
+  return account !== undefined
 }
 
 /** Whether `work` settles within `ms`; the bound's timer is cleared as soon as it does. */

@@ -164,3 +164,176 @@ test('pending counts are allocated by actual UTC request day when sorted into a 
   assert.equal(allocated?.days?.['2026-01-02']?.[model]?.inputTokens, 20)
   if (process.platform !== 'win32') assert.equal((await stat(f.openPath)).mode & 0o777, 0o600)
 })
+
+test('unflushed peer merges late delta into closed file for independently derived deterministic window id (Major #1)', async t => {
+  const f = await fixture(t)
+  const reset = t0 + 5 * hour
+  // Both processes start cold before any open.json exists, so neither has a
+  // baseline for the entry, and both derive the exact same deterministic id
+  // (startSource: 'length', startsAt === t0, countedFrom === t0).
+  const a = await f.open()
+  const b = await f.open()
+  observe(a, t0, reset)
+  record(a, t0 + 10, 100)
+  observe(b, t0, reset)
+  record(b, t0 + 20, 40)
+
+  // Process A closes the window into closed-2026.jsonl and removes it from open.json
+  // BEFORE process B has ever flushed that entry.
+  f.setNow(reset)
+  observe(a, reset, reset + 5 * hour)
+  await a.flush()
+  const closedBefore = await f.closed()
+  assert.equal(closedBefore.length, 1)
+  const id = closedBefore[0]!.id
+  assert.equal(closedBefore[0]!.startSource, 'length')
+  assert.equal(closedBefore[0]!.models[model]?.inputTokens, 100)
+  assert.ok(!(await f.openFile()).entries.some(entry => entry.id === id))
+
+  // Process B's clock has not advanced yet, so B still considers `id` open and
+  // has never saved it (baseline.has(id) === false). Flushing B must merge its
+  // 40 tokens into the closed line rather than writing a stale open copy back.
+  f.setNow(t0 + 30)
+  await b.flush()
+
+  const closedAfter = (await f.closed()).filter(entry => entry.id === id)
+  assert.equal(closedAfter.length, 1)
+  assert.equal(closedAfter[0]!.models[model]?.inputTokens, 140)
+  assert.ok(!(await f.openFile()).entries.some(entry => entry.id === id), 'must not re-write closed id into open.json')
+})
+
+test('held promotion closing before flush does not corrupt successor window with negative counts (Major #2)', async t => {
+  const f = await fixture(t)
+  const reset = t0 + 5 * hour
+  const gap = reset + 5 * hour
+  const seed = await f.open()
+  observe(seed, t0, reset)
+  record(seed, gap + 1, 50)
+  await seed.dispose()
+  assert.equal((await f.openFile()).accounts[0]?.series[0]?.held?.models[model]?.inputTokens, 50)
+
+  // Both A and B load the same held sum (50).
+  f.setNow(gap + 1)
+  const a = await f.open()
+  const b = await f.open()
+
+  // Process A promotes held into e1 and flushes (clearing disk.held).
+  const e1Reset = gap + 5 * hour
+  observe(a, gap + hour, e1Reset)
+  await a.flush()
+  assert.equal((await f.openFile()).accounts[0]?.series[0]?.held, undefined)
+
+  // Process B also promotes held into e1, records +15 on e1, and BEFORE B flushes
+  // the clock advances past e1Reset so e1 closes into `closing` and e2 opens empty.
+  observe(b, gap + hour, e1Reset)
+  record(b, gap + 2 * hour, 15)
+  f.setNow(e1Reset + 10)
+  observe(b, e1Reset + 10, e1Reset + 5 * hour)
+  record(b, e1Reset + 20, 7)
+  await b.flush()
+
+  // e2 in open.json must remain valid with its +7 tokens (never negative or dropped),
+  // and e1 in closed-2026.jsonl must contain 50 + 15 = 65 (not 115, not lost).
+  const openAfter = await f.openFile()
+  assert.equal(openAfter.accounts[0]?.series[0]?.held, undefined)
+  const e2 = openAfter.entries.find(entry => entry.resetsAt === e1Reset + 5 * hour)
+  assert.ok(e2, 'successor window e2 survived flush without negative counts')
+  assert.equal(e2.models[model]?.inputTokens, 7)
+
+  const closedAfter = await f.closed()
+  const e1Total = closedAfter
+    .filter(entry => entry.resetsAt === e1Reset)
+    .reduce((sum, entry) => sum + (entry.models[model]?.inputTokens ?? 0), 0)
+  assert.equal(e1Total, 65)
+})
+
+test('consecutive clearProvider calls within the same millisecond remain monotonic (Minor #3)', async t => {
+  const f = await fixture(t)
+  const store = await f.open()
+  observe(store, t0, t0 + 5 * hour)
+  record(store, t0 + 1, 25)
+  await store.flush()
+
+  await store.clearProvider(provider)
+  const firstClear = store.clearedAt(provider)
+  assert.equal(firstClear, t0)
+
+  // Clock has not advanced (same millisecond). Second clear must still advance clearedAt.
+  await store.clearProvider(provider)
+  const secondClear = store.clearedAt(provider)
+  assert.ok(secondClear !== undefined && secondClear > firstClear!)
+})
+
+test('quotaUsedPercent and quotaPeakPercent persist across open/closed files and reconcile across peers', async t => {
+  const f = await fixture(t)
+  const reset = t0 + 5 * hour
+  const a = await f.open()
+  const b = await f.open()
+
+  // Process A observes 42% at t0, then 68% at t0 + 1h, then 55% at t0 + 2h (peak stays 68%, latest 55%).
+  a.observe(provider, account, { supported: true, windows: [{ kind: 'session', durationMs: 5 * hour, usedPercent: 42, resetsAt: reset }] }, t0)
+  a.observe(provider, account, { supported: true, windows: [{ kind: 'session', durationMs: 5 * hour, usedPercent: 68, resetsAt: reset }] }, t0 + hour)
+  a.observe(provider, account, { supported: true, windows: [{ kind: 'session', durationMs: 5 * hour, usedPercent: 55, resetsAt: reset }] }, t0 + 2 * hour)
+  record(a, t0 + 10, 100)
+  await a.flush()
+
+  // Process B observes an even fresher 74% at t0 + 3h (higher peak AND fresher latest).
+  b.observe(provider, account, { supported: true, windows: [{ kind: 'session', durationMs: 5 * hour, usedPercent: 74, resetsAt: reset }] }, t0 + 3 * hour)
+  record(b, t0 + 20, 50)
+  await b.flush()
+
+  const openAfter = await f.openFile()
+  assert.equal(openAfter.entries[0]?.quotaUsedPercent, 74)
+  assert.equal(openAfter.entries[0]?.quotaPeakPercent, 74)
+
+  // Process A later observes 60% at t0 + 4h (fresher than B's 3h, lower than B's 74% peak).
+  // Reconciling must keep latest = 60% (from t0 + 4h) and peak = 74% (Math.max).
+  a.observe(provider, account, { supported: true, windows: [{ kind: 'session', durationMs: 5 * hour, usedPercent: 60, resetsAt: reset }] }, t0 + 4 * hour)
+  await a.flush()
+  const openReconciled = await f.openFile()
+  assert.equal(openReconciled.entries[0]?.quotaUsedPercent, 60)
+  assert.equal(openReconciled.entries[0]?.quotaPeakPercent, 74)
+
+  // Advance past reset so the window closes into closed-2026.jsonl preserving both percentages.
+  f.setNow(reset)
+  a.observe(provider, account, { supported: true, windows: [{ kind: 'session', durationMs: 5 * hour, usedPercent: 5, resetsAt: reset + 5 * hour }] }, reset)
+  await a.flush()
+
+  const closedAfter = await f.closed()
+  assert.equal(closedAfter.length, 1)
+  assert.equal(closedAfter[0]?.quotaUsedPercent, 60)
+  assert.equal(closedAfter[0]?.quotaPeakPercent, 74)
+
+  // New open cycle starts fresh with 5%, not inheriting the previous cycle's 74% peak.
+  const nextOpen = await f.openFile()
+  assert.equal(nextOpen.entries[0]?.quotaUsedPercent, 5)
+  assert.equal(nextOpen.entries[0]?.quotaPeakPercent, 5)
+})
+
+test('sanitizeEntry remains backwards-compatible without quota % and rejects out-of-range percentages', async () => {
+  const { sanitizeEntry } = await import('../src/usage/usage-schema.js')
+  const base = {
+    v: 1,
+    id: 'legacy-1',
+    provider: 'codex',
+    account: 'acct',
+    kind: '5h',
+    startSource: 'nominal',
+    status: 'closed',
+    countedFrom: t0,
+    models: { 'gpt-5.4': { inputTokens: 10, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 } },
+  }
+  const legacy = sanitizeEntry('codex', base)
+  assert.ok(legacy)
+  assert.equal(legacy.quotaUsedPercent, undefined)
+  assert.equal(legacy.quotaPeakPercent, undefined)
+
+  const valid = sanitizeEntry('codex', { ...base, quotaUsedPercent: 48.5, quotaPeakPercent: 91, quotaObservedAt: t0 + 1000 })
+  assert.ok(valid)
+  assert.equal(valid.quotaUsedPercent, 48.5)
+  assert.equal(valid.quotaPeakPercent, 91)
+
+  assert.equal(sanitizeEntry('codex', { ...base, quotaUsedPercent: -1 }), undefined)
+  assert.equal(sanitizeEntry('codex', { ...base, quotaPeakPercent: 101 }), undefined)
+  assert.equal(sanitizeEntry('codex', { ...base, quotaUsedPercent: Number.NaN }), undefined)
+})

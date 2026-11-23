@@ -21,7 +21,7 @@ import type { PreTracking, PreTrackingStatus } from './pre-tracking.js'
 import { combineDays, combineModels, parseMeta, parseOpenFile, parsePreTracking } from './usage-schema.js'
 import { errorCode, nodeUsageFileSystem, readOptional, type UsageFileSystem } from './usage-files.js'
 import { parseClosed, type WindowStore } from './window-store.js'
-import type { WindowUsageEntry } from './window-tracker.js'
+import type { ObservedWindow, WindowUsageEntry } from './window-tracker.js'
 import { buildUsageView, type UsageView, type ViewQuery } from './window-view.js'
 
 /** What the service needs from the window store. */
@@ -65,6 +65,47 @@ export interface ClearResult {
   clearedAt: number
   /** A purge that failed after the cut-off was written: the cut-off holds and the purge is retried. */
   errors: string[]
+}
+
+/** Single-load snapshot of one provider's usage state, avoiding redundant disk reads. */
+export interface ProviderUsageSnapshot {
+  provider: TrackedProvider
+  entries: WindowUsageEntry[]
+  errors: string[]
+  total: PreTrackingStatus
+  clearedAt?: number
+  trackingStartedAt: number
+  /** Stored accounts with visible history, in sorted key order. */
+  accounts: string[]
+  stored: StoredSummary
+  observed: (account: string) => ObservedWindow[]
+}
+
+/** Compute clear-confirmation summary from already-loaded entries without spread stack limits. */
+export function summarizeStored(
+  all: readonly WindowUsageEntry[],
+  total: PreTrackingStatus,
+  clearedAt?: number,
+): StoredSummary {
+  const cutoff = clearedAt ?? Number.NEGATIVE_INFINITY
+  const accounts = new Set<string>()
+  let from = Number.POSITIVE_INFINITY
+  let to = Number.NEGATIVE_INFINITY
+  let count = 0
+  for (const entry of all) {
+    if (entry.countedFrom < cutoff) continue
+    count++
+    accounts.add(entry.account)
+    if (entry.countedFrom < from) from = entry.countedFrom
+    const end = entry.endedAt ?? entry.resetsAt ?? entry.lastAddedAt ?? entry.countedFrom
+    if (end > to) to = end
+  }
+  return {
+    accounts: accounts.size,
+    ...count === 0 ? {} : { from, to },
+    // An empty stored total has nothing to remove.
+    earlierHistory: total.state === 'stored' && Object.keys(total.total.models).length > 0,
+  }
 }
 
 /** Usage tracking is off in this process, or the service was disposed. */
@@ -149,25 +190,53 @@ export class UsageService {
   }
 
   /**
+   * Load one provider's full snapshot in a single disk pass so callers that
+   * need accounts, view, summary, or dashboard aggregation read consistent
+   * state without repeating `load(provider)`.
+   * @throws UsageUnavailable when tracking is off or the service was disposed.
+   */
+  async snapshot(provider: TrackedProvider): Promise<ProviderUsageSnapshot> {
+    const { entries, errors, total, clearedAt } = await this.load(provider)
+    const trackingStartedAt = this.store.trackingStartedAt
+    if (trackingStartedAt === undefined) throw new UsageUnavailable(SERVICE_ERRORS.inactive)
+    const cutoff = clearedAt ?? Number.NEGATIVE_INFINITY
+    const accountSet = new Set<string>()
+    for (const entry of entries) {
+      if (entry.countedFrom >= cutoff) accountSet.add(entry.account)
+    }
+    const accounts = [...accountSet].sort()
+    const stored = summarizeStored(entries, total, clearedAt)
+    return {
+      provider,
+      entries,
+      errors,
+      total,
+      ...clearedAt === undefined ? {} : { clearedAt },
+      trackingStartedAt,
+      accounts,
+      stored,
+      observed: account => this.store.tracker?.observedWindows(provider, account) ?? [],
+    }
+  }
+
+  /**
    * One account's view for one query, with the damaged data that was
    * skipped.
    * @throws UsageUnavailable when tracking is off or the service was disposed.
    */
   async read(query: AccountUsageQuery): Promise<AccountUsageResult> {
     const { provider, account, ...viewQuery } = query
-    const { entries, errors, total, clearedAt } = await this.load(provider)
-    const trackingStartedAt = this.store.trackingStartedAt
-    if (trackingStartedAt === undefined) throw new UsageUnavailable(SERVICE_ERRORS.inactive)
+    const snap = await this.snapshot(provider)
     const view = buildUsageView({
       provider,
       account,
-      entries,
-      observed: this.store.tracker?.observedWindows(provider, account) ?? [],
-      trackingStartedAt,
-      ...clearedAt === undefined ? {} : { clearedAt },
-      preTracking: total,
+      entries: snap.entries,
+      observed: snap.observed(account),
+      trackingStartedAt: snap.trackingStartedAt,
+      ...snap.clearedAt === undefined ? {} : { clearedAt: snap.clearedAt },
+      preTracking: snap.total,
     }, viewQuery)
-    return { view, errors }
+    return { view, errors: snap.errors }
   }
 
   /**
@@ -184,15 +253,8 @@ export class UsageService {
    * @throws UsageUnavailable when tracking is off or the service was disposed.
    */
   async summary(provider: TrackedProvider): Promise<StoredSummary> {
-    const { entries: all, total, clearedAt } = await this.load(provider)
-    const entries = all.filter(entry => entry.countedFrom >= (clearedAt ?? Number.NEGATIVE_INFINITY))
-    const ends = entries.map(entry => entry.endedAt ?? entry.resetsAt ?? entry.lastAddedAt ?? entry.countedFrom)
-    return {
-      accounts: new Set(entries.map(entry => entry.account)).size,
-      ...entries.length === 0 ? {} : { from: Math.min(...entries.map(entry => entry.countedFrom)), to: Math.max(...ends) },
-      // An empty stored total has nothing to remove.
-      earlierHistory: total.state === 'stored' && Object.keys(total.total.models).length > 0,
-    }
+    const { entries, total, clearedAt } = await this.load(provider)
+    return summarizeStored(entries, total, clearedAt)
   }
 
   /** The provider's entries a reader may show: none counted before its clear. */
@@ -213,15 +275,19 @@ export class UsageService {
     const before = this.store.clearedAt(provider) ?? Number.NEGATIVE_INFINITY
     this.invalidate(provider)
     const errors: string[] = []
+    let threw = false
     try {
       await this.store.clearProvider(provider)
     } catch (error) {
+      threw = true
       errors.push(SERVICE_ERRORS.clearIncomplete(this.relativeLabel(provider, error), error))
     } finally {
       this.invalidate(provider)
     }
     const clearedAt = this.store.clearedAt(provider)
-    if (clearedAt === undefined || clearedAt <= before) throw new Error(errors[0] ?? SERVICE_ERRORS.clearNotRecorded(provider))
+    if (clearedAt === undefined || (threw && clearedAt <= before)) {
+      throw new Error(errors[0] ?? SERVICE_ERRORS.clearNotRecorded(provider))
+    }
     return { clearedAt, errors }
   }
 
@@ -315,7 +381,27 @@ export class UsageService {
     }
     const memory = this.store.entries(provider).map(entry => {
       const copy = preferred.get(entry.id)
-      return copy === undefined ? entry : { ...entry, models: copy.models, ...copy.days === undefined ? {} : { days: copy.days } }
+      if (copy === undefined) return entry
+      const peaks = [entry.quotaPeakPercent, entry.quotaUsedPercent, copy.quotaPeakPercent, copy.quotaUsedPercent]
+        .filter((v): v is number => v !== undefined)
+      const quotaPeakPercent = peaks.length === 0 ? undefined : Math.max(...peaks)
+      let quotaUsedPercent = entry.quotaUsedPercent
+      let quotaObservedAt = entry.quotaObservedAt
+      if (copy.quotaUsedPercent !== undefined && (
+        quotaUsedPercent === undefined
+        || (copy.quotaObservedAt !== undefined && (quotaObservedAt === undefined || copy.quotaObservedAt > quotaObservedAt))
+      )) {
+        quotaUsedPercent = copy.quotaUsedPercent
+        quotaObservedAt = copy.quotaObservedAt
+      }
+      return {
+        ...entry,
+        models: copy.models,
+        ...copy.days === undefined ? {} : { days: copy.days },
+        ...quotaUsedPercent === undefined ? {} : { quotaUsedPercent },
+        ...quotaPeakPercent === undefined ? {} : { quotaPeakPercent },
+        ...quotaObservedAt === undefined ? {} : { quotaObservedAt },
+      }
     })
     return [...memory, ...withDelta]
   }
