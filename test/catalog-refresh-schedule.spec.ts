@@ -16,6 +16,17 @@ import * as plugin from '../src/index.js'
 const settle = () => new Promise(resolve => setImmediate(resolve))
 const now = 1_800_000_000_000
 
+/**
+ * Wait for a condition that depends on real libuv file I/O (auth/catalog
+ * stores) while fake timers mock `Date` and `setTimeout`. A fixed count of
+ * `setImmediate` ticks can finish in <2ms on a loaded CI runner before the fs
+ * threadpool responds, so bound by real monotonic wall time instead.
+ */
+async function waitUntil(predicate: () => boolean, maxWaitMs = 5_000): Promise<void> {
+  const deadline = performance.now() + maxWaitMs
+  while (!predicate() && performance.now() < deadline) await settle()
+}
+
 function saved(ageMs: number) {
   const models = [{ id: 'cached', name: 'Cached' }]
   return new ModelCatalogCache({ load: async () => ({ at: now - ageMs, models }), save: async () => {}, clear: async () => {} })
@@ -131,7 +142,7 @@ test('registered plugin refreshes at startup and hourly, while menus and disposa
     await saveAccountSession('codex', 'c', { accessToken: 'c', refreshToken: 'c', expiresAt: now + 86_400_000, accountId: 'c' })
     await catalogStore('codex').save({ at: now - 360_000, models: [{ id: 'cached', name: 'Cached', contextWindow: 1000 }] })
     runtime = ctx.plugin(plugin, { providers: ['codex'] })
-    for (let i = 0; i < 500 && requests === 0; i++) await settle()
+    await waitUntil(() => requests >= 1)
     assert.equal(requests, 1, 'plugin startup must schedule discovery without opening a menu')
     for (let i = 0; i < 30; i++) await settle()
     t.mock.timers.tick(6 * 60_000)
@@ -141,15 +152,15 @@ test('registered plugin refreshes at startup and hourly, while menus and disposa
     }
     assert.equal(requests, 1, 'six-minute-old cached menu reads do not fetch')
     t.mock.timers.tick(54 * 60_000)
-    for (let i = 0; i < 500 && requests < 2; i++) await settle()
-    // The hour is counted from when the job's first run COMPLETES, and that
-    // run does real file I/O (auth and catalog stores) the fixed settle
-    // budget above cannot bound on a loaded CI runner; if it finished during
-    // the six-minute menu-read window the timer lands a few minutes past the
-    // hour. Allow that bounded slack instead of a second full hour.
+    await waitUntil(() => requests >= 2, 5_000)
+    // The hour is counted from when the job's first run COMPLETES; if it
+    // finished during the six-minute menu-read window the timer lands a few
+    // minutes past the hour. Allow that bounded slack without ticking while a
+    // discovery run is still waiting on real file I/O (which would expire
+    // DISCOVERY_TIMEOUT_MS under fake timers).
     for (let extra = 0; extra < 10 && requests < 2; extra++) {
       t.mock.timers.tick(60_000)
-      for (let i = 0; i < 50 && requests < 2; i++) await settle()
+      await waitUntil(() => requests >= 2, 500)
     }
     assert.equal(requests, 2, 'the hourly job must actually be registered by the plugin')
     await runtime.dispose()
