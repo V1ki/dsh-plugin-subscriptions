@@ -17,7 +17,14 @@ import type { ProviderUsage } from '../providers/common.js'
 import type { ProxyConfigView, ProxyDraft, ProxyInput, ProxyTestResult } from '../http.js'
 import type { CliVersion } from '../providers/npm-cli-version.js'
 import type { TrackedProvider } from '../usage/constants.js'
-import { UsageQueryRejected, type AccountUsagePayload, type UsageHistoryController } from '../usage/usage-rpc.js'
+import {
+  DASHBOARD_RANGES,
+  UsageQueryRejected,
+  type AccountUsagePayload,
+  type DashboardRange,
+  type UsageDashboardPayload,
+  type UsageHistoryController,
+} from '../usage/usage-rpc.js'
 import { isTrackedProvider } from '../usage/window-tracker.js'
 import { UsageUnavailable } from '../usage/service.js'
 import { VIEW_KINDS } from '../usage/window-view.js'
@@ -47,7 +54,7 @@ export const SUBSCRIPTIONS_AUTH_ENDPOINTS = [
   'speed', 'setSpeed',
   'proxyGet', 'proxySet', 'proxyTest',
   'modelDefaults', 'setModelDefault',
-  'accountUsage', 'clearUsageHistory',
+  'usageDashboard', 'accountUsage', 'clearUsageHistory',
 ] as const
 
 /** Media types the attachment store accepts (ImageMediaType). */
@@ -376,10 +383,36 @@ function readAccountUsage(payload: unknown): AccountUsagePayload {
   }
 }
 
-/** `clearUsageHistory`: the provider first (Copilot is unsupported whatever `confirm` says), then `confirm: true` exactly. */
-function readClearUsage(payload: unknown): TrackedProvider {
-  const provider = readUsageProvider(payload)
-  if ((payload as Record<string, unknown>).confirm !== true) throw new BadRequest('payload.confirm must be true')
+/** Validate the `usageDashboard` payload's optional filters and range. */
+function readUsageDashboard(payload: unknown): UsageDashboardPayload {
+  if (payload === undefined || payload === null) return {}
+  if (typeof payload !== 'object' || Array.isArray(payload)) throw new BadRequest('payload must be an object')
+  const record = payload as Record<string, unknown>
+  const { provider, account, range } = record
+  let parsedProvider: TrackedProvider | 'all' | undefined
+  if (provider !== undefined) {
+    if (provider === 'all') parsedProvider = 'all'
+    else parsedProvider = readUsageProvider({ provider })
+  }
+  if (account !== undefined && (typeof account !== 'string' || account.length === 0)) {
+    throw new BadRequest('payload.account must be a non-empty string when present')
+  }
+  if (range !== undefined && (typeof range !== 'string' || !(DASHBOARD_RANGES as readonly string[]).includes(range))) {
+    throw new BadRequest(`payload.range must be one of ${DASHBOARD_RANGES.join(', ')} when present`)
+  }
+  return {
+    ...parsedProvider === undefined ? {} : { provider: parsedProvider },
+    ...account === undefined ? {} : { account: account as string },
+    ...range === undefined ? {} : { range: range as DashboardRange },
+  }
+}
+
+/** `clearUsageHistory`: `'all'` or one tracked provider (Copilot is unsupported whatever `confirm` says), then `confirm: true` exactly. */
+function readClearUsage(payload: unknown): TrackedProvider | 'all' {
+  if (typeof payload !== 'object' || payload === null) throw new BadRequest('payload must be an object')
+  const record = payload as Record<string, unknown>
+  const provider = record.provider === 'all' ? 'all' : readUsageProvider(payload)
+  if (record.confirm !== true) throw new BadRequest('payload.confirm must be true')
   return provider
 }
 
@@ -581,6 +614,11 @@ async function dispatch(
   usageHistory?: UsageHistoryController,
 ): Promise<RpcResult<unknown>> {
   switch (endpoint) {
+    case 'usageDashboard': {
+      const input = readUsageDashboard(payload)
+      if (usageHistory === undefined) throw new UsageUnavailable('usage history is unavailable')
+      return ok(await usageHistory.usageDashboard(input))
+    }
     case 'accountUsage': {
       const input = readAccountUsage(payload)
       if (usageHistory === undefined) throw new UsageUnavailable('usage history is unavailable')

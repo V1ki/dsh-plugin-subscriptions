@@ -49,6 +49,10 @@ export interface ViewWindow {
   /** The newest window of its kind and scope. */
   current: boolean
   oldest: boolean
+  /** Latest observed provider quota utilization for this window (0–100), when reported. */
+  quotaUsedPercent?: number
+  /** Peak observed provider quota utilization during this window (0–100), when reported. */
+  quotaPeakPercent?: number
   markers: ViewMarker[]
   models: ModelSums
   /** UTC day -> per-model totals inside this window only. */
@@ -312,10 +316,34 @@ function markersOf(group: Group, index: number, groups: readonly Group[], input:
   return VIEW_MARKERS.filter(marker => markers.has(marker))
 }
 
+function mergedQuota(entries: readonly WindowUsageEntry[]): { quotaUsedPercent?: number; quotaPeakPercent?: number } {
+  let peak: number | undefined
+  let latestPct: number | undefined
+  let latestObs = Number.NEGATIVE_INFINITY
+  for (const entry of entries) {
+    if (entry.quotaPeakPercent !== undefined) {
+      peak = peak === undefined ? entry.quotaPeakPercent : Math.max(peak, entry.quotaPeakPercent)
+    }
+    if (entry.quotaUsedPercent !== undefined) {
+      peak = peak === undefined ? entry.quotaUsedPercent : Math.max(peak, entry.quotaUsedPercent)
+      const obs = entry.quotaObservedAt ?? entry.lastAddedAt ?? entry.countedFrom
+      if (latestPct === undefined || obs >= latestObs) {
+        latestPct = entry.quotaUsedPercent
+        latestObs = obs
+      }
+    }
+  }
+  return {
+    ...latestPct === undefined ? {} : { quotaUsedPercent: latestPct },
+    ...peak === undefined ? {} : { quotaPeakPercent: peak },
+  }
+}
+
 function presentWindow(group: Group, index: number, groups: readonly Group[], option: KindOption, input: ViewInput): ViewWindow {
   const current = index === groups.length - 1
   const end = endOf(group)
   const models = group.entries.reduce((sum, entry) => combineModels(sum, entry.models), {})
+  const quota = mergedQuota(group.entries)
   return {
     ...option,
     window0: group.window0,
@@ -326,6 +354,7 @@ function presentWindow(group: Group, index: number, groups: readonly Group[], op
     status: group.status,
     current,
     oldest: index === 0,
+    ...quota,
     markers: markersOf(group, index, groups, input, input.observed.find(window => sameOption(window, option))),
     models,
     days: group.entries.reduce((sum, entry) => combineDays(sum, entry.days), {}),
@@ -384,4 +413,39 @@ export function buildUsageView(input: ViewInput, query: ViewQuery = {}): UsageVi
     trackingStartedAt: input.trackingStartedAt,
     providerTotal: providerTotal(input),
   }
+}
+
+/**
+ * The newest merged window for every reported or stored (kind, scope) of one
+ * account, in selector order. Reuses the same dedup, merge and marker rules as
+ * {@link buildUsageView} without scanning once per kind.
+ */
+export function currentWindowsOf(input: ViewInput): ViewWindow[] {
+  const entries = visibleEntries(input)
+  const kinds = kindOptions(entries, input.observed)
+  const result: ViewWindow[] = []
+  for (const option of kinds) {
+    const groups = windowsOf(entries, option)
+    if (groups.length === 0) continue
+    result.push(presentWindow(groups[groups.length - 1]!, groups.length - 1, groups, option, input))
+  }
+  return result
+}
+
+/**
+ * Every merged window (current and historical) for every reported or stored
+ * (kind, scope) of one account. Reuses {@link windowsOf} and {@link presentWindow}
+ * so each returned cycle has exact deduped totals, markers, and quota %.
+ */
+export function allWindowsOf(input: ViewInput): ViewWindow[] {
+  const entries = visibleEntries(input)
+  const kinds = kindOptions(entries, input.observed)
+  const result: ViewWindow[] = []
+  for (const option of kinds) {
+    const groups = windowsOf(entries, option)
+    for (let i = 0; i < groups.length; i++) {
+      result.push(presentWindow(groups[i]!, i, groups, option, input))
+    }
+  }
+  return result
 }

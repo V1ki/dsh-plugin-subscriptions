@@ -93,3 +93,33 @@ test('selected window merges day buckets by model, excluding repeated IDs and ov
     '2026-11-20': 5, '2026-11-21': 3,
   })
 })
+
+test('accountUsage uses single snapshot load and falls back to default account when a removed account disappears', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'usage-reader-snap-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  let readdirCalls = 0
+  const store: UsageStoreView = {
+    dir, ready: Promise.resolve(), trackingStartedAt: started, tracker: undefined,
+    entries: () => [row('active', { account: 'logged-in' })],
+    unsavedDeltas: () => new Map(), unsavedDayDeltas: () => new Map(),
+    clearedAt: () => undefined,
+    clearProvider: async () => { throw new Error('unused') },
+  }
+  const { nodeUsageFileSystem } = await import('../src/usage/usage-files.js')
+  const service = new UsageService({
+    store,
+    fs: {
+      ...nodeUsageFileSystem,
+      readdir: async path => {
+        readdirCalls++
+        return nodeUsageFileSystem.readdir(path)
+      },
+    },
+  })
+  t.after(() => service.dispose())
+  const controller = createUsageHistoryController(service, async () => [{ key: 'logged-in', label: 'in@example.com' }])
+  const res = await controller.accountUsage({ provider: 'codex', account: 'removed-after-clear' })
+  assert.equal(readdirCalls, 1, 'accountUsage must load provider files only once per request')
+  assert.equal(res.account, 'logged-in', 'removed account falls back to default logged-in account')
+  assert.equal(res.view.account, 'logged-in')
+})

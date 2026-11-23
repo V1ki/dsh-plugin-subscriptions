@@ -1,14 +1,54 @@
 /**
- * The controller behind the `accountUsage` and `clearUsageHistory` endpoints
- *. `src/auth/rpc.ts` validates the payload shape
- * and the provider; this module resolves the account, checks the kind and
- * scope against what the provider reports, and calls the usage service.
- * It lives here rather than in `index.ts` so it can be tested without a
- * cordis boot; `index.ts` only supplies the account list.
+ * The controller behind the `usageDashboard`, `accountUsage` and
+ * `clearUsageHistory` endpoints. `src/auth/rpc.ts` validates the payload shape
+ * and the provider; this module resolves accounts, aggregates dashboard data,
+ * checks the kind and scope against what the provider reports, and calls the
+ * usage service. It lives here rather than in `index.ts` so it can be tested
+ * without a cordis boot; `index.ts` only supplies the account list.
  */
-import type { TrackedProvider } from './constants.js'
-import type { AccountUsageQuery, ClearResult, StoredSummary, UsageService } from './service.js'
-import type { UsageView, ViewKind } from './window-view.js'
+import { USAGE_TRACKED_PROVIDERS, type TrackedProvider } from './constants.js'
+import type { AccountUsageQuery, ClearResult, ProviderUsageSnapshot, StoredSummary, UsageService } from './service.js'
+import {
+  buildUsageDashboard,
+  DASHBOARD_RANGES,
+  type DashboardActiveWindow,
+  type DashboardActiveWindowModel,
+  type DashboardClearInfo,
+  type DashboardCycleModel,
+  type DashboardDailyBucket,
+  type DashboardDailyModelEntry,
+  type DashboardModelSummary,
+  type DashboardProviderAccount,
+  type DashboardProviderBreakdown,
+  type DashboardProviderInfo,
+  type DashboardQuotaCycle,
+  type DashboardRange,
+  type DashboardSummary,
+  type TokenTotals,
+  type UsageDashboardPayload,
+  type UsageDashboardResponse,
+} from './usage-dashboard.js'
+import { buildUsageView, type UsageView, type ViewKind } from './window-view.js'
+
+export {
+  DASHBOARD_RANGES,
+  type DashboardActiveWindow,
+  type DashboardActiveWindowModel,
+  type DashboardClearInfo,
+  type DashboardCycleModel,
+  type DashboardDailyBucket,
+  type DashboardDailyModelEntry,
+  type DashboardModelSummary,
+  type DashboardProviderAccount,
+  type DashboardProviderBreakdown,
+  type DashboardProviderInfo,
+  type DashboardQuotaCycle,
+  type DashboardRange,
+  type DashboardSummary,
+  type TokenTotals,
+  type UsageDashboardPayload,
+  type UsageDashboardResponse,
+}
 
 /** One account the dialog can switch to. */
 export interface UsageAccount {
@@ -47,8 +87,9 @@ export interface AccountUsageResponse {
 }
 
 export interface UsageHistoryController {
+  usageDashboard(payload: UsageDashboardPayload): Promise<UsageDashboardResponse>
   accountUsage(payload: AccountUsagePayload): Promise<AccountUsageResponse>
-  clearUsageHistory(provider: TrackedProvider): Promise<ClearResult>
+  clearUsageHistory(provider: TrackedProvider | 'all'): Promise<ClearResult>
 }
 
 /** A payload naming a kind or scope the provider does not report. */
@@ -99,23 +140,97 @@ function checkReported(view: UsageView, payload: AccountUsagePayload): void {
   }
 }
 
+type UsageServiceFace = Pick<UsageService, 'read' | 'accounts' | 'summary' | 'clear'> & {
+  snapshot?: (provider: TrackedProvider) => Promise<ProviderUsageSnapshot>
+}
+
 /**
  * @param service - the usage reader.
  * @param loggedInAccounts - the provider's logged-in accounts, default first; a store read, no token refresh.
+ * @param now - optional clock override for deterministic dashboard tests.
  */
 export function createUsageHistoryController(
-  service: Pick<UsageService, 'read' | 'accounts' | 'summary' | 'clear'>,
+  service: UsageServiceFace,
   loggedInAccounts: (provider: TrackedProvider) => Promise<LoggedInAccount[]>,
+  now: () => number = Date.now,
 ): UsageHistoryController {
   return {
+    async usageDashboard(payload) {
+      if (service.snapshot === undefined) {
+        throw new Error('usage dashboard requires UsageService.snapshot')
+      }
+      const snapshotFn = service.snapshot.bind(service)
+      const providerInputs = await Promise.all(USAGE_TRACKED_PROVIDERS.map(async provider => {
+        const [snap, loggedIn] = await Promise.all([
+          snapshotFn(provider),
+          loggedInAccounts(provider),
+        ])
+        return {
+          provider,
+          entries: snap.entries,
+          loggedIn,
+          observed: snap.observed,
+          ...snap.clearedAt === undefined ? {} : { clearedAt: snap.clearedAt },
+          preTracking: snap.total,
+          errors: snap.errors,
+          trackingStartedAt: snap.trackingStartedAt,
+        }
+      }))
+      const trackingStartedAt = providerInputs.reduce(
+        (min, item) => Math.min(min, item.trackingStartedAt),
+        providerInputs[0]?.trackingStartedAt ?? now(),
+      )
+      return buildUsageDashboard({
+        now: now(),
+        trackingStartedAt,
+        providers: providerInputs,
+      }, payload)
+    },
+
     async accountUsage(payload) {
+      if (service.snapshot !== undefined) {
+        const [loggedIn, snap] = await Promise.all([
+          loggedInAccounts(payload.provider),
+          service.snapshot(payload.provider),
+        ])
+        const accounts = usageAccounts(loggedIn, snap.accounts)
+        const requested = payload.account
+        const account = requested !== undefined && accounts.some(item => item.key === requested)
+          ? requested
+          : accounts[0]?.key
+        const view = buildUsageView({
+          provider: payload.provider,
+          account: account ?? NO_ACCOUNT,
+          entries: snap.entries,
+          observed: snap.observed(account ?? NO_ACCOUNT),
+          trackingStartedAt: snap.trackingStartedAt,
+          ...snap.clearedAt === undefined ? {} : { clearedAt: snap.clearedAt },
+          preTracking: snap.total,
+        }, {
+          ...payload.kind === undefined ? {} : { kind: payload.kind },
+          ...payload.scope === undefined ? {} : { scope: payload.scope },
+          ...payload.at === undefined ? {} : { at: payload.at },
+        })
+        checkReported(view, payload)
+        return {
+          provider: payload.provider,
+          ...account === undefined ? {} : { account },
+          accounts,
+          view,
+          stored: snap.stored,
+          errors: snap.errors,
+        }
+      }
       const [loggedIn, storedAccounts] = await Promise.all([loggedInAccounts(payload.provider), service.accounts(payload.provider)])
       const accounts = usageAccounts(loggedIn, storedAccounts)
-      const account = payload.account ?? accounts[0]?.key
+      const requested = payload.account
+      const account = requested !== undefined && accounts.some(item => item.key === requested)
+        ? requested
+        : accounts[0]?.key
       const query: AccountUsageQuery = {
         provider: payload.provider,
         account: account ?? NO_ACCOUNT,
-          ...payload.kind === undefined ? {} : { kind: payload.kind },
+        ...payload.kind === undefined ? {} : { kind: payload.kind },
         ...payload.scope === undefined ? {} : { scope: payload.scope },
         ...payload.at === undefined ? {} : { at: payload.at },
       }
@@ -123,6 +238,26 @@ export function createUsageHistoryController(
       checkReported(view, payload)
       return { provider: payload.provider, ...account === undefined ? {} : { account }, accounts, view, stored, errors }
     },
-    clearUsageHistory: provider => service.clear(provider),
+
+    async clearUsageHistory(provider) {
+      if (provider !== 'all') return service.clear(provider)
+      const errors: string[] = []
+      let clearedAt: number | undefined
+      let firstFailure: unknown
+      for (const tracked of USAGE_TRACKED_PROVIDERS) {
+        try {
+          const result = await service.clear(tracked)
+          clearedAt = clearedAt === undefined ? result.clearedAt : Math.max(clearedAt, result.clearedAt)
+          errors.push(...result.errors)
+        } catch (error) {
+          firstFailure ??= error
+          errors.push(error instanceof Error ? error.message : String(error))
+        }
+      }
+      if (clearedAt === undefined) {
+        throw firstFailure instanceof Error ? firstFailure : new Error(String(firstFailure ?? 'failed to clear usage history'))
+      }
+      return { clearedAt, errors }
+    },
   }
 }
