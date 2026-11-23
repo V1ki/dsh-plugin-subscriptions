@@ -22,7 +22,6 @@ import { resetActionBlock } from './reset-action.js'
 import { AntigravityQuotaSummary } from './AntigravityQuotaSummary.js'
 import { antigravityQuotaScope } from '../antigravity-model-id.js'
 import { visibleUsageWindows } from './usage-window-filter.js'
-import { AccountUsageDialog } from './AccountUsageDialog.js'
 import { ProviderAccountManager } from './ProviderAccountManager.js'
 import { ProviderActionIcon } from './ProviderActionIcon.js'
 import { ProviderRefreshButton } from './ProviderRefreshButton.js'
@@ -173,7 +172,12 @@ export interface SubscriptionsSectionInjected {
  * Props delivered by the slot outlet: the inject face spread flat (the
  * renderer erases the share boundary at the render call).
  */
-export type SubscriptionsSectionProps = Partial<SubscriptionsSectionInjected>
+export type SubscriptionsSectionProps = Partial<SubscriptionsSectionInjected> & {
+  /** Omit the pointer to the sidebar Usage page when already hosted inside it. */
+  hideUsageHint?: boolean
+  /** Expand section max-width comfortably when rendered inside the full-width sidebar page. */
+  embedded?: boolean
+}
 
 /** Card display metadata, in page order (names are brand names, not translated). */
 const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [
@@ -497,7 +501,7 @@ export function modelDefaultsSignature(
 export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const quotaMode = useQuotaDisplayMode()
   const quotaNow = useQuotaClock()
-  const { rpc } = props
+  const { rpc, hideUsageHint = false, embedded = false } = props
   const t = props.t ?? fallbackTranslate
   const [statuses, setStatuses] = useState<Partial<Record<SubscriptionProvider, ProviderStatus>>>({})
   // Undefined until a status snapshot arrives or the user chooses a tab.
@@ -545,7 +549,6 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [proxyLoadError, setProxyLoadError] = useState<string | undefined>(undefined)
   /** Proxy dialog state (draft fields; the password never pre-fills). */
   const [proxyOpen, setProxyOpen] = useState(false)
-  const [usageDialog, setUsageDialog] = useState<{ id: UsageProvider, name: string, account?: string }>()
   const [managedProvider, setManagedProvider] = useState<{ id: SubscriptionProvider; name: string }>()
   const [proxyEnabled, setProxyEnabled] = useState(false)
   const [proxyUrl, setProxyUrl] = useState('')
@@ -909,21 +912,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     return <p style={styles.intro}>{t('unavailable')}</p>
   }
 
-  return (
-    <div className="dsh-subscriptions-settings" style={styles.section}>
-      <style>{providerSettingsCss}</style>
-      <p style={styles.intro}>{t('intro')}</p>
-      <div className="dsh-subscription-provider-area">
-      <SubscriptionTabs prefix={tabIdPrefix} label={t('providerTabs')} active={activeProvider}
-        scrollLeftLabel={t('scrollProvidersLeft')} scrollRightLabel={t('scrollProvidersRight')}
-        onSelect={setSelectedProvider} tabRefs={tabRefs} tabs={sortedProviders.map(({ id, name }) => {
-          const status = statuses[id]
-          const displayName = status?.displayName || name
-          return { key: id, id, label: displayName, provider: id,
-            ariaLabel: displayName + ' — ' + statusText(t, status),
-            content: <><span aria-hidden="true" style={{ ...styles.dot, background: dotColor(status) }} />{displayName}</> }
-        })} />
-      {sortedProviders.map(({ id, name }) => {
+  const providerPanels = sortedProviders.map(({ id, name }) => {
         const status = statuses[id]
         const busy = status?.busy === true
         const deviceCode = deviceCodes[id]
@@ -931,7 +920,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
         return (
           <div key={id} role="tabpanel" data-subscription-provider={id} id={`${tabIdPrefix}-panel-${id}`}
             aria-labelledby={`${tabIdPrefix}-tab-${id}`} hidden={activeProvider !== id} tabIndex={0}>
-          <div style={styles.card}>
+          <div className="dsh-subscription-settings-card" style={styles.card}>
             <div className="dsh-subscription-provider-header">
               <div className="dsh-subscription-provider-identity">
                 <div style={{ ...styles.cardHeader, flexWrap: 'wrap' }}>
@@ -969,10 +958,6 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                     </button>
                   </div>
                 )}
-                {!busy && accounts.length === 0 && id !== 'copilot' && <button type="button" aria-haspopup="dialog"
-                  onClick={() => setUsageDialog({ id, name: status?.displayName || name })}>
-                  {t('usageOpen')}
-                </button>}
                 {/* 与同排其它按钮一致：登录/取消进行中不开第二个写配置的弹窗。 */}
                 {!busy && <button type="button" aria-haspopup="dialog"
                   onClick={() => setManagedProvider({ id, name })}>
@@ -1025,10 +1010,6 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                         {t('accountExpires', { date: new Date(account.expiresAt).toLocaleString() })}
                       </span>
                     )}
-                    {!busy && id !== 'copilot' && <button type="button" aria-haspopup="dialog"
-                      onClick={() => setUsageDialog({ id, name: status?.displayName || name, account: account.key })}>
-                      {t('usageOpen')}
-                    </button>}
                     <button
                       type="button"
                       style={{ marginLeft: 'auto', flexShrink: 0 }}
@@ -1162,32 +1143,79 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
           </div>
           </div>
         )
-      })}
+      })
+
+  const proxyCardNode = (
+    <div
+      className={embedded ? 'dsh-subscription-settings-card' : undefined}
+      style={embedded ? { ...styles.card, padding: '14px 16px', gap: 8 } : styles.proxyCard}
+    >
+      <div style={styles.cardHeader}>
+        <span style={{
+          ...styles.dot,
+          background: proxy?.enabled === true
+            ? 'var(--dsw-alias-state-success-primary)'
+            : 'var(--dsw-alias-label-dimmed)',
+        }} />
+        <span style={styles.name}>{t('proxyTitle')}</span>
+        <button
+          type="button"
+          style={{ marginLeft: 'auto', flexShrink: 0 }}
+          onClick={openProxyDialog}
+        >
+          {t('proxyConfigure')}
+        </button>
       </div>
-      <div style={styles.separator} />
-      <UsageBadgeDisplaySetting t={t} />
-      <div style={styles.proxyCard}>
-        <div style={styles.cardHeader}>
-          <span style={{
-            ...styles.dot,
-            background: proxy?.enabled === true
-              ? 'var(--dsw-alias-state-success-primary)'
-              : 'var(--dsw-alias-label-dimmed)',
-          }} />
-          <span style={styles.name}>{t('proxyTitle')}</span>
-          <button
-            type="button"
-            style={{ marginLeft: 'auto', flexShrink: 0 }}
-            onClick={openProxyDialog}
-          >
-            {t('proxyConfigure')}
-          </button>
-        </div>
-        <p style={styles.statusLine}>{proxyStatusText(t, proxy, proxyLoadError)}</p>
-      </div>
-      {usageDialog && <AccountUsageDialog provider={usageDialog.id} name={usageDialog.name}
-        {...usageDialog.account === undefined ? {} : { account: usageDialog.account }}
-        rpc={rpc} t={t} onClose={() => setUsageDialog(undefined)} />}
+      <p style={styles.statusLine}>{proxyStatusText(t, proxy, proxyLoadError)}</p>
+    </div>
+  )
+
+  const providerTabsNode = (
+    <SubscriptionTabs prefix={tabIdPrefix} label={t('providerTabs')} active={activeProvider}
+      scrollLeftLabel={t('scrollProvidersLeft')} scrollRightLabel={t('scrollProvidersRight')}
+      onSelect={setSelectedProvider} tabRefs={tabRefs} tabs={sortedProviders.map(({ id, name }) => {
+        const status = statuses[id]
+        const displayName = status?.displayName || name
+        return { key: id, id, label: displayName, provider: id,
+          ariaLabel: displayName + ' — ' + statusText(t, status),
+          content: <><span aria-hidden="true" style={{ ...styles.dot, background: dotColor(status) }} />{displayName}</> }
+      })} />
+  )
+
+  return (
+    <div
+      className={embedded ? 'dsh-subscriptions-settings dsh-subscriptions-settings-embedded' : 'dsh-subscriptions-settings'}
+      style={embedded ? { ...styles.section, maxWidth: 'none', width: '100%' } : styles.section}
+    >
+      <style>{providerSettingsCss}</style>
+      <p style={styles.intro}>{t('intro')}</p>
+      {!hideUsageHint && <p style={styles.statusLine}>{t('usageSettingsHint')}</p>}
+      {embedded ? (
+        <>
+          <div className="dsh-subscription-provider-area">
+            {providerTabsNode}
+          </div>
+          <div className="dsh-subscriptions-embedded-grid">
+            <div className="dsh-subscriptions-embedded-main">
+              {providerPanels}
+            </div>
+            <aside className="dsh-subscriptions-embedded-aside">
+              <UsageBadgeDisplaySetting t={t} />
+              {proxyCardNode}
+            </aside>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="dsh-subscription-provider-area">
+            {providerTabsNode}
+            {providerPanels}
+          </div>
+          <div style={styles.separator} />
+          <UsageBadgeDisplaySetting t={t} />
+          {proxyCardNode}
+        </>
+      )}
       {managedProvider && <ProviderAccountManager provider={managedProvider.id} name={managedProvider.name}
         rpc={rpc} t={t} accountsVersion={JSON.stringify((statuses[managedProvider.id]?.accounts ?? []).map(account => account.key).sort())}
         onClose={() => { setManagedProvider(undefined); void refresh() }} />}
