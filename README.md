@@ -70,11 +70,18 @@ The `video_generate` tool plays the generated clip inline:
 
 ![video_generate plays the clip inline](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/video-generate-inline.png)
 
-## Token usage history
+## Usage Dashboard & token history
 
-Open **Settings → Subscriptions**, select a provider tab, then click **Usage** next to an account. If no account is signed in, the provider's **Usage** button still opens any saved history. The dialog shows reported input, output, cache-read and cache-write tokens by model and by UTC date within the selected quota window. Reasoning tokens, when reported, are part of output. Before the provider reports a quota window, the dialog shows a pending window. Quota windows can overlap, so do not add their totals together. Copilot is not tracked.
+Open **Subscriptions** from the DSH sidebar to view the unified page with **Usage** (default) and **Settings** tabs (older hosts without sidebar panels keep **Settings → Subscriptions** unchanged). The Usage Dashboard aggregates tracked input, output, cache-read, and cache-write tokens across **Codex**, **Claude**, **Grok**, and **Antigravity** — filterable by provider, account (including signed-out historical accounts), and time range (`7D`, `30D`, `90D`, `All`). Reasoning tokens, when reported, are part of output and never double-counted; overlapping 5-hour and weekly quota windows are deduplicated in daily and KPI totals. Copilot is not tracked.
 
-The plugin saves aggregate counts and window metadata locally under `~/.dsh/plugins/subscriptions/usage/`; it does not store prompts, credentials, or per-request logs there. If DSH session history is available, the dialog can also show a separate provider-wide total from before per-account tracking began. **Clear history** removes this plugin's usage history for the selected provider, not DSH sessions, accounts, or live quota. This view does not make an extra quota request or estimate cost.
+- **Overview & trends**: KPI summary cards, a **26-week UTC calendar heatmap** (click any day cell to inspect its per-model and per-provider breakdown), a daily stacked token trend chart, and a ranked **By Model / By Provider** distribution view.
+- **Quota cycles**: a dual-axis combo chart comparing each 5-hour or weekly cycle's token consumption (bars) against its observed quota utilization percentage (line, with peak markers and gap breaks when quota `%` was not observed), plus quick pills for active cycles and an inline cycle inspector.
+
+![Sidebar Subscriptions Usage Dashboard with KPIs, 26-week heatmap, daily trend, and model distribution](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/usage-dashboard.png)
+
+![Quota Cycles dual-axis combo chart comparing cycle tokens and quota utilization percentage](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/usage-quota-cycles.png)
+
+The plugin saves aggregate counts, cycle quota percentages, and window metadata locally under `~/.dsh/plugins/subscriptions/usage/` (mode `0600`); it does not store prompts, credentials, or per-request logs there. **Clear history** removes this plugin's local usage history for a selected provider or all providers without affecting DSH sessions, accounts, or live quota. Opening the dashboard makes no extra quota requests and does not estimate cost.
 
 ## Providers
 

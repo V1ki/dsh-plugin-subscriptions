@@ -70,11 +70,18 @@ Antigravity 用量优先读取 `retrieveUserQuotaSummary`，只展示服务端�
 
 ![video_generate 内联播放生成的视频](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/video-generate-inline.png)
 
-## Token 用量历史
+## 用量看板与 Token 历史
 
-打开 **设置 → 订阅**，选择服务商标签页，再点击账号旁的 **用量**。未登录时，也可以通过服务商的 **用量** 按钮查看已保存的历史。弹窗按模型显示所选额度窗口内的输入、输出、缓存读取和缓存写入 token，并按 UTC 日期细分。服务商报告的推理 token 已包含在输出中。尚未获取额度窗口时，弹窗显示待确定窗口。不同额度窗口可能重叠，不要将它们的总数相加。暂不统计 Copilot。
+点击 DSH 左侧边栏的 **订阅** 进入统一页面，顶部可在 **用量**（默认首页）与 **设置** 之间切换（旧版无侧边栏的宿主继续保留 **设置 → 订阅** 入口）。用量看板跨 **Codex**、**Claude**、**Grok** 与 **Antigravity** 聚合记录输入、输出、缓存读取与缓存写入 token，支持按服务商、账号（含已退出登录的历史账号）以及时间范围（`7 天`、`30 天`、`90 天`、`全部`）筛选。服务商上报的推理 token 已包含在输出中，不重复计入总数；重叠的 5 小时与每周额度窗口在每日统计与 KPI 汇总中自动去重。暂不统计 Copilot。
 
-插件在本地 `~/.dsh/plugins/subscriptions/usage/` 中保存汇总计数和窗口信息，不在这里保存提示词、凭据或逐请求日志。如果 DSH 会话历史可用，弹窗还会单独显示开始按账号追踪之前的服务商总用量。**清空历史** 仅清除所选服务商在该插件中的用量历史，不影响 DSH 会话、账号或实时额度。此页面不会额外请求额度，也不估算费用。
+- **总览与趋势**：KPI 汇总卡片、**26 周 UTC 日历热力图**（点击任意日期可下钻查看当日模型与服务商明细）、每日 Token 堆叠柱状趋势图，以及 **按模型 / 按服务商** 分布视图。
+- **额度周期统计**：双轴组合图同屏对比每个 5 小时 / 每周周期的 Token 用量（左轴柱状）与额度消耗百分比（右轴折线，带峰值刻度；未采集到额度占比时自动断开不误画为 0%），并提供进行中周期快捷胶囊与行内周期详情卡。
+
+![侧边栏订阅用量看板：KPI 汇总、26 周日历热力图、每日趋势与用量分布](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/usage-dashboard.png)
+
+![额度周期统计双轴组合图：周期 Token 用量与额度消耗百分比对比](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/usage-quota-cycles.png)
+
+插件在本地 `~/.dsh/plugins/subscriptions/usage/`（权限 `0600`）保存汇总计数、周期额度占比和窗口元数据，不在这里保存提示词、凭据或逐请求日志。**清空历史** 支持清空单个服务商或全部服务商在该插件中的本地用量历史，不影响 DSH 会话、账号或实时额度。打开看板不会额外请求额度，也不估算费用。
 
 ## Provider 一览
 
