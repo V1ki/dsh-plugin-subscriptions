@@ -193,13 +193,18 @@ function prefixDigest(hash: Hash): string {
 /**
  * The wire block an assistant message's non-reasoning block is sent as;
  * undefined for blocks the Messages API does not accept there.
+ * @param toolId - the id a tool call is sent with: {@link anthropicToolIds}
+ * in a request, the stored id where the response-content digest is taken.
  */
-function assistantWireBlock(block: TranslatableBlock | ContentBlock): Record<string, unknown> | undefined {
+function assistantWireBlock(
+  block: TranslatableBlock | ContentBlock,
+  toolId: (id: string) => string,
+): Record<string, unknown> | undefined {
   switch (block.type) {
     case 'text':
       return { type: 'text', text: block.text }
     case 'tool-call':
-      return { type: 'tool_use', id: String(block.id), name: block.name, input: parseToolInput(block.arguments) }
+      return { type: 'tool_use', id: toolId(String(block.id)), name: block.name, input: parseToolInput(block.arguments) }
     case 'image':
       return 'dataBase64' in block
         ? { type: 'image', source: { type: 'base64', media_type: block.mediaType, data: block.dataBase64 } }
@@ -218,7 +223,8 @@ function assistantWireBlock(block: TranslatableBlock | ContentBlock): Record<str
 export function responseContentDigest(blocks: readonly (TranslatableBlock | ContentBlock)[]): string {
   const hash = createHash('sha256')
   for (const block of blocks) {
-    const wire = assistantWireBlock(block)
+    // Stored ids: the digest is recorded while streaming, before any request maps them.
+    const wire = assistantWireBlock(block, id => id)
     if (wire !== undefined) hash.update(`${canonicalJson(wire)}\u0000`)
   }
   return hash.digest('base64url').slice(0, 22)
@@ -415,6 +421,86 @@ function parseToolInput(raw: string): Record<string, unknown> {
 }
 
 /**
+ * The ids the Messages API accepts in `tool_use.id` and
+ * `tool_result.tool_use_id`. Any other id is refused with HTTP 400:
+ * ``messages.N.content.M.tool_use.id: String should match pattern '^[a-zA-Z0-9_-]+$'``.
+ */
+const ANTHROPIC_TOOL_ID = /^[a-zA-Z0-9_-]+$/
+
+/** Longest id {@link generatedToolId} builds; Anthropic's own ids are shorter. */
+const GENERATED_TOOL_ID_MAX_LENGTH = 64
+
+/** Base64url digest characters closing a generated id (96 bits). */
+const GENERATED_TOOL_ID_DIGEST = 16
+
+/** The call id a tool-role message answers: its own correlation field, else the call its source names. */
+function toolMessageCallId(message: TranslatableMessage): string | undefined {
+  return message.toolCallId ?? message.tool_call_id
+    ?? (message.source?.kind === 'tool' ? String(message.source.callId) : undefined)
+}
+
+/**
+ * The accepted id sent for a refused one: the original with every run of
+ * refused characters replaced by `_`, cut short, then a digest of the whole
+ * original. It stays readable next to the history, uses only accepted
+ * characters (base64url included), and depends on nothing but the original
+ * and the attempt. Requests already sent depend on this exact form: a change
+ * rewrites the cached prefix and drops recorded thinking of switched sessions.
+ * @param id - the stored id, which the API refuses.
+ * @param attempt - 0, or how many candidates were already taken in this request.
+ */
+function generatedToolId(id: string, attempt: number): string {
+  const digest = createHash('sha256').update(attempt === 0 ? id : `${attempt}\u0000${id}`).digest('base64url')
+  const stem = id.replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, GENERATED_TOOL_ID_MAX_LENGTH - GENERATED_TOOL_ID_DIGEST - 1)
+  return `${stem}_${digest.slice(0, GENERATED_TOOL_ID_DIGEST)}`
+}
+
+/**
+ * The wire id of every tool call and tool result in one request.
+ *
+ * A session can switch providers, so its history can hold calls another
+ * route produced, with ids the Messages API refuses: the OpenAI Codex route
+ * records `call_…|fc_…`. Such ids are rewritten here, in the request only;
+ * the stored history keeps its own.
+ *
+ * - An accepted id is sent verbatim, so a request whose ids are all accepted
+ *   is byte-identical to one built without this step.
+ * - A refused id becomes {@link generatedToolId}. Its first candidate depends
+ *   only on the original, so every request of a session sends the same id and
+ *   the cached prefix and the thinking prefix check keep matching. Only a later
+ *   call already holding that exact candidate (a 96-bit digest match) moves
+ *   it: one cache miss, never a refused request.
+ * - No two ids share a wire id: every accepted id is reserved first, and a
+ *   generated id already taken is derived again. A call and the results that
+ *   answer it carry the same stored id, so they stay paired whichever history
+ *   format names the call.
+ * @param messages - the request's messages.
+ * @returns the wire id of a stored tool-call id.
+ */
+function anthropicToolIds(messages: readonly TranslatableMessage[]): (id: string) => string {
+  const stored = new Set<string>()
+  for (const message of messages) {
+    const answered = message.role === 'tool' ? toolMessageCallId(message) : undefined
+    if (answered !== undefined) stored.add(answered)
+    for (const block of message.content) {
+      if (block.type === 'tool-call') stored.add(String(block.id))
+      else if (block.type === 'tool-result') stored.add(String(block.toolCallId))
+    }
+  }
+  const taken = new Set([...stored].filter(id => ANTHROPIC_TOOL_ID.test(id)))
+  const generated = new Map<string, string>()
+  for (const id of stored) {
+    if (ANTHROPIC_TOOL_ID.test(id)) continue
+    let attempt = 0
+    let wire = generatedToolId(id, attempt)
+    while (taken.has(wire)) wire = generatedToolId(id, ++attempt)
+    taken.add(wire)
+    generated.set(id, wire)
+  }
+  return id => generated.get(id) ?? id
+}
+
+/**
  * Move a user message's `tool_result` blocks into one contiguous run at the
  * front, preserving the relative order of both groups.
  *
@@ -471,6 +557,10 @@ function conversationStart(messages: readonly TranslatableMessage[]): number {
  * the prefix each was produced after is computed here from the request being
  * built, so a changed system prompt, tool set or earlier message drops the
  * thinking that depended on it while the rest of the history is sent as before.
+ *
+ * Tool-call ids the Messages API refuses, such as the OpenAI Codex route's
+ * `call_…|fc_…`, go out in an accepted form that is the same on every request
+ * ({@link anthropicToolIds}); accepted ids and the stored history are unchanged.
  * @param messages - ordered conversation messages with resolved images.
  * @param replay - the request's route, model and request-level prefix;
  * omitted, no reasoning is replayed.
@@ -481,6 +571,7 @@ export function assembleAnthropicMessages(
   replay?: ThinkingReplayContext,
 ): AnthropicMessagesAssembly {
   const history = replayHistory(messages, replay)
+  const toolId = anthropicToolIds(messages)
   const out: AnthropicMessage[] = []
   /** Placeholder object of each candidate, so the final position is known before choosing. */
   const placeholders = new Map<Record<string, unknown>, number>()
@@ -493,12 +584,11 @@ export function assembleAnthropicMessages(
     const role = message.role === 'assistant' ? 'assistant' : 'user'
     const blocks: Record<string, unknown>[] = []
     if (message.role === 'tool') {
-      const id = message.toolCallId ?? message.tool_call_id
-        ?? (message.source?.kind === 'tool' ? String(message.source.callId) : undefined)
+      const id = toolMessageCallId(message)
       if (id === undefined) throw new LlmError('tool result has no call id', 'INVALID_REQUEST')
       blocks.push({
         type: 'tool_result',
-        tool_use_id: id,
+        tool_use_id: toolId(id),
         content: toolResultContent({ type: 'tool-result', toolCallId: ToolCallId(id), content: message.content }),
         ...message.isError === true ? { is_error: true } : {},
       })
@@ -535,13 +625,13 @@ export function assembleAnthropicMessages(
           // died holding, which no result will ever answer — so it rides as
           // descriptive text instead of a call the API would reject.
           blocks.push(role === 'assistant'
-            ? assistantWireBlock(block) as Record<string, unknown>
+            ? assistantWireBlock(block, toolId) as Record<string, unknown>
             : { type: 'text', text: `[tool call ${block.name}: ${block.arguments}]` })
           break
         case 'tool-result':
           blocks.push({
             type: 'tool_result',
-            tool_use_id: String(block.toolCallId),
+            tool_use_id: toolId(String(block.toolCallId)),
             content: toolResultContent(block),
             ...block.isError === true ? { is_error: true } : {},
           })
