@@ -845,6 +845,7 @@ export function apply(ctx: Context, config: Config): void {
     return model === undefined ? 'standard' : modelSpeeds.get(model) ?? 'standard'
   }
   let codexAdapter: CodexAdapter | undefined
+  let grokAdapter: GrokAdapter | undefined
   // Dropped on every copilot auth transition so replay state (captured
   // reasoning) never survives an account switch in memory.
   let copilotAdapter: CopilotAdapter | undefined
@@ -934,7 +935,7 @@ export function apply(ctx: Context, config: Config): void {
           onCatalogChanged: catalogChanged,
           accountCatalogStore: account => accountCatalogStore('codex', account),
           defaultEffortOf: (model: string) => defaultEffortOf('codex', model),
-          contextWindowOf: model => preferences.contextWindow(model),
+          contextWindowOf: model => preferences.contextWindow('codex', model),
           defaultContextWindow: () => preferences.get('codex').contextWindow,
           defaultMaxTokens: () => preferences.get('codex').defaultMaxTokens,
           pool: () => poolAdapter,
@@ -1019,8 +1020,12 @@ export function apply(ctx: Context, config: Config): void {
           onCatalogChanged: catalogChanged,
           accountCatalogStore: account => accountCatalogStore('grok', account),
           defaultEffortOf: (model: string) => defaultEffortOf('grok', model),
+          // Catalog-driven context tiers (issue #149): the Settings page
+          // offers the window list and the adapter caps the request here.
+          contextWindowOf: model => preferences.contextWindow('grok', model),
           pool: () => poolAdapter,
         })
+        grokAdapter = adapter
         adapters.set('grok', adapter)
         handles.set('grok', register('grok', adapter))
         break
@@ -1390,11 +1395,40 @@ export function apply(ctx: Context, config: Config): void {
         if (provider === 'codex' && codexAdapter) {
           for (const account of accountCatalogs) {
             if (account.models?.some(entry => entry.id === model.id)) {
-              const limits = await codexAdapter.contextLimits(model.id, account.account).catch(() => undefined)
+              const limits = await withTimeout(
+                () => codexAdapter.contextLimits(model.id, account.account),
+                DISCOVERY_TIMEOUT_MS,
+              ).catch(() => undefined)
               if (limits) contexts.push(limits)
             }
           }
         }
+        const grokContexts: { default: number; max: number; options?: number[] }[] = []
+        if (provider === 'grok' && grokAdapter) {
+          for (const account of accountCatalogs) {
+            if (account.models?.some(entry => entry.id === model.id)) {
+              const limits = await withTimeout(
+                () => grokAdapter.contextLimits(model.id, account.account),
+                DISCOVERY_TIMEOUT_MS,
+              ).catch(() => undefined)
+              if (limits) grokContexts.push(limits)
+            }
+          }
+        }
+        const grokLimits = (() => {
+          if (grokContexts.length === 0) return undefined
+          const defaultWindow = Math.min(...grokContexts.map(entry => entry.default))
+          const maxWindow = Math.min(...grokContexts.map(entry => entry.max))
+          const optionSets = grokContexts.map(entry => new Set(entry.options ?? [entry.default]))
+          const commonOptions = [...optionSets[0]]
+            .filter(option => option <= maxWindow && optionSets.every(set => set.has(option)))
+            .sort((left, right) => left - right)
+          return {
+            default: defaultWindow,
+            max: maxWindow,
+            ...(commonOptions.length > 1 ? { options: commonOptions } : {}),
+          }
+        })()
         // A model with unavailable capabilities can still be hidden or restored.
         const info = await withTimeout(() => adapter.resolveModel(provider, model.id), DISCOVERY_TIMEOUT_MS).catch(() => undefined)
         return {
@@ -1407,6 +1441,11 @@ export function apply(ctx: Context, config: Config): void {
             defaultContextWindow: Math.min(...contexts.map(entry => entry.default)),
             maxContextWindow: Math.min(...contexts.map(entry => entry.max)),
           } : {}),
+          ...(grokLimits === undefined ? {} : {
+            defaultContextWindow: grokLimits.default,
+            maxContextWindow: grokLimits.max,
+            ...grokLimits.options === undefined ? {} : { contextWindowOptions: grokLimits.options },
+          }),
         }
       }))
       // Announce forced refresh only after the replacement catalog is ready.

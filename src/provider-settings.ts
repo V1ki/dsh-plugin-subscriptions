@@ -120,7 +120,7 @@ export function validatePreferences(provider: ProviderId, input: unknown): Provi
     result[field] = value
   }
   if (raw.contextWindows !== undefined) {
-    if (provider !== 'codex') throw new Error('context window overrides are currently supported only for Codex')
+    if (provider !== 'codex' && provider !== 'grok') throw new Error('context window overrides are currently supported only for Codex and Grok')
     if (!raw.contextWindows || typeof raw.contextWindows !== 'object' || Array.isArray(raw.contextWindows)) {
       throw new Error('contextWindows must be a model-to-token map')
     }
@@ -207,8 +207,8 @@ export class ProviderSettingsStore {
     return names && Object.hasOwn(names, model) ? names[model] : fallback
   }
 
-  contextWindow(model: string): number | undefined {
-    const windows = this.current.providers.codex?.contextWindows
+  contextWindow(provider: ProviderId, model: string): number | undefined {
+    const windows = this.current.providers[provider]?.contextWindows
     return windows && Object.hasOwn(windows, model) ? windows[model] : undefined
   }
 

@@ -243,3 +243,62 @@ test('Antigravity cached roster remains available immediately after clearing and
     await rm(home, { recursive: true, force: true })
   }
 })
+
+test('Grok RPC exposes catalog context tiers and applies saved contextWindows overrides', async () => {
+  const { catalogStore } = await import('../src/providers/catalog-store.js')
+  const home = await mkdtemp(join(tmpdir(), 'grok-context-rpc-'))
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  const ctx = new Context()
+  const llm = new LlmRuntime(ctx)
+  const adapters = new Map<string, AccountAwareAdapter>()
+  const register = llm.registerAdapter.bind(llm)
+  llm.registerAdapter = (routes: string[], adapter: AccountAwareAdapter) => { adapters.set(routes[0], adapter); return register(routes, adapter) }
+  const connection = createFakeConnection()
+  ctx.provide('connection', connection.connection)
+  ctx.provide('tools', { register: () => () => {} })
+  let runtime: ReturnType<typeof ctx.plugin> | undefined
+  try {
+    await saveAccountSession('grok', 'grok-user', {
+      accessToken: 'tok',
+      refreshToken: 'ref',
+      expiresAt: Date.now() + 3600_000,
+      tokenEndpoint: 'https://auth.x.ai/oauth2/token',
+      account: 'grok-user@example.com',
+    })
+    await catalogStore('grok').save({
+      at: Date.now(),
+      models: [
+        { id: 'grok-4.7', name: 'Grok 4.7', contextWindow: 256_000, contextWindowOptions: [256_000, 500_000] },
+        { id: 'grok-4.3', name: 'Grok 4.3', contextWindow: 256_000 },
+      ],
+    })
+    runtime = ctx.plugin(plugin, { providers: ['grok'], pool: { enabled: false } })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    const call = (endpoint: string, payload: unknown) => connection.handler(endpoint, payload, new AbortController().signal)
+    const adapter = adapters.get('grok')!
+
+    const initial = await call('providerSettings', { provider: 'grok' })
+    assert.ok(initial.ok)
+    const rows = (initial.value as { models: { id: string; defaultContextWindow?: number; maxContextWindow?: number; contextWindowOptions?: number[] }[] }).models
+    const g47 = rows.find(row => row.id === 'grok-4.7')
+    const g43 = rows.find(row => row.id === 'grok-4.3')
+    assert.deepEqual(g47 && { default: g47.defaultContextWindow, max: g47.maxContextWindow, options: g47.contextWindowOptions }, {
+      default: 256_000, max: 500_000, options: [256_000, 500_000],
+    })
+    assert.deepEqual(g43 && { default: g43.defaultContextWindow, max: g43.maxContextWindow, options: g43.contextWindowOptions }, {
+      default: 256_000, max: 256_000, options: undefined,
+    })
+    assert.equal((await adapter.resolveModel('grok', 'grok-4.7')).context?.contextWindow, 256_000)
+
+    assert.equal((await call('setProviderSettings', { provider: 'grok', settings: { contextWindows: { 'grok-4.7': 500_000 } } })).ok, true)
+    assert.equal((await adapter.resolveModel('grok', 'grok-4.7')).context?.contextWindow, 500_000)
+    assert.equal((await call('setProviderSettings', { provider: 'grok', settings: { contextWindows: { 'grok-4.7': 0 } } })).ok, false)
+    assert.equal((await call('setProviderSettings', { provider: 'grok', settings: {} })).ok, true)
+    assert.equal((await adapter.resolveModel('grok', 'grok-4.7')).context?.contextWindow, 256_000)
+  } finally {
+    await runtime?.dispose()
+    if (previous === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previous
+    await rm(home, { recursive: true, force: true })
+  }
+})
