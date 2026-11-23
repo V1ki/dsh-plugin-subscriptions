@@ -11,6 +11,7 @@
  * account pools behave exactly like the upstream providers.
  */
 import { LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import type { BuiltinLlmFailureCode } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
@@ -108,7 +109,7 @@ export interface ChatSubscriptionAdapterOptions {
 
 const ownedErrors = new WeakSet<Error>()
 
-function failure(message: string, code: string): LlmError {
+function failure(message: string, code: BuiltinLlmFailureCode): LlmError {
   const error = new LlmError(message, code)
   ownedErrors.add(error)
   return error
@@ -268,7 +269,7 @@ export class ChatSubscriptionAdapter extends LlmAdapter implements AccountAwareA
       : this.catalog.get(account)?.find(entry => entry.id === model)
     const found: ChatSubscriptionDiscovered | undefined = cached ?? this.staticEntry(model)
     if (found === undefined) {
-      throw failure(`${this.options.definition.name} has no model "${model}"; configure a supported model in this route catalog`, 'INVALID_MODEL')
+      throw failure(`${this.options.definition.name} has no model "${model}"; configure a supported model in this route catalog`, 'MODEL_UNSUPPORTED')
     }
     const reasoning = this.reasoningOf(model)
     return {
@@ -371,7 +372,7 @@ export class ChatSubscriptionAdapter extends LlmAdapter implements AccountAwareA
         response = await request(session.accessToken)
       }
       if (response.redirected || (response.status >= 300 && response.status < 400)) {
-        throw failure(`${definition.label} redirects are forbidden; the token is sent only to the fixed subscription endpoint`, 'REDIRECT_BLOCKED')
+        throw failure(`${definition.label} redirects are forbidden; the token is sent only to the fixed subscription endpoint`, 'INVALID_RESPONSE')
       }
       if (!response.ok) {
         throw await httpLlmError(response, `${definition.label} request rejected`,

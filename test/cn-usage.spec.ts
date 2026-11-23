@@ -152,10 +152,10 @@ test('glm usage: credit windows, plan, and available reset cards', async () => {
         success: true,
         data: {
           fiveHourResets: [
-            { recordId: 11, resetType: 'FIVE_HOUR', expireTime: '2026-11-20 23:59:59', available: true },
-            { recordId: 12, resetType: 'FIVE_HOUR', expireTime: '2026-11-20 23:59:59', status: 'consumed' },
+            { recordId: 11, resetType: 'FIVE_HOUR', expireTime: '2026-12-20 23:59:59', available: true },
+            { recordId: 12, resetType: 'FIVE_HOUR', expireTime: '2026-12-20 23:59:59', status: 'consumed' },
           ],
-          weekResets: [{ id: 21, expireTime: '2026-11-25 23:59:59' }],
+          weekResets: [{ id: 21, expireTime: '2026-12-25 23:59:59' }],
         },
       },
     }],
@@ -168,7 +168,7 @@ test('glm usage: credit windows, plan, and available reset cards', async () => {
   ])
   assert.equal(usage.windows?.[0]?.resetsAt, 1787563232239)
   assert.deepEqual(usage.resetCredits?.map(card => card.id), ['11', '21'])
-  assert.equal(usage.resetCredits?.[0]?.expiresAt, Date.parse('2026-11-20T23:59:59+08:00'))
+  assert.equal(usage.resetCredits?.[0]?.expiresAt, Date.parse('2026-12-20T23:59:59+08:00'))
   // The official client sends the minted key bare, without a Bearer prefix.
   assert.equal(headers(GLM_LIMIT)[0]?.authorization, 'kid.secret')
 })

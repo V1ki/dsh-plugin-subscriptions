@@ -102,6 +102,7 @@ import { DEFAULT_RATE_LIMIT_MAX_WAIT_MS, resolveRateLimitWait } from './provider
 import type { RateLimitConfig } from './providers/rate-limit.js'
 import { DEFAULT_PROMPT_CACHE_TTL } from './translate/anthropic.js'
 import type { PromptCacheTtl } from './translate/anthropic.js'
+import type { HostPathMapper } from './translate/resolved.js'
 import { accountCatalogStore, catalogStore } from './providers/catalog-store.js'
 import { ClaudeCliVersionCache } from './providers/claude-cli-version.js'
 import type { CliVersion, NpmCliVersionCache } from './providers/npm-cli-version.js'
@@ -203,6 +204,14 @@ export interface Config {
    * compaction and session-title requests always stay on five minutes.
    */
   claudePromptCacheTtl?: PromptCacheTtl
+  /**
+   * Claude only: tool-name patterns sent with `defer_loading: true`, with the
+   * server-side tool search tool added, so the model loads those definitions
+   * on demand instead of carrying them in every request. A pattern is a
+   * literal name or a prefix ending in `*` (`mcp__*`). Default empty: the
+   * request body is unchanged.
+   */
+  claudeDeferTools?: string[]
   /** Whether and how long a route waits out a closed rate-limit window. */
   rateLimit?: RateLimitConfig
   /** Advisory model catalogs overriding the built-in defaults, per provider. */
@@ -271,6 +280,7 @@ export const Config: z<Config> = z.object({
   codexClientVersion: z.string(),
   streamIdleTimeoutMs: z.number().min(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   claudePromptCacheTtl: z.union(['5m', '1h']).default(DEFAULT_PROMPT_CACHE_TTL),
+  claudeDeferTools: z.array(z.string()).default([]),
   rateLimit: z.object({
     wait: z.boolean().default(true),
     maxWaitMs: z.number().min(1).default(DEFAULT_RATE_LIMIT_MAX_WAIT_MS),
@@ -1060,6 +1070,12 @@ export function apply(ctx: Context, config: Config): void {
   if (claudePromptCacheTtl !== '5m' && claudePromptCacheTtl !== '1h') {
     throw new Error(`${name}: claudePromptCacheTtl must be '5m' or '1h'`)
   }
+  const claudeDeferTools = config.claudeDeferTools ?? []
+  if (!Array.isArray(claudeDeferTools)
+    || claudeDeferTools.some(pattern => typeof pattern !== 'string' || pattern.length === 0 || pattern !== pattern.trim())) {
+    // A pattern with surrounding whitespace would silently match nothing, so it is rejected rather than trimmed.
+    throw new Error(`${name}: claudeDeferTools must be an array of non-empty strings without surrounding whitespace`)
+  }
   const rateLimit = resolveRateLimitWait(config.rateLimit, `${name}: rateLimit`)
   const catalog = resolveCatalog(config.models)
   // A non-empty configured catalog is an explicit override: it wins over live
@@ -1091,6 +1107,15 @@ export function apply(ctx: Context, config: Config): void {
   // this plugin's apply, so a one-time capture would stay undefined forever.
   const resolveAttachments = (): AttachmentStore | undefined =>
     ctx.get('attachments') as AttachmentStore | undefined
+  // Optional, resolved per request for the same reason: maps an attachment's
+  // host path into the tool execution world, so an image offloaded to text
+  // names a read-only copy the model can reopen. Structural face of the
+  // filesystem service; only this one method is consumed.
+  const resolveHostPathMapper = (): HostPathMapper | undefined => {
+    const fs = ctx.get('fs') as { processPathFromHostPath?: HostPathMapper } | undefined
+    const map = fs?.processPathFromHostPath
+    return typeof map === 'function' ? hostPath => map.call(fs, hostPath) : undefined
+  }
 
   // Registration handles are kept so an auth-state change can re-announce the
   // route (`replace` fires `llm/adapters-updated`), which makes the web model
@@ -1216,6 +1241,8 @@ export function apply(ctx: Context, config: Config): void {
           accountCatalogStore: account => accountCatalogStore('codex', account),
           defaultEffortOf: (model: string) => defaultEffortOf('codex', model),
           contextWindowOf: model => preferences.contextWindow(model),
+          defaultContextWindow: () => preferences.get('codex').contextWindow,
+          defaultMaxTokens: () => preferences.get('codex').defaultMaxTokens,
           pool: () => poolAdapter,
           speedFor: (sessionId: string | undefined, model: string): boolean | Promise<boolean> =>
             sessionId !== undefined
@@ -1254,6 +1281,7 @@ export function apply(ctx: Context, config: Config): void {
           discovery: !overridden.has('claude'),
           onWarn,
           resolveAttachments,
+          resolveHostPathMapper,
           catalogStore: catalogStore('claude'),
           onCatalogChanged: catalogChanged,
           accountCatalogStore: account => accountCatalogStore('claude', account),
@@ -1261,6 +1289,7 @@ export function apply(ctx: Context, config: Config): void {
           resolveCliVersion: () => claudeVersion.resolve(),
           promptCacheTtl: claudePromptCacheTtl,
           promptCacheTtlOverride: () => preferences.promptCacheTtl(),
+          deferToolPatterns: () => claudeDeferTools,
           pool: () => poolAdapter,
         })
         adapters.set('claude', adapter)

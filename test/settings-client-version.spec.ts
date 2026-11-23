@@ -1,8 +1,9 @@
+import './css-hook.js'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { ClientVersionTag } from '../src/client/SubscriptionsSection.js'
+const { ClientVersionTag } = await import('../src/client/SubscriptionsSection.js')
 import { en, zh } from '../src/client/locales.js'
 
 const translator = (dictionary: typeof en) => (key: keyof typeof en, params?: Record<string, unknown>) =>

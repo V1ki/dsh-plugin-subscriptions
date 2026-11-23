@@ -9,6 +9,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { LlmError } from '@deepseek-ai/dsh-llm'
+import { ACCOUNT_SUSPENDED_CODE } from '../src/providers/common.js'
 import {
   accountKey,
   AUTH_COOLDOWN_MS,
@@ -65,7 +66,7 @@ test('classifyPoolFailure: the provider retry-after wins over the default cooldo
 })
 
 test('classifyPoolFailure: auth failures park the account until re-login', () => {
-  for (const code of ['AUTH', 'INVALID_CREDENTIAL', 'MISSING_CREDENTIAL']) {
+  for (const code of ['AUTH', 'INVALID_CREDENTIAL', 'MISSING_CREDENTIAL'] as const) {
     assert.deepEqual(classifyPoolFailure(new LlmError('denied', code), 'claude'), {
       action: 'switch',
       cooldownMs: AUTH_COOLDOWN_MS,
@@ -75,8 +76,29 @@ test('classifyPoolFailure: auth failures park the account until re-login', () =>
   }
 })
 
+test('classifyPoolFailure: a suspended account parks the whole account like an auth failure', () => {
+  // A terms-of-service ban is permanent and account-wide: retrying the member can
+  // never succeed, so the pool must switch away from every model on it, while the
+  // verdict is not a credential fault and keeps its own reason on the record.
+  const error = new LlmError('account suspended', ACCOUNT_SUSPENDED_CODE)
+  assert.equal(error.code, 'ACCOUNT_SUSPENDED')
+  assert.deepEqual(classifyPoolFailure(error, 'antigravity'), {
+    action: 'switch',
+    cooldownMs: AUTH_COOLDOWN_MS,
+    reason: 'ACCOUNT_SUSPENDED',
+    scope: 'account',
+  })
+  // The suspension outranks the model-scoped lane Antigravity uses for quotas.
+  assert.deepEqual(classifyPoolFailure(error, 'claude'), {
+    action: 'switch',
+    cooldownMs: AUTH_COOLDOWN_MS,
+    reason: 'ACCOUNT_SUSPENDED',
+    scope: 'account',
+  })
+})
+
 test('classifyPoolFailure: transient server failures cool the member briefly', () => {
-  for (const code of ['SERVER', 'TIMEOUT']) {
+  for (const code of ['SERVER', 'TIMEOUT'] as const) {
     assert.deepEqual(classifyPoolFailure(new LlmError('oops', code), 'codex'), {
       action: 'switch',
       cooldownMs: TRANSIENT_COOLDOWN_MS,
@@ -95,7 +117,7 @@ test('classifyPoolFailure: an empty completion switches without a health record'
 })
 
 test('classifyPoolFailure: plan/model availability switches the member', () => {
-  for (const code of ['HTTP_402', 'HTTP_404']) {
+  for (const code of ['HTTP_402', 'HTTP_404'] as const) {
     assert.deepEqual(classifyPoolFailure(new LlmError('unavailable', code), 'codex'), {
       action: 'switch',
       cooldownMs: TRANSIENT_COOLDOWN_MS,
@@ -106,7 +128,7 @@ test('classifyPoolFailure: plan/model availability switches the member', () => {
 })
 
 test('classifyPoolFailure: request-fault and unknown failures rethrow', () => {
-  for (const code of ['CONTEXT_WINDOW_EXCEEDED', 'ABORTED', 'HTTP_400']) {
+  for (const code of ['CONTEXT_WINDOW_EXCEEDED', 'ABORTED', 'HTTP_400'] as const) {
     assert.deepEqual(classifyPoolFailure(new LlmError('bad request', code), 'codex'), { action: 'throw' })
   }
   assert.deepEqual(classifyPoolFailure(new Error('plain'), 'codex'), { action: 'throw' })

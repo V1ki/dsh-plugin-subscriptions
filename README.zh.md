@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-把你的 **ChatGPT(Codex)**、**Claude**、**Grok(X Premium)**、**GitHub Copilot**、**Google Antigravity**、**Kimi Code**、**GLM Coding Plan** 和 **Qwen Code** 订阅当作 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的 LLM provider 使用 —— 不需要 API key。Codex、Grok 和 Antigravity 通过 dsh web 界面 OAuth 登录(设置 → 订阅);Copilot 使用 GitHub OAuth 设备码流程;Claude 在存在 Claude Code 会话时直接导入凭据(macOS Keychain 或 `~/.claude/.credentials.json`),否则回退到同样的浏览器 OAuth 流程,因此不要求安装 Claude Code CLI。Token 保存在 `~/.dsh/plugins/subscriptions/auth.json`(权限 0600),过期自动刷新。
+把你的 **ChatGPT(Codex)**、**Claude**、**Grok(X Premium)**、**GitHub Copilot**、**Google Antigravity**、**Kimi Code**、**GLM Coding Plan** 和 **Qwen 千问AI平台** 订阅当作 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的 LLM provider 使用 —— 只要服务商支持，就用浏览器登录而不是粘贴 Key(Qwen 千问AI平台是例外:平台 Key 只需填一次)。Codex、Grok 和 Antigravity 通过 dsh web 界面 OAuth 登录(设置 → 订阅);Copilot 使用 GitHub OAuth 设备码流程;Claude 在存在 Claude Code 会话时直接导入凭据(macOS Keychain 或 `~/.claude/.credentials.json`),否则回退到同样的浏览器 OAuth 流程,因此不要求安装 Claude Code CLI。Token 保存在 `~/.dsh/plugins/subscriptions/auth.json`(权限 0600),过期自动刷新。
 
 ## 订阅与模型显示名
 
@@ -46,13 +46,13 @@ Antigravity 用量优先读取 `retrieveUserQuotaSummary`，只展示服务端�
 
 ![速度开关及其标准/快速菜单](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
 
-输入框下方的统计行会多出一个**订阅用量**胶囊，显示当前会话所选模型对应服务商的额度信息（选 Codex 模型时显示 Codex，选 Grok 模型时显示 Grok，以此类推）。状态栏最多显示一家：切到非订阅模型时，保留当前会话视图中最近选择的订阅；没有记录则隐藏。最近模型记录不会跨页面刷新保存。点击可展开查看所有已登录服务商及其全部账号 —— 默认账号带星标，当前服务商排在最前。Antigravity 仅预览当前模型的额度窗口（每个账号最多两个），其余模型窗口默认折叠，仍可点击展开。
+输入框下方的统计行会多出一个**订阅用量**胶囊，显示当前会话所选模型对应服务商的额度信息（选 Codex 模型时显示 Codex，选 Grok 模型时显示 Grok，以此类推）。状态栏最多显示一家，且仅当选用订阅模型时显示：切到官方或自带 Key 的模型即隐藏，不会把上一次的订阅留在屏幕上；宿主暂时读不到当前模型时沿用当前选择，避免轮询之间闪烁。这些状态不跨页面刷新保存。点击可展开查看所有已登录服务商及其全部账号 —— 默认账号带星标，当前服务商排在最前。Antigravity 仅预览当前模型的额度窗口（每个账号最多两个），其余模型窗口默认折叠，仍可点击展开。
 
-在 **设置 → 订阅 → 状态栏额度显示** 中可选择 **仅显示当前／最近使用的一家**（默认）或 **不显示**。显示偏好自动保存到当前浏览器，立即生效、刷新后保留，并在同源标签页之间同步；不影响设置页的额度详情、模型选择或账号路由。
+在 **设置 → 订阅 → 状态栏额度显示** 中可选择 **仅显示当前订阅**（默认）或 **不显示**。显示偏好自动保存到当前浏览器，立即生效、刷新后保留，并在同源标签页之间同步；不影响设置页的额度详情、模型选择或账号路由。
 
 独立的 **额度百分比** 选项可选择 **已用（默认）** 或 **剩余**，统一应用于设置页、输入框状态栏和展开后的账号详情。两项偏好都保存在当前浏览器，并在标签页之间同步。进度条按所选方向填充，告警颜色仍依据**已用**额度（80% 警告，95% 严重）。未知或无效数据不会显示为剩余 100%；重置时间已过时，保留最后上报值并明确提示等待刷新。
 
-多账号时，紧凑徽标显示例如“Codex · 2 个已登录账号”，展开后逐账号保留窗口、模型范围和重置时间，不对百分比求和或平均。已登录账号不一定属于当前模型的账号池。只有一个账号时明确标注默认或所列账号；默认星标和会话粘性记录都不能证明哪个账号成功服务了请求。
+紧凑徽标刻意保持很窄：只有一个账号时只显示服务商名称和最多两个百分比，例如“Codex · 已用 13% / 已用 25%”，5 小时限额在前、每周限额在后。窗口名称、过期提示、其余窗口和 Codex credits 都放在点击展开的详情里，那里的账号行仍为默认账号标星。多账号时徽标显示例如“Codex · 2 个已登录账号”，展开后逐账号保留窗口、模型范围和重置时间，不对百分比求和或平均。已登录账号不一定属于当前模型的账号池；默认星标和会话粘性记录都不能证明哪个账号成功服务了请求。
 
 设置页和展开详情显示最后成功获取时间、过期状态，以及刷新失败后的可重试时间；不支持查询、空结果、查询失败且无历史数据分别提示。旧后端未提供额度时间时，显示收到响应的时间，并明确说明未提供额度更新时间；收到响应不代表上游额度已经刷新。账号的刷新按钮发送 `force: true`，仍遵守端点失败冷却；打开徽标仅普通重读，不强制刷新。刷新失败会保留旧值及其状态，不绕过端点冷却。已打开的设置页和徽标通过连接内的共享内存同步额度读取结果，获焦时只读这份内存，不增加上游请求；获焦不会轮询服务端缓存，既有徽标轮询和手动刷新行为保留。显示偏好不会改变内部 `usedPercent`、账号选择、耗尽保护或冷却策略。账号池成员和最近成功服务账号记录仍由 [#202](https://github.com/V1ki/dsh-plugin-subscriptions/issues/202) 独立跟进；本次未接入 #182、#184、#187 的 Antigravity 汇总端点及分组方案。
 
@@ -221,6 +221,7 @@ Codex 的 **速度** 控件与 `/fast` 按底层模型（与其独立账号入�
       station: bigmodel                # GLM Coding Plan 站点:bigmodel(默认)或 zai
     streamIdleTimeoutMs: 300000
     claudePromptCacheTtl: 5m           # Claude 提示缓存时长:5m(默认)或 1h
+    claudeDeferTools: []               # Claude:按名称延迟加载的工具(见下文);为空则请求不变
     rateLimit:
       wait: true                       # 等待限流窗口重开(默认开启)
       maxWaitMs: 21600000              # 单次等待上限;6 小时,足够覆盖 5 小时会话窗口
@@ -230,6 +231,14 @@ Codex 的 **速度** 控件与 `/fast` 按底层模型（与其独立账号入�
       copilot:                         # 手工条目会关闭 Copilot 目录发现
         - { id: gpt-5.6-sol, wire: responses }   # 仅 copilot:强制指定上游协议
 ```
+
+`claudeDeferTools` 列出要延迟加载的工具名(或以 `*` 结尾的前缀,例如 `mcp__*`)。Claude 路由会为这些工具发送 `defer_loading: true`;
+只要有至少一个被延迟的工具,就会同时加入 Anthropic 的服务端工具搜索工具(`tool_search_tool_regex_20251119`),模型只在需要时才加载其定义,
+从而减少每次请求携带的工具定义。验证见 [`docs/claude-deferred-tools-verification.md`](docs/claude-deferred-tools-verification.md):
+30 个约 600 token 的工具,输入由 18,658 降到 713 token。默认为空,此时请求与以往版本逐字节一致。名称匹配模式只能是字面名称或带一个结尾 `*`
+的前缀,不是正则表达式。若核心将来把带 `deferLoading` 标记的工具传给本路由,该工具同样会被延迟;目前核心会在请求到达本插件之前移除该标记(本路由未声明 `toolUpdate`),因此实际由名称模式列表决定哪些工具被延迟。API 限制:至少要有一个工具保持加载(搜索工具算一个);被延迟的工具不能带
+`cache_control`(本路由从不在工具上加缓存标记,工具与系统提示的缓存标记在 `system` 上)。端到端验证中,带延迟工具的请求可从提示缓存读取;Anthropic 文档也说明延迟工具不影响已缓存的前缀
+([提示缓存与工具](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-use-with-prompt-caching));长会话中的命中率未测量。
 
 `claudePromptCacheTtl` 决定 Anthropic 在最近一次使用之后保留 Claude 对话缓存多久。默认 `5m` 发送的请求
 与之前的版本完全一致。设为 `1h` 时，每个缓存断点（工具+系统提示前缀，以及对话中的三个标记）都会带上
@@ -244,6 +253,21 @@ Codex 的 **速度** 控件与 `/fast` 按底层模型（与其独立账号入�
 旧的 5 分钟条目不会升级其生命周期。压缩（compaction）和会话标题请求保留原有辅助请求行为，仍使用 5 分钟。子代理
 （subagent）的请求没有插件可见的标记，因此与主对话一样遵循该设置。修改后需重启 DSH 生效，且只影响
 Claude；Codex、Grok、Copilot 与 Antigravity 使用各自的缓存机制。
+
+Claude 的扩展思考按 Claude Code 的方式回放：每个 `thinking` 块的签名（以及每个 `redacted_thinking` 的载荷）
+与收到的思考文本一起随助手消息保存，之后原样按原位置发回。在工具循环里，模型因此能接着之前的推理继续，
+而不必在每次拿到工具结果后重新推导。
+
+本插件保守地只把思考回放给产生它的同一 provider、账号和模型。部分模型支持跨模型回放思考，本插件不启用。
+来自其他模型、provider 或池成员的历史仍像以前一样不带思考发送，旧版本保存的推理也是如此。
+
+Anthropic 会把每个思考块绑定到它之前的全部内容（`system` 提示、`tools` 集合和更早的消息）以及它前一个思考块，
+见 [preserved thinking](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking#prefix-check)。
+插件随每个回复记录这一绑定，只在绑定仍成立时发回思考块：DSH 改动请求中较早的部分（重写系统提示或工具列表、
+裁剪工具结果、压缩摘要）时，依赖它的思考会被略去，其余历史照常发送。作为兜底，发往 Claude 5.1 及以后模型的
+请求还会要求 API 在发现无效块时丢弃而不是拒绝（`block_binding: { prefix_mismatch_behavior: "drop_block" }`，
+配合 `thinking-binding-controls-2026-08-01` beta）；如果 API 仍拒绝某个回放的块，该轮会不带回放思考重试一次。
+缓存断点不会落在思考块上（Anthropic 会拒绝）。
 
 `wire`（仅 copilot 条目）把模型固定到 `chat-completions` 或 `responses`。不加该字段手工条目照常
 工作——它存在的原因是:实时目录不认识的手工模型否则会默认走 `/chat/completions`，而

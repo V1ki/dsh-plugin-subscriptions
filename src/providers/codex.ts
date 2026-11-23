@@ -5,6 +5,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto'
+import { CODEX_CONTEXT_WINDOW, CODEX_DEFAULT_MAX_TOKENS } from '../codex-budget-defaults.js'
 import { attributionHeaders, EMPTY_RESPONSE_CODE, errorChain, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
@@ -66,8 +67,6 @@ export const CODEX_TOKEN_URL = 'https://auth.openai.com/oauth/token'
 export const CODEX_API_URL = 'https://chatgpt.com/backend-api/codex/responses'
 const CODEX_SCOPE = 'openid profile email offline_access api.connectors.read api.connectors.invoke'
 const CODEX_CALLBACK_PATH = '/auth/callback'
-const CODEX_CONTEXT_WINDOW = 400_000
-const CODEX_DEFAULT_MAX_TOKENS = 128_000
 /** Refresh when the access token has less than this much life left. */
 export const CODEX_PREEMPT_MS = 5 * 60_000
 
@@ -661,6 +660,8 @@ export interface CodexAdapterOptions {
    */
   defaultEffortOf?: (model: string) => string | undefined
   contextWindowOf?: (model: string) => number | undefined
+  defaultContextWindow?: () => number | undefined
+  defaultMaxTokens?: () => number | undefined
   /**
    * Per-request speed lookup (the composer Speed toggle's host half). Returns
    * whether this session's current choice sends the model on the fast tier;
@@ -1077,7 +1078,7 @@ export class CodexAdapter extends LlmAdapter {
       ...discovered?.description === undefined ? {} : { description: discovered.description },
       inputModalities: configured?.inputModalities ?? CODEX_MODALITIES,
       context: { contextWindow: await this.contextWindowFor(model, account) },
-      defaultMaxTokens: configured?.maxTokens ?? CODEX_DEFAULT_MAX_TOKENS,
+      defaultMaxTokens: configured?.maxTokens ?? this.options.defaultMaxTokens?.() ?? CODEX_DEFAULT_MAX_TOKENS,
       ...(reasoning === undefined ? {} : { reasoning }),
     }
   }
@@ -1092,7 +1093,10 @@ export class CodexAdapter extends LlmAdapter {
 
   private async contextWindowFor(model: string, account?: string): Promise<number> {
     const limits = await this.contextLimits(model, account)
-    return Math.min(this.options.contextWindowOf?.(model) ?? limits.default, limits.max)
+    const requested = this.options.contextWindowOf?.(model)
+      ?? this.options.defaultContextWindow?.()
+      ?? limits.default
+    return Math.min(requested, limits.max)
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {

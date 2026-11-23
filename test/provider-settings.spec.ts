@@ -27,6 +27,28 @@ test('display names persist per provider, trim whitespace and clear back to defa
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
 
+test('Codex global budgets validate, persist, and clear independently of per-model settings', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'codex-budgets-'))
+  try {
+    const store = new ProviderSettingsStore(join(dir, 'settings.json'))
+    await store.set('codex', { contextWindow: 240000, defaultMaxTokens: 32768, contextWindows: { m: 180000 } })
+    const reload = new ProviderSettingsStore(store.path)
+    assert.deepEqual(reload.get('codex'), { contextWindow: 240000, defaultMaxTokens: 32768, contextWindows: { m: 180000 } })
+    for (const field of ['contextWindow', 'defaultMaxTokens']) {
+      for (const invalid of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Infinity, NaN, null, '5', true]) {
+        assert.throws(() => validatePreferences('codex', { [field]: invalid }), /positive safe integer/)
+      }
+      for (const provider of ['claude', 'grok', 'copilot', 'antigravity'] as const) {
+        assert.throws(() => validatePreferences(provider, { [field]: 100 }), /only for Codex/)
+      }
+    }
+    await reload.set('codex', { contextWindows: { m: 180000 } })
+    assert.equal(new ProviderSettingsStore(store.path).get('codex').contextWindow, undefined)
+    assert.equal(new ProviderSettingsStore(store.path).get('codex').defaultMaxTokens, undefined)
+    assert.equal(reload.contextWindow('m'), 180000)
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
 test('the Claude prompt-cache TTL is a Claude-only preference that persists and clears', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'cache-ttl-'))
   try {

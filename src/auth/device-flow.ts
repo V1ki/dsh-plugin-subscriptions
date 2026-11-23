@@ -1,19 +1,35 @@
 /**
- * GitHub OAuth device-authorization flow (RFC 8628) for providers that cannot
- * use the loopback redirect engine: no redirect URI, no PKCE, no client
- * secret. The user opens a verification URL and types a short code while the
- * plugin polls the token endpoint until GitHub releases the access token.
- * The management model (one attempt per provider, `isBusy`/`pending`/`cancel`)
- * mirrors {@link OAuthFlowManager} so the auth controller can treat both
- * engines uniformly.
+ * OAuth device-authorization flow (RFC 8628) for providers that cannot use
+ * the loopback redirect engine: no redirect URI, no PKCE, no client secret.
+ * The user opens a verification URL and types a short code while the plugin
+ * polls the token endpoint until the provider releases the tokens.
+ *
+ * The request shape is configurable per provider: GitHub speaks form-encoded
+ * fields with no extra headers, while Kimi/Qwen send JSON bodies with device
+ * headers. The management model (one attempt per provider,
+ * `isBusy`/`pending`/`cancel`) mirrors {@link OAuthFlowManager} so the auth
+ * controller can treat both engines uniformly.
+ *
+ * Transport failures are retried without minting new codes: a dropped poll
+ * connection is not an answer, and re-requesting a device code would orphan
+ * the user's current authorization window.
  */
 import { proxiedFetch } from '../http.js'
 
 /** Default poll interval when the device-code response omits one. */
 const DEFAULT_INTERVAL_SEC = 5
 
-/** Default device-code lifetime when the response omits one (GitHub: 15 minutes). */
+/** Default device-code lifetime when the device-code response omits one. */
 const DEFAULT_EXPIRES_IN_SEC = 900
+
+/** Transport attempts for one device-code request. */
+const DEVICE_CODE_ATTEMPTS = 3
+
+/** Base backoff between device-code attempts; grows linearly per retry. */
+const DEVICE_CODE_BACKOFF_MS = 400
+
+/** Consecutive transport failures a poll may survive before the login fails. */
+const POLL_TRANSPORT_ATTEMPTS = 5
 
 /** Static per-provider device-flow facts. */
 export interface DeviceFlowSpec {
@@ -112,6 +128,60 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
   })
 }
 
+/** Sleep without a cancellation signal (used before an attempt exists). */
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
+
+/** Encode one request body in the flow's wire format. */
+function encodeBody(fields: Record<string, string>, encoding: 'form' | 'json'): string {
+  return encoding === 'json' ? JSON.stringify(fields) : new URLSearchParams(fields).toString()
+}
+
+/** Content type matching the flow's wire format. */
+function requestHeaders(spec: DeviceFlowSpec): Record<string, string> {
+  return {
+    'accept': 'application/json',
+    'content-type': (spec.encoding ?? 'form') === 'json'
+      ? 'application/json'
+      : 'application/x-www-form-urlencoded',
+    ...spec.headers,
+  }
+}
+
+/**
+ * Request a device code, retrying transport failures.
+ *
+ * A device-code request is not idempotent: every call mints a new code. A retry
+ * is therefore only safe when the transport failed before any response arrived,
+ * which is exactly when `fetch` rejects. Any response — success or an HTTP error
+ * — ends the retries so a slow network cannot orphan issued codes.
+ * @param fetchFn - fetch implementation (injected by tests).
+ * @param spec - the flow facts for this provider.
+ * @returns the device-code response, once one arrives.
+ */
+async function requestDeviceCode(fetchFn: typeof fetch, spec: DeviceFlowSpec): Promise<Response> {
+  const encoding = spec.encoding ?? 'form'
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await fetchFn(spec.deviceCodeUrl, {
+        method: 'POST',
+        headers: requestHeaders(spec),
+        body: encodeBody({
+          client_id: spec.clientId,
+          ...spec.scope === undefined || spec.scope.length === 0 ? {} : { scope: spec.scope },
+          ...spec.deviceParams,
+        }, encoding),
+      })
+    } catch (error) {
+      if (attempt >= DEVICE_CODE_ATTEMPTS) throw error
+      await wait(DEVICE_CODE_BACKOFF_MS * attempt)
+    }
+  }
+}
+
 /**
  * Own the set of in-flight device-flow attempts, keyed by provider. One
  * attempt per provider at a time; an attempt removes itself when it settles.
@@ -151,24 +221,8 @@ export class DeviceFlowManager {
     }
     const fetchFn = spec.fetchFn ?? proxiedFetch
     const encoding = spec.encoding ?? 'form'
-    const contentType = encoding === 'json' ? 'application/json' : 'application/x-www-form-urlencoded'
-    const headers = {
-      'accept': 'application/json',
-      'content-type': contentType,
-      ...spec.headers,
-    }
-    const encode = (fields: Record<string, string>): string =>
-      encoding === 'json' ? JSON.stringify(fields) : new URLSearchParams(fields).toString()
-
-    const response = await fetchFn(spec.deviceCodeUrl, {
-      method: 'POST',
-      headers,
-      body: encode({
-        client_id: spec.clientId,
-        ...spec.scope === undefined || spec.scope.length === 0 ? {} : { scope: spec.scope },
-        ...spec.deviceParams,
-      }),
-    })
+    const headers = requestHeaders(spec)
+    const response = await requestDeviceCode(fetchFn, spec)
     if (!response.ok) {
       throw new Error(`${provider} device-code request failed (HTTP ${String(response.status)})`)
     }
@@ -208,6 +262,7 @@ export class DeviceFlowManager {
 
     const poll = async (): Promise<void> => {
       let intervalMs = intervalSec * 1000
+      let transportFailures = 0
       const deadline = Date.now() + expiresInSec * 1000
       while (true) {
         await sleep(intervalMs, controller.signal)
@@ -215,18 +270,31 @@ export class DeviceFlowManager {
           settle(new Error(`login timed out after ${String(Math.round(expiresInSec))}s`))
           return
         }
-        const pollResponse = await fetchFn(spec.tokenUrl, {
-          method: 'POST',
-          headers,
-          body: encode({
-            client_id: spec.clientId,
-            device_code: wire.device_code as string,
-            grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
-            ...spec.tokenParams,
-          }),
-          signal: controller.signal,
-        })
-        const result = await pollResponse.json() as DeviceTokenWire
+        let pollResponse: Response
+        let result: DeviceTokenWire
+        try {
+          pollResponse = await fetchFn(spec.tokenUrl, {
+            method: 'POST',
+            headers,
+            body: encodeBody({
+              client_id: spec.clientId,
+              device_code: wire.device_code as string,
+              grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+              ...spec.tokenParams,
+            }, encoding),
+            signal: controller.signal,
+          })
+          result = await pollResponse.json() as DeviceTokenWire
+        } catch (error) {
+          // A cancel rejects through this same path and must surface, never retry.
+          if (controller.signal.aborted) throw error
+          // A dropped connection is not an answer from the provider: keep the
+          // login alive instead of burning the user's remaining window.
+          transportFailures += 1
+          if (transportFailures >= POLL_TRANSPORT_ATTEMPTS) throw error
+          continue
+        }
+        transportFailures = 0
         if (typeof result.access_token === 'string' && result.access_token.length > 0) {
           settle(undefined, {
             accessToken: result.access_token,

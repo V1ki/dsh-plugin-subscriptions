@@ -38,6 +38,9 @@ export interface ProviderPreferences {
   /** Absent follows discovery; an explicit selection hides newly discovered models. */
   visibleModels?: string[]
   contextWindows?: Record<string, number>
+  /** Codex-only provider-wide local context budget and output reservation. */
+  contextWindow?: number
+  defaultMaxTokens?: number
   /** Codex only: per-model defaults for subagents, independent of main-session speed. */
   subagentSpeeds?: Record<string, SubagentSpeedTier>
   tools?: Partial<Record<SubscriptionTool, boolean>>
@@ -109,6 +112,15 @@ export function validatePreferences(provider: ProviderId, input: unknown): Provi
       throw new Error('visibleModels must be an array of model ids')
     }
     result.visibleModels = [...new Set(raw.visibleModels as string[])]
+  }
+  for (const field of ['contextWindow', 'defaultMaxTokens'] as const) {
+    const value = raw[field]
+    if (value === undefined) continue
+    if (provider !== 'codex') throw new Error(`${field} is currently supported only for Codex`)
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
+      throw new Error(`${field} must be a positive safe integer`)
+    }
+    result[field] = value
   }
   if (raw.contextWindows !== undefined) {
     if (provider !== 'codex') throw new Error('context window overrides are currently supported only for Codex')

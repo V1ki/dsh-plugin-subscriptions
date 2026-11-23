@@ -14,7 +14,7 @@
 import { creditBalanceText, quotaPercent, quotaText, UsageFreshness, useQuotaClock } from './quota-display.js'
 import { useQuotaDisplayMode } from './usage-badge-preferences.js'
 import { readUsageCache, subscribeUsage } from './usage-cache.js'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import { en } from './locales.js'
@@ -23,6 +23,10 @@ import { AntigravityQuotaSummary } from './AntigravityQuotaSummary.js'
 import { antigravityQuotaScope } from '../antigravity-model-id.js'
 import { visibleUsageWindows } from './usage-window-filter.js'
 import { ProviderAccountManager } from './ProviderAccountManager.js'
+import { ProviderActionIcon } from './ProviderActionIcon.js'
+import { ProviderRefreshButton } from './ProviderRefreshButton.js'
+import { SettingHelp } from './SettingHelp.js'
+import { SubscriptionTabs } from './SubscriptionTabs.js'
 import { providerSettingsCss } from './provider-settings-styles.js'
 import { UsageBadgeDisplaySetting } from './UsageBadgeDisplaySetting.js'
 import type { SubscriptionsKey } from './locales.js'
@@ -59,6 +63,7 @@ export interface ProviderStatus {
   busy: boolean
   accounts: AccountStatus[]
   detail?: string
+  /** Qwen only: whether a console session for quota reads is linked. */
   quotaLinked?: boolean
   /** The CLI version the route presents (Codex, Claude), and where it came from. */
   clientVersion?: { version: string; source: ClientVersionSource }
@@ -194,23 +199,13 @@ const MANUAL_CALLBACK_PROVIDERS: ReadonlySet<SubscriptionProvider> = new Set([
   'codex', 'claude', 'grok', 'antigravity',
 ])
 
-/** Which provider cards are expanded; a display-only preference. */
-const EXPANDED_CARDS_KEY = 'dsh.subscriptions.expandedProviders'
-
-function readExpandedCards(): Partial<Record<SubscriptionProvider, boolean>> {
-  if (typeof window === 'undefined') return {}
-  try {
-    const parsed: unknown = JSON.parse(window.localStorage.getItem(EXPANDED_CARDS_KEY) ?? '{}')
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
-    const result: Partial<Record<SubscriptionProvider, boolean>> = {}
-    for (const { id } of PROVIDERS) {
-      if ((parsed as Record<string, unknown>)[id] === true) result[id] = true
-    }
-    return result
-  } catch {
-    // Blocked storage keeps every card collapsed.
-    return {}
-  }
+/** Sort the visible provider names within connected and disconnected groups. */
+export function sortedSubscriptionProviders(statuses: Partial<Record<SubscriptionProvider, ProviderStatus>>) {
+  return [...PROVIDERS].sort((a, b) => {
+    const connectionOrder = Number(hasAccount(statuses[b.id])) - Number(hasAccount(statuses[a.id]))
+    return connectionOrder || (statuses[a.id]?.displayName || a.name).localeCompare(statuses[b.id]?.displayName || b.name)
+      || a.id.localeCompare(b.id)
+  })
 }
 
 /** Human text of an action failure, SubscriptionsAuthError or not. */
@@ -258,10 +253,6 @@ const styles: Record<string, CSSProperties> = {
   },
   separator: { borderTop: '0.5px solid var(--dsw-alias-border-l2)' },
   cardHeader: { display: 'flex', alignItems: 'center', gap: 8 },
-  cardHeaderButton: {
-    width: '100%', padding: 0, border: 'none', background: 'none',
-    color: 'inherit', font: 'inherit', textAlign: 'left', cursor: 'pointer',
-  },
   dot: { width: 8, height: 8, borderRadius: '50%', flexShrink: 0 },
   name: { fontWeight: 500, fontSize: 14, lineHeight: '22px', color: 'var(--dsw-alias-label-primary)' },
   statusLine: { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
@@ -275,7 +266,6 @@ const styles: Record<string, CSSProperties> = {
   usageHeader: { display: 'flex', alignItems: 'center', gap: 8 },
   usageTitle: { fontSize: 12, lineHeight: '18px', fontWeight: 500, color: 'var(--dsw-alias-label-secondary)' },
   usagePlan: { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
-  usageRefresh: { minHeight: 22, height: 22, padding: '0 8px', marginLeft: 'auto' },
   usageRow: { display: 'flex', flexDirection: 'column', gap: 3 },
   usageMeta: {
     display: 'flex', justifyContent: 'space-between', gap: 8,
@@ -525,17 +515,26 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const { rpc } = props
   const t = props.t ?? fallbackTranslate
   const [statuses, setStatuses] = useState<Partial<Record<SubscriptionProvider, ProviderStatus>>>({})
+  // Undefined until a status snapshot arrives or the user chooses a tab.
+  const [selectedProvider, setSelectedProvider] = useState<SubscriptionProvider>()
+  const tabIdPrefix = useId()
+  const tabRefs = useRef<Partial<Record<SubscriptionProvider, HTMLButtonElement>>>({})
+  const focusToRestore = useRef<{ element: HTMLElement; provider: SubscriptionProvider } | null>(null)
+  useLayoutEffect(() => {
+    const previous = focusToRestore.current
+    focusToRestore.current = null
+    if (!previous || (document.activeElement !== document.body && document.activeElement !== previous.element)) return
+    if (previous.element.isConnected) previous.element.focus()
+    else tabRefs.current[previous.provider]?.focus()
+  }, [statuses])
+  const sortedProviders = sortedSubscriptionProviders(statuses)
+  const activeProvider = selectedProvider ?? sortedProviders[0].id
   const [errors, setErrors] = useState<Partial<Record<SubscriptionProvider, string>>>({})
   const [manualDrafts, setManualDrafts] = useState<Record<SubscriptionProvider, string>>({
     codex: '', claude: '', grok: '', copilot: '', antigravity: '', kimi: '', glm: '', qwen: '',
   })
   /** Qwen 千问AI平台 inference key draft; saved through the saveKey endpoint. */
   const [qwenKeyDraft, setQwenKeyDraft] = useState('')
-  /**
-   * Provider cards start collapsed so the page lists every provider at a
-   * glance; a card forced open while busy still shows the login controls.
-   */
-  const [expandedCards, setExpandedCards] = useState<Partial<Record<SubscriptionProvider, boolean>>>(readExpandedCards)
   /** Pending device-flow codes (copilot), shown while the attempt polls. */
   const [deviceCodes, setDeviceCodes] = useState<Partial<Record<SubscriptionProvider, { userCode: string; verificationUrl: string }>>>({})
   const [copiedCode, setCopiedCode] = useState<SubscriptionProvider | undefined>(undefined)
@@ -607,7 +606,11 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       return
     }
     if (!mountedRef.current) return
+    const focused = document.activeElement
+    const provider = focused instanceof HTMLElement ? focused.closest<HTMLElement>('[data-subscription-provider]')?.dataset.subscriptionProvider as SubscriptionProvider | undefined : undefined
+    focusToRestore.current = focused instanceof HTMLElement && provider ? { element: focused, provider } : null
     setStatuses(response.providers)
+    setSelectedProvider(current => current ?? sortedSubscriptionProviders(response.providers)[0].id)
     // The poll recovered: drop any error line a previous failed poll left.
     for (const { id } of PROVIDERS) setProviderError(id, undefined)
     for (const { id } of PROVIDERS) {
@@ -671,15 +674,6 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       if (mountedRef.current) setUsageLoading(prev => ({ ...prev, [key]: false }))
     }
   }, [rpc])
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return
-    try {
-      window.localStorage.setItem(EXPANDED_CARDS_KEY, JSON.stringify(expandedCards))
-    } catch {
-      // A blocked storage keeps the in-memory choice for this page only.
-    }
-  }, [expandedCards])
 
   // Synchronize existing telemetry without polling providers or invoking routing.
   useEffect(() => {
@@ -802,20 +796,6 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     await refresh()
   }, [rpc, stopPolling, setProviderError, refresh])
 
-  const saveQwenKey = useCallback(async (): Promise<void> => {
-    if (rpc === undefined) return
-    const key = qwenKeyDraft.trim()
-    if (key === '') return
-    setProviderError('qwen', undefined)
-    try {
-      await callSubscriptionsAuth<{ ok: true }>(rpc, 'saveKey', { provider: 'qwen', key })
-      if (mountedRef.current) setQwenKeyDraft('')
-      await refresh()
-    } catch (error) {
-      setProviderError('qwen', messageOf(error))
-    }
-  }, [rpc, qwenKeyDraft, setProviderError, refresh])
-
   const submitManual = useCallback(async (provider: SubscriptionProvider): Promise<void> => {
     if (rpc === undefined) return
     const input = manualDrafts[provider].trim()
@@ -829,6 +809,20 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     }
     await refresh()
   }, [rpc, manualDrafts, setProviderError, refresh])
+
+  const saveQwenKey = useCallback(async (): Promise<void> => {
+    if (rpc === undefined) return
+    const key = qwenKeyDraft.trim()
+    if (key === '') return
+    setProviderError('qwen', undefined)
+    try {
+      await callSubscriptionsAuth<{ ok: true }>(rpc, 'saveKey', { provider: 'qwen', key })
+      if (mountedRef.current) setQwenKeyDraft('')
+      await refresh()
+    } catch (error) {
+      setProviderError('qwen', messageOf(error))
+    }
+  }, [rpc, qwenKeyDraft, setProviderError, refresh])
 
   const logout = useCallback(async (provider: SubscriptionProvider, account: string, display: string, name: string): Promise<void> => {
     if (rpc === undefined) return
@@ -953,72 +947,104 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     <div className="dsh-subscriptions-settings" style={styles.section}>
       <style>{providerSettingsCss}</style>
       <p style={styles.intro}>{t('intro')}</p>
-      <UsageBadgeDisplaySetting t={t} />
-      <div style={styles.proxyCard}>
-        <div style={styles.cardHeader}>
-          <span style={{
-            ...styles.dot,
-            background: proxy?.enabled === true
-              ? 'var(--dsw-alias-state-success-primary)'
-              : 'var(--dsw-alias-label-dimmed)',
-          }} />
-          <span style={styles.name}>{t('proxyTitle')}</span>
-          <button
-            type="button"
-            style={{ marginLeft: 'auto', flexShrink: 0 }}
-            onClick={openProxyDialog}
-          >
-            {t('proxyConfigure')}
-          </button>
-        </div>
-        <p style={styles.statusLine}>{proxyStatusText(t, proxy, proxyLoadError)}</p>
-      </div>
-      <div style={styles.separator} />
-      {PROVIDERS.map(({ id, name }) => {
+      <div className="dsh-subscription-provider-area">
+      <SubscriptionTabs prefix={tabIdPrefix} label={t('providerTabs')} active={activeProvider}
+        scrollLeftLabel={t('scrollProvidersLeft')} scrollRightLabel={t('scrollProvidersRight')}
+        onSelect={setSelectedProvider} tabRefs={tabRefs} tabs={sortedProviders.map(({ id, name }) => {
+          const status = statuses[id]
+          const displayName = status?.displayName || name
+          return { key: id, id, label: displayName, provider: id,
+            ariaLabel: displayName + ' — ' + statusText(t, status),
+            content: <><span aria-hidden="true" style={{ ...styles.dot, background: dotColor(status) }} />{displayName}</> }
+        })} />
+      {sortedProviders.map(({ id, name }) => {
         const status = statuses[id]
         const busy = status?.busy === true
         const deviceCode = deviceCodes[id]
         const accounts = status?.accounts ?? []
-        // Busy cards stay open so the device code / cancel controls are visible.
-        const isExpanded = busy || expandedCards[id] === true
         return (
-          <div key={id} style={styles.card}>
-            <button
-              type="button"
-              style={{ ...styles.cardHeader, ...styles.cardHeaderButton }}
-              aria-expanded={isExpanded}
-              aria-label={`${status?.displayName || name} — ${t(isExpanded ? 'collapseProvider' : 'expandProvider')}`}
-              onClick={() => {
-                setExpandedCards(prev => ({ ...prev, [id]: prev[id] !== true }))
-              }}
-            >
-              <span style={{ ...styles.dot, background: dotColor(status) }} />
-              <span style={styles.name}>{status?.displayName || name}</span>
-              {status?.displayName && <small style={styles.statusLine}>{name}</small>}
-              <ClientVersionTag clientVersion={status?.clientVersion} t={t} />
-              <svg
-                aria-hidden="true"
-                width="12"
-                height="12"
-                viewBox="0 0 16 16"
-                style={{
-                  marginLeft: 'auto',
-                  flexShrink: 0,
-                  color: 'var(--dsw-alias-label-tertiary)',
-                  transform: isExpanded ? 'rotate(90deg)' : 'none',
-                  transition: 'transform 120ms',
-                }}
-              >
-                <path d="m6 3 5 5-5 5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
-            <p style={styles.statusLine}>{statusText(t, status)}</p>
+          <div key={id} role="tabpanel" data-subscription-provider={id} id={`${tabIdPrefix}-panel-${id}`}
+            aria-labelledby={`${tabIdPrefix}-tab-${id}`} hidden={activeProvider !== id} tabIndex={0}>
+          <div style={styles.card}>
+            <div className="dsh-subscription-provider-header">
+              <div className="dsh-subscription-provider-identity">
+                <div style={{ ...styles.cardHeader, flexWrap: 'wrap' }}>
+                  <span style={{ ...styles.dot, background: dotColor(status) }} />
+                  <span style={styles.name}>{status?.displayName || name}</span>
+                  {status?.displayName && <small style={styles.statusLine}>{name}</small>}
+                  <ClientVersionTag clientVersion={status?.clientVersion} t={t} />
+                </div>
+                <p style={styles.statusLine}>{statusText(t, status)}</p>
+              </div>
+              <div className="dsh-subscription-provider-actions">
+                {!busy && id !== 'qwen' && accounts.length === 0 && (
+                  <button type="button" onClick={() => { void login(id) }}>
+                    {t('login')}
+                  </button>
+                )}
+                {!busy && accounts.length > 0 && id === 'claude' && (
+                  <>
+                    <div className="dsh-subscription-add-account">
+                      <SettingHelp title={t('addAccountOAuth')} hint={t('addAccountHint')} t={t} />
+                      <button type="button" onClick={() => { void login(id, 'oauth') }}>
+                        <ProviderActionIcon icon="add" />{t('addAccountOAuth')}
+                      </button>
+                    </div>
+                    <button type="button" onClick={() => { void login(id, 'keychain') }}>
+                      {t('addAccountKeychain')}
+                    </button>
+                  </>
+                )}
+                {!busy && accounts.length > 0 && id !== 'claude' && id !== 'qwen' && (
+                  <div className="dsh-subscription-add-account">
+                    <SettingHelp title={t('addAccount')} hint={t('addAccountHint')} t={t} />
+                    <button type="button" onClick={() => { void login(id) }}>
+                      <ProviderActionIcon icon="add" />{t('addAccount')}
+                    </button>
+                  </div>
+                )}
+                {/* 与同排其它按钮一致：登录/取消进行中不开第二个写配置的弹窗。 */}
+                {!busy && <button type="button" aria-haspopup="dialog"
+                  onClick={() => setManagedProvider({ id, name })}>
+                  <ProviderActionIcon icon="manage" />{t('accountsManage')}
+                </button>}
+
+                {busy && (
+                  <button type="button" onClick={() => { void cancel(id) }}>
+                    {t('cancel')}
+                  </button>
+                )}
+              </div>
+            </div>
+            {!busy && id === 'qwen' && (
+              <>
+                <div style={styles.manualRow}>
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    style={styles.manualInput}
+                    value={qwenKeyDraft}
+                    placeholder={t('qwenKeyPlaceholder')}
+                    onChange={event => setQwenKeyDraft(event.target.value)}
+                  />
+                  <button type="button" disabled={qwenKeyDraft.trim() === ''} onClick={() => { void saveQwenKey() }}>
+                    {accounts.length > 0 ? t('qwenKeyChange') : t('qwenKeySave')}
+                  </button>
+                  {accounts.length > 0 && (
+                    <button type="button" onClick={() => { void login('qwen') }}>
+                      {t('qwenQuotaLogin')}
+                    </button>
+                  )}
+                </div>
+                <p style={styles.statusLine}>
+                  {status?.quotaLinked === true ? t('qwenQuotaLinked') : t('qwenKeyHint')}
+                </p>
+              </>
+            )}
             {status?.detail !== undefined && status.detail !== '' && (
               <p style={styles.statusLine}>{status.detail}</p>
             )}
             {errors[id] !== undefined && <p style={styles.errorLine}>{errors[id]}</p>}
-            {isExpanded && (
-              <>
             {accounts.map((account) => {
               const usageKey = `${id}:${account.key}`
               const usage = usages[usageKey]
@@ -1026,6 +1052,8 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
               const usageError = usageErrors[usageKey]
               const display = account.account ?? account.key
               const sortedCredits = [...(usage?.resetCredits ?? [])].sort((a, b) => (a.expiresAt ?? Infinity) - (b.expiresAt ?? Infinity))
+              const balance = creditBalanceText(usage?.credits, t)
+              const resetCount = sortedCredits.length === 1 ? t('resetCreditAvailable') : t('resetCreditsAvailable', { count: sortedCredits.length })
               const nextReset = sortedCredits.find(c => c.expiresAt === undefined || c.expiresAt > Date.now())
               const resetBlock = usage ? resetActionBlock(usage) : 'resetUseRefresh'
               const resetDisabled = resetBusy || resetBlock !== undefined
@@ -1067,14 +1095,8 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                         {usage?.plan !== undefined && (
                           <span style={styles.usagePlan}>{t('usagePlan', { plan: usage.plan })}</span>
                         )}
-                        {usage?.supported !== false && <button
-                          type="button"
-                          style={styles.usageRefresh}
-                          disabled={usageLoading[usageKey] === true}
-                          onClick={() => { void loadUsage(id, account.key, true) }}
-                        >
-                          {t('usageRefresh')}
-                        </button>}
+                        {usage?.supported !== false && <ProviderRefreshButton label={t('usageRefresh')}
+                          disabled={usageLoading[usageKey] === true} onClick={() => { void loadUsage(id, account.key, true) }} />}
                       </div>
                       {usage && usage.supported !== false && <UsageFreshness usage={usage} t={t} />}
                       {usage?.supported === false && (
@@ -1111,118 +1133,55 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                           </div>
                         )
                       })}
-                      {creditBalanceText(usage?.credits, t) !== undefined && (
-                        <div style={styles.usageRow}>
-                          <div style={styles.usageMeta}>
-                            <span>{creditBalanceText(usage?.credits, t)}</span>
-                          </div>
+                      {(balance !== undefined || usage?.resetCredits !== undefined || (resetAccount === account.key && !!resetMessage)) && (
+                        <div className="subscriptions-credit-summary" style={styles.statusLine}>
+                          {sortedCredits.length > 0 ? (
+                            <details className="subscriptions-reset-credits">
+                              <summary>
+                                {balance !== undefined && <span>{balance}</span>}
+                                <span className="subscriptions-reset-count">
+                                  <span>{resetCount}</span>
+                                  <span className="subscriptions-reset-disclosure">
+                                    <span className="subscriptions-reset-expand">{t('modelsExpand')}</span>
+                                    <span className="subscriptions-reset-collapse">{t('modelsCollapse')}</span>
+                                    <svg aria-hidden="true" width="12" height="12" viewBox="0 0 16 16">
+                                      <path d="m4 6 4 4 4-4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                                    </svg>
+                                  </span>
+                                </span>
+                              </summary>
+                              <div className="subscriptions-reset-list">
+                                {sortedCredits.map((credit, index) => (
+                                  <div key={credit.id ?? index} className="subscriptions-reset-row">
+                                    <span>{credit.expiresAt === undefined ? t('resetCreditExpiryUnknown') : t('resetCreditExpires', { date: new Date(credit.expiresAt).toLocaleString() })}</span>
+                                    {id === 'codex' && credit === nextReset && (
+                                      <button type="button" aria-disabled={resetDisabled}
+                                        title={t(resetBusy ? 'resetUseChecking' : resetBlock ?? 'resetUseReady')}
+                                        style={{ height: 22, minHeight: 22, padding: '0 7px',
+                                          opacity: resetDisabled ? 0.35 : 1, cursor: resetDisabled ? 'not-allowed' : 'pointer' }}
+                                        onClick={() => { if (!resetDisabled) void prepareReset(account.key) }}>
+                                        {resetBusy && resetAccount === account.key ? t('resetUseChecking') : t('resetUseButton')}
+                                      </button>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            </details>
+                          ) : (balance !== undefined || usage?.resetCredits !== undefined) && <div className="subscriptions-credit-line">
+                            {balance !== undefined && <span>{balance}</span>}
+                            {usage?.resetCredits !== undefined && <span className="subscriptions-reset-count">{resetCount}</span>}
+                          </div>}
+                          {resetAccount === account.key && resetMessage && <p role="status" style={styles.statusLine}>{resetMessage}</p>}
                         </div>
                       )}
                       {usage?.resetCreditsError !== undefined && (
                         <p style={styles.errorLine}>{t('resetCreditsError', { message: usage.resetCreditsError })}</p>
-                      )}
-                      {usage?.resetCredits !== undefined && (
-                        <details className="subscriptions-reset-credits" style={styles.usageRow}>
-                          <summary style={{ ...styles.usageMeta, cursor: 'pointer', listStyle: 'none', justifyContent: 'flex-start', gap: 6 }}>
-                            <svg aria-hidden="true" width="12" height="12" viewBox="0 0 16 16" style={{ flexShrink: 0 }}>
-                              <path d="m6 3 5 5-5 5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                            </svg>
-                            <span>{t('resetCreditsTitle')}</span>
-                            <span style={{ marginLeft: 'auto' }}>{t('resetCreditsAvailable', { count: usage.resetCredits.length })}</span>
-                          </summary>
-                          <style>{
-                            '.subscriptions-reset-credits > summary::-webkit-details-marker { display: none; }'
-                            + '.subscriptions-reset-credits[open] > summary > svg { transform: rotate(90deg); }'
-                          }</style>
-                          <div style={{ paddingLeft: 18, marginTop: 6 }}>
-                            {sortedCredits.map((credit, index) => (
-                              <div key={credit.id ?? index} style={{ ...styles.usageMeta, minHeight: 28, gap: 12 }}>
-                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-                                  {t('resetCreditFull')}
-                                  {id === 'codex' && credit === nextReset && (
-                                    <button type="button" aria-disabled={resetDisabled}
-                                      title={t(resetBusy ? 'resetUseChecking' : resetBlock ?? 'resetUseReady')}
-                                      style={{ height: 22, minHeight: 22, padding: '0 7px',
-                                        opacity: resetDisabled ? 0.35 : 1, cursor: resetDisabled ? 'not-allowed' : 'pointer' }}
-                                      onClick={() => { if (!resetDisabled) void prepareReset(account.key) }}>
-                                      {resetBusy && resetAccount === account.key ? t('resetUseChecking') : t('resetUseButton')}
-                                    </button>
-                                  )}
-                                </span>
-                                <span style={{ textAlign: 'right' }}>{credit.expiresAt === undefined ? t('resetCreditExpiryUnknown') : t('resetCreditExpires', { date: new Date(credit.expiresAt).toLocaleString() })}</span>
-                              </div>
-                            ))}
-                            {resetAccount === account.key && resetMessage && <p role="status" style={styles.statusLine}>{resetMessage}</p>}
-                          </div>
-                        </details>
                       )}
                     </div>
                   )}
                 </div>
               )
             })}
-            <div style={styles.actions}>
-              {!busy && id === 'qwen' && (
-                <>
-                  <div style={styles.manualRow}>
-                    <input
-                      type="password"
-                      autoComplete="off"
-                      style={styles.manualInput}
-                      value={qwenKeyDraft}
-                      placeholder={t('qwenKeyPlaceholder')}
-                      onChange={event => setQwenKeyDraft(event.target.value)}
-                    />
-                    <button type="button" disabled={qwenKeyDraft.trim() === ''} onClick={() => { void saveQwenKey() }}>
-                      {accounts.length > 0 ? t('qwenKeyChange') : t('qwenKeySave')}
-                    </button>
-                    {accounts.length > 0 && (
-                      <button type="button" onClick={() => { void login('qwen') }}>
-                        {t('qwenQuotaLogin')}
-                      </button>
-                    )}
-                  </div>
-                  <p style={styles.statusLine}>
-                    {status?.quotaLinked === true ? t('qwenQuotaLinked') : t('qwenKeyHint')}
-                  </p>
-                </>
-              )}
-              {!busy && id !== 'qwen' && accounts.length === 0 && (
-                <button type="button" onClick={() => { void login(id) }}>
-                  {t('login')}
-                </button>
-              )}
-              {!busy && accounts.length > 0 && id === 'claude' && (
-                <>
-                  <button type="button" onClick={() => { void login(id, 'oauth') }}>
-                    {t('addAccountOAuth')}
-                  </button>
-                  <button type="button" onClick={() => { void login(id, 'keychain') }}>
-                    {t('addAccountKeychain')}
-                  </button>
-                </>
-              )}
-              {!busy && accounts.length > 0 && id !== 'claude' && id !== 'qwen' && (
-                <button type="button" onClick={() => { void login(id) }}>
-                  {t('addAccount')}
-                </button>
-              )}
-              {/* 与同排其它按钮一致：登录/取消进行中不开第二个写配置的弹窗。 */}
-              {!busy && <button type="button" aria-haspopup="dialog"
-                onClick={() => setManagedProvider({ id, name })}>
-                {t('accountsManage')}
-              </button>}
-
-              {busy && (
-                <button type="button" onClick={() => { void cancel(id) }}>
-                  {t('cancel')}
-                </button>
-              )}
-            </div>
-            {!busy && accounts.length > 0 && id !== 'qwen' && (
-              <p style={styles.statusLine}>{t('addAccountHint')}</p>
-            )}
-
             {busy && deviceCode !== undefined && (
               <div style={styles.deviceCode}>
                 <span style={styles.statusLine}>{t('deviceCodePrompt')}</span>
@@ -1256,13 +1215,35 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 </div>
               </details>
             )}
-              </>
-            )}
+          </div>
           </div>
         )
       })}
+      </div>
+      <div style={styles.separator} />
+      <UsageBadgeDisplaySetting t={t} />
+      <div style={styles.proxyCard}>
+        <div style={styles.cardHeader}>
+          <span style={{
+            ...styles.dot,
+            background: proxy?.enabled === true
+              ? 'var(--dsw-alias-state-success-primary)'
+              : 'var(--dsw-alias-label-dimmed)',
+          }} />
+          <span style={styles.name}>{t('proxyTitle')}</span>
+          <button
+            type="button"
+            style={{ marginLeft: 'auto', flexShrink: 0 }}
+            onClick={openProxyDialog}
+          >
+            {t('proxyConfigure')}
+          </button>
+        </div>
+        <p style={styles.statusLine}>{proxyStatusText(t, proxy, proxyLoadError)}</p>
+      </div>
       {managedProvider && <ProviderAccountManager provider={managedProvider.id} name={managedProvider.name}
-        rpc={rpc} t={t} onClose={() => { setManagedProvider(undefined); void refresh() }} />}
+        rpc={rpc} t={t} accountsVersion={JSON.stringify((statuses[managedProvider.id]?.accounts ?? []).map(account => account.key).sort())}
+        onClose={() => { setManagedProvider(undefined); void refresh() }} />}
       <style>{'.subscriptions-reset-dialog::backdrop { background: var(--dsw-alias-bg-mask-1, #0006); backdrop-filter: var(--dsw-mask-blur, none); }'}</style>
       <dialog ref={resetDialogRef} className="subscriptions-reset-dialog"
         aria-labelledby="subscriptions-reset-title" onCancel={() => setResetConfirmation(undefined)}
