@@ -197,3 +197,28 @@ test('Codex subagent speed defaults persist independently and validate model key
     assert.throws(() => validatePreferences('claude', { subagentSpeeds: { m: 'fast' } }), /only for Codex/)
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
+
+test('Antigravity defaults to disabled and setProviderEnabled preserves other preferences', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'antigravity-enabled-'))
+  try {
+    const store = new ProviderSettingsStore(join(dir, 'settings.json'))
+    assert.equal(store.providerEnabled('antigravity'), false)
+    for (const provider of ['codex', 'claude', 'grok', 'copilot'] as const) {
+      assert.equal(store.providerEnabled(provider), true)
+    }
+    await store.set('antigravity', { displayName: 'AGY', visibleModels: ['gemini-4-argon'], accounts: { alice: { alias: 'Work' } } })
+    assert.equal(store.providerEnabled('antigravity'), false)
+    await store.setProviderEnabled('antigravity', true)
+    assert.equal(store.providerEnabled('antigravity'), true)
+    const reloaded = new ProviderSettingsStore(store.path)
+    assert.equal(reloaded.providerEnabled('antigravity'), true)
+    assert.equal(reloaded.get('antigravity').displayName, 'AGY')
+    assert.deepEqual(reloaded.get('antigravity').visibleModels, ['gemini-4-argon'])
+    assert.equal(reloaded.get('antigravity').accounts?.alice?.alias, 'Work')
+    await reloaded.setProviderEnabled('antigravity', false)
+    assert.equal(new ProviderSettingsStore(store.path).providerEnabled('antigravity'), false)
+    assert.equal(new ProviderSettingsStore(store.path).get('antigravity').displayName, 'AGY')
+    assert.throws(() => validatePreferences('codex', { enabled: true }), /only for Antigravity/)
+    assert.throws(() => validatePreferences('antigravity', { enabled: 'yes' }), /boolean/)
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})

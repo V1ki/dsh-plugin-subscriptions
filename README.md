@@ -193,6 +193,8 @@ Either way, restart `dsh web` afterwards so the new version loads.
 2. Settings → **Subscriptions**: click **Connect** on a provider. For Claude, credentials are imported instantly if you have run `claude` and logged in at least once; without them, Claude authorizes in the browser like the others. For Codex, Grok, and Antigravity, authorize in the opened browser tab; Copilot shows a GitHub device code to enter at `github.com/login/device`; if a browser flow can't complete (headless host), expand the manual fallback and paste the callback URL or code.
 3. In any session, open the model picker (`/model`) and choose a model under **ChatGPT (Codex)** / **Claude (Subscription)** / **Grok (Subscription)** / **GitHub Copilot** / **Google Antigravity**.
 
+> **Note on Google Antigravity:** Google Antigravity is disabled by default due to high account-suspension (ToS) risk and upstream HTTP 429 rejections on native DSH chat requests. Even if enabled manually in **Settings → Subscriptions**, models currently cannot be used — it is effectively limited to checking account usage while waiting for an official approach.
+
 Not logged in? The provider stays out of the picker, and requests fail with `MISSING_CREDENTIAL` pointing at the Settings page; nothing else breaks.
 
 ### Multiple accounts

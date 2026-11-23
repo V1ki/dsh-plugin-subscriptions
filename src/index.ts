@@ -442,6 +442,8 @@ export class SubscriptionsAuthController implements AuthController {
      * failure must not outlive an explicit re-check (issue #139).
      */
     private readonly onUsageForced?: (provider: ProviderId, account: string) => void,
+    /** Opt-in provider gate (Antigravity defaults to disabled); false blocks login and usage calls. */
+    private readonly providerEnabled: (provider: ProviderId) => boolean = () => true,
   ) {}
 
   prepareReset(account: string, signal: AbortSignal) {
@@ -455,6 +457,7 @@ export class SubscriptionsAuthController implements AuthController {
   }
 
   usage(provider: ProviderId, account: string, signal: AbortSignal, force = false): Promise<ProviderUsage> {
+    if (!this.providerEnabled(provider)) return Promise.resolve({ supported: false })
     if (force) this.onUsageForced?.(provider, account)
     const fetcher = this.usageFetchers[provider]
     if (fetcher === undefined) return Promise.resolve({ supported: false })
@@ -505,6 +508,9 @@ export class SubscriptionsAuthController implements AuthController {
   }
 
   async login(provider: ProviderId, method?: LoginMethod): Promise<{ authorizeUrl: string; userCode?: string }> {
+    if (!this.providerEnabled(provider)) {
+      throw new BadRequest(`provider ${provider} is disabled; enable it manually in Settings > Subscriptions first`)
+    }
     if (provider === 'claude' && method !== 'oauth') {
       const imported = this.readClaudeCreds()
       if (imported !== undefined) {
@@ -886,6 +892,7 @@ export function apply(ctx: Context, config: Config): void {
   const register = (provider: ProviderId, adapter: AccountAwareAdapter): AdapterRegistrationHandle => {
     const route = new AccountPreferencesAdapter({
       provider, adapter, settings: preferences, pool: () => poolAdapter, onRequestEnd,
+      enabled: () => preferences.providerEnabled(provider),
       accounts: async () => (await accountTokens.get(provider)?.list() ?? []).map(({ key, session }) => ({ key, label: accountOf(provider, session) ?? key })),
     })
     memberAdapters.set(provider, route.poolMember())
@@ -1174,6 +1181,7 @@ export function apply(ctx: Context, config: Config): void {
         const sources: Parameters<typeof buildAccountPools>[0] = {}
         await Promise.all([...adapters].map(async ([provider, adapter]) => {
           try {
+            if (!preferences.providerEnabled(provider)) return
             const accounts = (await accountTokens.get(provider)?.list() ?? []).map(entry => entry.key)
             if (accounts.length === 0) return
             const catalogs = (await Promise.all(accounts.map(async account => {
@@ -1364,6 +1372,7 @@ export function apply(ctx: Context, config: Config): void {
     },
     resetRedemption,
     (provider, account) => poolHealth?.clear(provider, account),
+    provider => preferences.providerEnabled(provider),
   ), speed, {
     get: () => proxyGetConfig(),
     set: input => proxySetConfig(input),
@@ -1371,10 +1380,24 @@ export function apply(ctx: Context, config: Config): void {
   }, modelDefaults, {
     displayName: provider => preferences.get(provider).displayName,
     visibleModels: provider => preferences.get(provider).visibleModels,
+    enabled: provider => preferences.providerEnabled(provider),
+    async setEnabled(provider, enabled) {
+      if (provider !== 'antigravity') throw new BadRequest('Only Antigravity supports toggling enabled state')
+      if (!adapters.has(provider)) throw new BadRequest(`provider ${provider} is not configured`)
+      await preferences.setProviderEnabled(provider, enabled)
+      if (!enabled) {
+        flows.pending(provider)?.cancel()
+      }
+      poolAdapter?.invalidate()
+      for (const [route, handle] of handles) handle.replace([route])
+    },
     async get(provider, force) {
       await loadModelDefaults()
       const adapter = adapters.get(provider)
       if (!adapter) throw new BadRequest(`provider ${provider} is not configured`)
+      if (!preferences.providerEnabled(provider)) {
+        throw new BadRequest(`provider ${provider} is disabled; enable it manually in Settings > Subscriptions first`)
+      }
       if (force) {
         if (provider === 'codex') codexVersion.invalidate()
         if (provider === 'claude') claudeVersion.invalidate()
@@ -1466,7 +1489,12 @@ export function apply(ctx: Context, config: Config): void {
       try { validated = validatePreferences(provider, settings) } catch (error) {
         throw new BadRequest(error instanceof Error ? error.message : String(error))
       }
-      await preferences.set(provider, validated)
+      const next = provider === 'antigravity'
+        && preferences.providerEnabled('antigravity')
+        && !Object.hasOwn(settings as Record<string, unknown>, 'enabled')
+        ? { ...validated, enabled: true }
+        : validated
+      await preferences.set(provider, next)
       poolAdapter?.invalidate()
       for (const [route, handle] of handles) handle.replace([route])
     },
@@ -1483,7 +1511,7 @@ export function apply(ctx: Context, config: Config): void {
   // then one hour between completed runs. Picker reads never schedule refreshes.
   ctx.effect(() => startCatalogRefresh(async signal => {
     await Promise.all([...adapters].map(async ([provider, adapter]) => {
-      if (signal.aborted || overridden.has(provider)) return
+      if (signal.aborted || overridden.has(provider) || !preferences.providerEnabled(provider)) return
       // Account unions bound each discovery and omit logged-out accounts.
       await adapter.listOwnModels(provider, undefined, signal)
     }))

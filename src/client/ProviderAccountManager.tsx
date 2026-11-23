@@ -158,13 +158,14 @@ export function ProviderAccountManager({ provider, name, accountsVersion, rpc, t
       const latest = await callSubscriptionsAuth<Catalog>(rpc, 'providerSettings', { provider })
       if (!alive.current) return
       const base = models.settings === undefined ? latest.settings : mergeLatestAccounts(models.settings, latest.settings)
-      const { displayName: _staleName, promptCacheTtl: _staleTtl, contextWindow: _staleContext, defaultMaxTokens: _staleReserve, ...rest } = mergeAccountChanges(base, changes)
+      const { displayName: _staleName, promptCacheTtl: _staleTtl, contextWindow: _staleContext, defaultMaxTokens: _staleReserve, enabled: _staleEnabled, ...rest } = mergeAccountChanges(base, changes)
       const savedName = nameDirty ? displayName.trim() : latest.settings.displayName
       const savedTtl = cacheTtlDirty ? cacheTtl : latest.settings.promptCacheTtl
       const savedContext = contextDirty ? parseBudget(contextWindow) : latest.settings.contextWindow
       const savedReserve = reserveDirty ? parseBudget(outputReserve) : latest.settings.defaultMaxTokens
       const settings = {
         ...rest,
+        ...(latest.settings.enabled === true ? { enabled: true } : {}),
         ...(savedName ? { displayName: savedName } : {}),
         ...(savedTtl ? { promptCacheTtl: savedTtl } : {}),
         ...(savedContext === undefined ? {} : { contextWindow: savedContext }),

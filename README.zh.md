@@ -192,6 +192,8 @@ GitHub 安装的:重新执行一遍 `add github:V1ki/dsh-plugin-subscriptions` �
 2. **设置 → 订阅**:点对应 provider 的「连接」。若先运行过 `claude` 并登录,Claude 会即时导入凭据;没有凭据时,Claude 也和其他 provider 一样在浏览器里授权。Codex、Grok 和 Antigravity 在打开的标签页里授权;Copilot 会显示 GitHub 设备码,需在 `github.com/login/device` 输入;无浏览器环境下可展开手动兜底,粘贴回调 URL 或授权码。
 3. 在任意会话里打开模型选择器(`/model`),选择 **ChatGPT (Codex)** / **Claude (Subscription)** / **Grok (Subscription)** / **GitHub Copilot** / **Google Antigravity** 下的模型。
 
+> **关于 Google Antigravity 的说明**：由于直连上游私有端点存在较高的账号封禁（ToS）风控，且上游会直接拦截 DSH 原生对话请求并返回 429，**Google Antigravity 当前默认禁用**（老用户升级后同样默认关闭，本地凭据与配置会保留）。如需使用，需在 **设置 → 订阅** 中手动弹框确认启用；即使启用，目前也仅可查看账号用量，无法正常使用模型。
+
 未登录时:该 provider 不出现在选择器里;直接请求会报 `MISSING_CREDENTIAL` 并提示去设置页登录,不影响其他功能。
 
 ### 多账号

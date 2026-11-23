@@ -146,6 +146,7 @@ test('the installed plugin route resolves pooled models without waiting for anot
     await accountCatalogStore('antigravity', 'b').save({ at: 1, models: [{ id: 'm', name: 'M', contextWindow: 900 }] })
     for (let i = 0; i < 100 && !connection.registered(); i++) await pause(5)
     assert.ok(connection.registered())
+    assert.equal((await connection.handler('setProviderEnabled', { provider: 'antigravity', enabled: true }, new AbortController().signal)).ok, true)
     const start = performance.now()
     selection = (async () => {
       assert.ok((await llm.listModels('antigravity')).some(model => model.id === 'm'))

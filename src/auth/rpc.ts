@@ -48,7 +48,7 @@ export const SUBSCRIPTIONS_AUTH_PREFIX = 'subscriptions-auth.'
  * Kept in one place so the route table and the switch cannot drift apart.
  */
 export const SUBSCRIPTIONS_AUTH_ENDPOINTS = [
-  'providerSettings', 'setProviderSettings',
+  'providerSettings', 'setProviderSettings', 'setProviderEnabled',
   'status', 'login', 'manual', 'cancel', 'logout', 'setDefault', 'usage',
   'image', 'video', 'prepareReset', 'consumeReset',
   'speed', 'setSpeed',
@@ -113,6 +113,8 @@ export interface ProviderStatus {
   /** Saved picker visibility, attached by the status RPC from local preferences. */
   visibleModels?: string[]
   displayName?: string
+  /** False when the provider is disabled by default and requires manual opt-in. */
+  enabled?: boolean
   /** Whether a login attempt is currently waiting for its code. */
   busy: boolean
   /** Logged-in accounts, default first. */
@@ -171,6 +173,10 @@ export interface ProviderSettingsController {
   displayName?(provider: ProviderId): string | undefined
   /** Local picker selection, without triggering model discovery. */
   visibleModels?(provider: ProviderId): string[] | undefined
+  /** Local opt-in gate (Antigravity defaults to false). */
+  enabled?(provider: ProviderId): boolean
+  /** Persist only the opt-in gate without overwriting other provider settings. */
+  setEnabled?(provider: ProviderId, enabled: boolean): Promise<void>
   get(provider: ProviderId, force: boolean): Promise<unknown>
   set(provider: ProviderId, settings: unknown): Promise<void>
 }
@@ -638,6 +644,14 @@ async function dispatch(
       await providerSettings.set(provider, (payload as Record<string, unknown>).settings)
       return ok({ ok: true })
     }
+    case 'setProviderEnabled': {
+      if (!providerSettings?.setEnabled) throw new BadRequest('provider settings are unavailable')
+      const provider = readProvider(payload)
+      const enabled = (payload as Record<string, unknown>).enabled
+      if (typeof enabled !== 'boolean') throw new BadRequest('payload.enabled must be a boolean')
+      await providerSettings.setEnabled(provider, enabled)
+      return ok({ ok: true })
+    }
     case 'status': {
       // One provider's failure (a corrupt store entry, a broken flow) must not
       // blind the whole page: it degrades to an error detail on that provider
@@ -652,8 +666,10 @@ async function dispatch(
       return ok({ providers: Object.fromEntries(entries.map(([provider, status]) => {
         const displayName = providerSettings?.displayName?.(provider)
         const visibleModels = providerSettings?.visibleModels?.(provider)
+        const enabled = providerSettings?.enabled?.(provider)
         return [provider, { ...status, ...(displayName ? { displayName } : {}),
-          ...(visibleModels === undefined ? {} : { visibleModels }) }]
+          ...(visibleModels === undefined ? {} : { visibleModels }),
+          ...(enabled === false ? { enabled: false } : {}) }]
       })) })
     }
     case 'login': {

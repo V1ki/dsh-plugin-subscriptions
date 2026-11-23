@@ -11,7 +11,7 @@ const css = registerHooks({ load(url, context, nextLoad) {
     ? { format: 'module', source: 'export default {}', shortCircuit: true }
     : nextLoad(url, context)
 } })
-const { AccountWindows, CodexExhaustionNotice, compactSegment, createCurrentModelReader, previewWindows,
+const { AccountWindows, CodexExhaustionNotice, compactSegment, createCurrentModelReader, enabledBadgeRoster, previewWindows,
   collapsedDisplays, expandedDisplays, retainSubscriptionSelection, usageBadgeIcon } = await import('../src/client/SubscriptionUsageBadge.js')
 const { ImageGenerateToolview } = await import('../src/client/ImageGenerateToolview.js')
 const { VideoGenerateToolview } = await import('../src/client/VideoGenerateToolview.js')
@@ -162,6 +162,18 @@ test('compact summary counts signed-in accounts without aggregating their percen
   assert.equal(compactSegment(display('codex', [
     { kind: 'session', usedPercent: 13 }, { kind: 'weekly', usedPercent: 25 }, { kind: 'weekly', usedPercent: 40 },
   ])), 'Codex · 13% used / 25% used', 'extra windows are counted in the dialog, never on the pill')
+})
+
+test('enabledBadgeRoster skips disabled Antigravity accounts so the badge neither polls nor displays them', () => {
+  const roster = enabledBadgeRoster({
+    codex: { busy: false, accounts: [{ key: 'c1', isDefault: true }] },
+    antigravity: { busy: false, enabled: false, accounts: [{ key: 'a1', isDefault: true }] },
+  })
+  assert.deepEqual(roster, [{ provider: 'codex', account: { key: 'c1', isDefault: true } }])
+  const enabledRoster = enabledBadgeRoster({
+    antigravity: { busy: false, accounts: [{ key: 'a1', isDefault: true }] },
+  })
+  assert.deepEqual(enabledRoster, [{ provider: 'antigravity', account: { key: 'a1', isDefault: true } }])
 })
 
 test('preview promotes current-model windows without losing, merging, or mutating data', () => {

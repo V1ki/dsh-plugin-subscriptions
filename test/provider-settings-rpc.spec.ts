@@ -173,8 +173,25 @@ test('Antigravity registers the real multi-account adapter with provider setting
     assert.deepEqual(llm.listProviders(), [{ id: 'antigravity', name: 'Google Antigravity' }])
     assert.deepEqual((await listAccounts('antigravity')).map(entry => entry.key), ['alice', 'bob'])
     const adapter = adapters.get('antigravity')!
-    assert.deepEqual((await adapter.listModels('antigravity')).map(model => model.id), ['m1', 'm2'])
     const call = (endpoint: string, payload: unknown) => connection.handler(endpoint, payload, new AbortController().signal)
+
+    // Antigravity is disabled by default even when saved accounts already exist.
+    assert.deepEqual(await adapter.listModels('antigravity'), [])
+    await assert.rejects(() => adapter.resolveModel('antigravity', 'm1'), /disabled/)
+    const disabledStatus = await call('status', {})
+    assert.ok(disabledStatus.ok)
+    assert.equal((disabledStatus.value as { providers: { antigravity: { enabled?: boolean } } }).providers.antigravity.enabled, false)
+    assert.equal((await call('login', { provider: 'antigravity' })).ok, false)
+    assert.equal((await call('providerSettings', { provider: 'antigravity' })).ok, false)
+    const disabledUsage = await call('usage', { provider: 'antigravity', account: 'alice' })
+    assert.ok(disabledUsage.ok)
+    assert.deepEqual(disabledUsage.value, { supported: false })
+    assert.equal((await call('setProviderEnabled', { provider: 'codex', enabled: false })).ok, false)
+    assert.equal((await call('setProviderEnabled', { provider: 'antigravity', enabled: 'yes' })).ok, false)
+
+    // Manually enabling Antigravity activates routes immediately without restarting.
+    assert.equal((await call('setProviderEnabled', { provider: 'antigravity', enabled: true })).ok, true)
+    assert.deepEqual((await adapter.listModels('antigravity')).map(model => model.id), ['m1', 'm2'])
     const catalog = await call('providerSettings', { provider: 'antigravity', force: true })
     assert.ok(catalog.ok)
     assert.deepEqual((catalog.value as { models: { id: string }[] }).models.map(model => model.id), ['m1', 'm2'])
@@ -190,10 +207,11 @@ test('Antigravity registers the real multi-account adapter with provider setting
     const selection = async () => {
       const result = await call('status', {})
       assert.ok(result.ok)
-      return (result.value as { providers: { antigravity: { visibleModels?: string[] } } }).providers.antigravity
+      return (result.value as { providers: { antigravity: { visibleModels?: string[]; enabled?: boolean } } }).providers.antigravity
     }
     try {
       assert.deepEqual((await selection()).visibleModels, ['m2'])
+      assert.equal((await selection()).enabled, undefined, 'saving provider settings preserves enabled state')
       assert.equal((await call('setProviderSettings', { provider: 'antigravity', settings: { visibleModels: [] } })).ok, true)
       assert.deepEqual((await selection()).visibleModels, [])
       assert.equal((await call('setProviderSettings', { provider: 'antigravity', settings: {} })).ok, true)
@@ -202,6 +220,11 @@ test('Antigravity registers the real multi-account adapter with provider setting
       adapter.listOwnModels = originalList
     }
     assert.equal((await call('setProviderSettings', { provider: 'antigravity', settings: { tools: { image_generate: true } } })).ok, false)
+    // Disabling again hides models and blocks dispatch while keeping saved accounts intact.
+    assert.equal((await call('setProviderEnabled', { provider: 'antigravity', enabled: false })).ok, true)
+    assert.deepEqual(await adapter.listModels('antigravity'), [])
+    await assert.rejects(() => adapter.resolveModel('antigravity', 'm1'), /disabled/)
+    assert.deepEqual((await listAccounts('antigravity')).map(entry => entry.key), ['alice', 'bob'])
   } finally {
     await runtime.dispose()
     if (previous === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previous
@@ -229,6 +252,7 @@ test('Antigravity cached roster remains available immediately after clearing and
     runtime = ctx.plugin(plugin, { providers: ['antigravity'], pool: { enabled: false }, antigravity: { onboard: false } })
     await new Promise(resolve => setTimeout(resolve, 50))
     const call = (endpoint: string, payload: unknown) => connection.handler(endpoint, payload, new AbortController().signal)
+    assert.equal((await call('setProviderEnabled', { provider: 'antigravity', enabled: true })).ok, true)
     const result = await call('providerSettings', { provider: 'antigravity' })
     assert.ok(result.ok)
     const ids = (result.value as { models: { id: string }[] }).models.map(model => model.id)
