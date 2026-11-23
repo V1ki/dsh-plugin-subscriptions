@@ -70,6 +70,12 @@ Antigravity 用量优先读取 `retrieveUserQuotaSummary`，只展示服务端�
 
 ![video_generate 内联播放生成的视频](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/video-generate-inline.png)
 
+## Token 用量历史
+
+打开 **设置 → 订阅**，选择服务商标签页，再点击账号旁的 **用量**。未登录时，也可以通过服务商的 **用量** 按钮查看已保存的历史。弹窗按模型显示所选额度窗口内的输入、输出、缓存读取和缓存写入 token，并按 UTC 日期细分。服务商报告的推理 token 已包含在输出中。尚未获取额度窗口时，弹窗显示待确定窗口。不同额度窗口可能重叠，不要将它们的总数相加。暂不统计 Copilot。
+
+插件在本地 `~/.dsh/plugins/subscriptions/usage/` 中保存汇总计数和窗口信息，不在这里保存提示词、凭据或逐请求日志。如果 DSH 会话历史可用，弹窗还会单独显示开始按账号追踪之前的服务商总用量。**清空历史** 仅清除所选服务商在该插件中的用量历史，不影响 DSH 会话、账号或实时额度。此页面不会额外请求额度，也不估算费用。
+
 ## Provider 一览
 
 | 路由     | 订阅             | 模型 |

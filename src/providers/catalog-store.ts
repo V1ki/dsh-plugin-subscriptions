@@ -186,11 +186,17 @@ const RENAME_RETRY_CODES: ReadonlySet<string> = new Set(['EPERM', 'EBUSY', 'EACC
 const RENAME_RETRIES = 5
 const RENAME_RETRY_DELAY_MS = 20
 
-/** `rename` with a short bounded retry on share-mode conflicts. */
-async function renameWithRetry(from: string, to: string): Promise<void> {
+/**
+ * `rename` with a short bounded retry on share-mode conflicts. Exported for
+ * the usage store, which writes its files the same way through an
+ * injectable file system, hence `renameFn`.
+ */
+export async function renameWithRetry(
+  from: string, to: string, renameFn: (from: string, to: string) => Promise<void> = rename,
+): Promise<void> {
   for (let attempt = 0; ; attempt++) {
     try {
-      await rename(from, to)
+      await renameFn(from, to)
       return
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code

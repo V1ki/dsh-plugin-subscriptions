@@ -88,6 +88,13 @@ import { buildAccountPools, poolKey } from './providers/pool-family.js'
 import type { PoolDefinition, PoolMemberRef } from './providers/pool-family.js'
 import { PoolHealthRegistry } from './providers/pool-health.js'
 import { PoolUsageTracker } from './providers/pool-usage.js'
+import { observeUsageFetchers, type SnapshotObserver, type UsageFetchers } from './usage/snapshot-hook.js'
+import { WindowStore } from './usage/window-store.js'
+import type { HostSessionQuery } from './usage/host-events.js'
+import { PreTracking } from './usage/pre-tracking.js'
+import { UsageService } from './usage/service.js'
+import { createUsageHistoryController } from './usage/usage-rpc.js'
+import type { RequestEnd } from './providers/replay.js'
 import {
   CodexAdapter,
   codexFlow,
@@ -349,9 +356,6 @@ function planOf(provider: ProviderId, session: StoredSession): string | undefine
     case 'copilot': return undefined
   }
 }
-
-/** Per-provider per-account usage lookup; providers without a usage endpoint are absent. */
-type UsageFetchers = Partial<Record<ProviderId, (account: string, signal: AbortSignal) => Promise<ProviderUsage>>>
 
 /**
  * Auth operations behind the `/subscriptions-auth` RPC channel: start/complete
@@ -845,9 +849,42 @@ export function apply(ctx: Context, config: Config): void {
   // reasoning) never survives an account switch in memory.
   let copilotAdapter: CopilotAdapter | undefined
   const memberAdapters = new Map<ProviderId, AccountAwareAdapter>()
+  // Usage window tracking: one store per plugin
+  // instance. It owns the window tracker, loads `trackingStartedAt` and the
+  // open entries from disk, and saves behind the request path; events that
+  // arrive before it has loaded are applied once it has. Dispose saves what
+  // is pending.
+  const usageStore = new WindowStore({ onWarn })
+  ctx.effect(() => () => usageStore.dispose(), 'dsh-plugin-subscriptions: usage window store')
+  // The provider total from before tracking: folded once from DSH's
+  // session history, which only `sessionQuery` reads. The service is
+  // optional (headless profiles have none), so the scan waits for it.
+  // It also waits for `sessionPersistence`: without it `sessionQuery`
+  // lists only the live sessions, and a scan then would store a total that
+  // misses every stored session and is never recomputed.
+  // Leaving either service aborts a running scan, which then writes nothing
+  // and is retried at the next startup; dispose waits for a scan already
+  // writing, within the shutdown bound.
+  const preTracking = new PreTracking({
+    onWarn,
+    trackingStartedAt: async () => {
+      await usageStore.ready
+      return usageStore.trackingStartedAt
+    },
+  })
+  ctx.inject(['sessionQuery', 'sessionPersistence'], queryCtx => {
+    queryCtx.effect(
+      () => preTracking.attach(queryCtx.get('sessionQuery') as HostSessionQuery),
+      'dsh-plugin-subscriptions: earlier usage history scan',
+    )
+  })
+  // Usage inspection does not fetch quota or make provider requests.
+  const usageService = new UsageService({ store: usageStore, preTracking })
+  ctx.effect(() => () => { usageService.dispose() }, 'dsh-plugin-subscriptions: usage service')
+  const onRequestEnd = (end: RequestEnd): void => { usageStore.recordRequest(end) }
   const register = (provider: ProviderId, adapter: AccountAwareAdapter): AdapterRegistrationHandle => {
     const route = new AccountPreferencesAdapter({
-      provider, adapter, settings: preferences, pool: () => poolAdapter,
+      provider, adapter, settings: preferences, pool: () => poolAdapter, onRequestEnd,
       accounts: async () => (await accountTokens.get(provider)?.list() ?? []).map(({ key, session }) => ({ key, label: accountOf(provider, session) ?? key })),
     })
     memberAdapters.set(provider, route.poolMember())
@@ -1057,6 +1094,12 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
 
+  const trackUsage: SnapshotObserver = (provider, account, snapshot, at) => {
+    try { usageStore.observe(provider, account, snapshot, at) }
+    catch { onWarn(`Could not track the ${provider} quota window`) }
+  }
+  observeUsageFetchers(usageFetchers, trackUsage)
+
   // Same-subscription account pools: a catalog model with ≥2 accounts of
   // that provider is served through the pool (same id, same picker group).
   // Configured tiers are extra picker rows. Built whenever enabled; a
@@ -1069,7 +1112,7 @@ export function apply(ctx: Context, config: Config): void {
     // degrade the strategy (zero urgency), not stall the user's request.
     // Copilot has no usage endpoint, so its accounts resolve no fetcher and
     // score zero urgency — the natural last resort.
-    const fetcherFor = (provider: ProviderId, account: string): (() => Promise<ProviderUsage>) | undefined => {
+    const rawFetcherFor = (provider: ProviderId, account: string): (() => Promise<ProviderUsage>) | undefined => {
       switch (provider) {
         case 'codex': {
           // Settings reads the pool cache too: use the complete usage fetcher
@@ -1102,6 +1145,17 @@ export function apply(ctx: Context, config: Config): void {
         }
         case 'copilot':
           return undefined
+      }
+    }
+    // Codex already goes through the observed fetcher table. The other pool
+    // fetchers keep their existing timeout/lookup behavior and report here.
+    const fetcherFor = (provider: ProviderId, account: string): (() => Promise<ProviderUsage>) | undefined => {
+      const fetch = rawFetcherFor(provider, account)
+      if (fetch === undefined || provider === 'codex') return fetch
+      return async () => {
+        const snapshot = await fetch()
+        trackUsage(provider, account, snapshot, Date.now())
+        return snapshot
       }
     }
     poolHealth = new PoolHealthRegistry()
@@ -1155,6 +1209,7 @@ export function apply(ctx: Context, config: Config): void {
       families,
       tiers: poolConfig?.tiers ?? {},
       onWarn,
+      onRequestEnd,
     })
   }
 
@@ -1290,6 +1345,7 @@ export function apply(ctx: Context, config: Config): void {
       await consumeCodexResetCredit(await codexTokens.session(account), creditId, requestId, proxiedFetch, signal)
     },
     account => poolUsage?.invalidate('codex', account),
+    (account, at) => { usageStore.redeem('codex', account, at) },
   )
   registerAuthRpc(ctx, new SubscriptionsAuthController(
     flows, deviceFlows, authChanged, resolveAttachments, usageFetchers, undefined, poolUsage, config.antigravity,
@@ -1375,7 +1431,14 @@ export function apply(ctx: Context, config: Config): void {
       poolAdapter?.invalidate()
       for (const [route, handle] of handles) handle.replace([route])
     },
-  })
+  }, createUsageHistoryController(
+    usageService,
+    // The auth store's list (default first), as the card shows it; reading it refreshes no token.
+    async provider => (await listAccounts(provider)).map(({ key, session }) => {
+      const label = accountOf(provider, session)
+      return label === undefined ? { key } : { key, label }
+    }),
+  ))
 
   // OpenCode-style cadence: a startup check (five-minute cache freshness),
   // then one hour between completed runs. Picker reads never schedule refreshes.

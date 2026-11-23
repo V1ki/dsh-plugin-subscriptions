@@ -28,7 +28,7 @@ import { poolKey } from './pool-family.js'
 import { accountKey, classifyPoolFailure, memberKey, PoolHealthRegistry } from './pool-health.js'
 import type { MemberQuota, PoolUsageTracker } from './pool-usage.js'
 import { llmErrorFromFailure, withAbortSignal } from './common.js'
-import { streamAccountWithReplay } from './replay.js'
+import { streamAccountWithReplay, type RequestEndObserver } from './replay.js'
 
 /** Member-selection strategy: plain priority failover or quota-aware scheduling. */
 export type PoolStrategy = 'priority' | 'quota_aware' | 'quota_normalized'
@@ -50,6 +50,8 @@ export interface PoolAdapterOptions {
   /** User-configured extra picker entries (heterogeneous fallbacks), by pool id. */
   tiers: Record<string, PoolMemberRef[]>
   onWarn: (message: string) => void
+  /** Usage tracking: told about every member attempt that reported usage, failed ones included. */
+  onRequestEnd?: RequestEndObserver
 }
 
 /** Bound on sticky-session memory; oldest entries evict past it. */
@@ -270,7 +272,7 @@ export class PoolAdapter extends LlmAdapter {
       if (adapter === undefined) continue
       tried += 1
       const iterator = streamAccountWithReplay(
-        adapter, { ...options, provider: member.provider }, member.account, member.model,
+        adapter, { ...options, provider: member.provider }, member.account, member.model, this.options.onRequestEnd,
       )[Symbol.asyncIterator]()
       let first: IteratorResult<StreamChunk>
       const leadingUsage: StreamChunk[] = []
