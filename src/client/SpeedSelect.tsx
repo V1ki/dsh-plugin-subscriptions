@@ -16,6 +16,7 @@ import type { CSSProperties } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import { callSubscriptionsAuth } from './SubscriptionsSection.js'
+import { warnOnce } from './diagnostics.js'
 import { subscriptionChromeCss } from './provider-settings-styles.js'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
@@ -170,7 +171,10 @@ export function SpeedSelect({ loadSpeed, setSpeed, t }: SpeedSelectProps) {
     try {
       const loaded = await loadRef.current?.()
       if (loaded && id === generation.current) setState(loaded)
-    } catch { /* preserve the last confirmed state; a later poll can retry */ }
+    } catch (error) {
+      // Preserve the last confirmed state; a later poll can retry.
+      warnOnce('speed', 'reading the session model or speed state', error)
+    }
   }
   useEffect(() => {
     if (loadRef.current === undefined) return

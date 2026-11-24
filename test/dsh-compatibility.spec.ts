@@ -13,7 +13,7 @@ const manifest = require('dsh-plugin-subscriptions/package.json') as {
 const peers = Object.entries(manifest.peerDependencies).filter(([name]) =>
   name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'))
 
-const supportedRange = '>=0.2.0-rc.2 || >=0.2.1-0 || >=0.2.2-0'
+const supportedRange = '>=0.2.0-rc.2 || >=0.2.1-0 || >=0.2.2-0 || >=0.2.3-0'
 
 test('all DSH peers share the minimum-only compatibility policy without an engines override', () => {
   assert.deepEqual(peers.map(([name]) => name).sort(), [
@@ -39,7 +39,7 @@ for (const includePrerelease of [false, true]) {
   test(`${mode}: admits the lower release line and stable versions in range`, () => {
     for (const version of [
       '0.2.0-rc.2', '0.2.0-rc.3', '0.2.0', '0.2.1',
-      '0.2.2', '0.2.9', '0.3.0', '1.0.0', '2.0.0',
+      '0.2.2', '0.2.3', '0.2.9', '0.3.0', '1.0.0', '2.0.0',
     ]) {
       for (const [name, range] of peers) {
         assert.equal(semver.satisfies(version, range, options), true, `${name}: ${version}`)
@@ -47,12 +47,13 @@ for (const includePrerelease of [false, true]) {
     }
   })
 
-  test(`${mode}: admits 0.2.1 and 0.2.2 prereleases without per-RC entries`, () => {
+  test(`${mode}: admits 0.2.1, 0.2.2 and 0.2.3 prereleases without per-RC entries`, () => {
     for (const version of [
       '0.2.1-0', '0.2.1-alpha.1', '0.2.1-alpha.2', '0.2.1-alpha.3',
       '0.2.1-alpha.4', '0.2.1-beta.1', '0.2.1-rc.1', '0.2.1-rc.2', '0.2.1-rc.3',
       '0.2.1-rc.4', '0.2.1-rc.5', '0.2.1-rc.99',
       '0.2.2-0', '0.2.2-alpha.1', '0.2.2-rc.1', '0.2.2-rc.3',
+      '0.2.3-0', '0.2.3-alpha.1', '0.2.3-alpha.2', '0.2.3-rc.1',
     ]) {
       for (const [name, range] of peers) {
         assert.equal(semver.satisfies(version, range, options), true, `${name}: ${version}`)

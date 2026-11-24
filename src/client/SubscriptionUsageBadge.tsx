@@ -42,6 +42,7 @@ import type { ModelDirectoriesLike } from './SpeedSelect.js'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
 import { hostIcon } from './host-icons.js'
+import { warnOnce } from './diagnostics.js'
 import { useUsageBadgeMode, useQuotaDisplayMode, type QuotaDisplayMode } from './usage-badge-preferences.js'
 import { visibleUsageWindows } from './usage-window-filter.js'
 import { DISPLAY_NAME_CHANGED, type DisplayNameChange } from './display-name-events.js'
@@ -507,7 +508,7 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
           setLastSubscription(previous => retainSubscriptionSelection(previous, model))
           setSelection(model)
         },
-        () => { /* keep the last known provider; the next tick retries */ },
+        (error) => { warnOnce('usage-badge', 'reading the session model', error) }, // keep the last known provider; the next tick retries
       ).finally(() => { inflight = false })
     }
     reload()
