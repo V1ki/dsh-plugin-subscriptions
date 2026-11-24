@@ -5,6 +5,10 @@
  * accounts without double-counting overlapping quota windows (e.g. a request
  * counted in both `5h` and `weekly`, or `weekly` + `weekly (scope: opus)`).
  *
+ * Usage from before tracking started has no account: its daily sums are added
+ * only when every account is shown (`account === 'all'`), while the
+ * per-account series and quota cycles stay ledger-only.
+ *
  * Deduplication rule per `(provider, account, day, model)`:
  * - Within one `(kind, scope)` series, entries are sequential windows; summing
  *   all `id`-deduplicated visible entries in that series gives that series'
@@ -420,6 +424,8 @@ export function buildUsageDashboard(
     accounts: ProcessedAccount[]
     clearedAt?: number
     preTracking: PreTrackingStatus
+    /** Daily sums from before tracking started; no account can be named for them. */
+    preTrackingDays: DaySums
     observed: (account: string) => readonly ObservedWindow[]
   }
 
@@ -484,6 +490,7 @@ export function buildUsageDashboard(
       accounts,
       ...clearedAt === undefined ? {} : { clearedAt },
       preTracking,
+      preTrackingDays: preTracking.state === 'stored' ? preTracking.total.days : {},
       observed,
     })
   }
@@ -507,14 +514,17 @@ export function buildUsageDashboard(
   const providerRangeTotals = new Map<TrackedProvider, number>()
   for (const p of processedProviders) {
     let total = 0
-    for (const acct of p.accounts) {
-      for (const [date, models] of Object.entries(acct.days)) {
+    const addDays = (days: DaySums): void => {
+      for (const [date, models] of Object.entries(days)) {
         if (fixedStartDate !== undefined && (date < fixedStartDate || date > todayUtc)) continue
         for (const counts of Object.values(models)) {
           total += counts.inputTokens + counts.outputTokens + counts.cacheReadTokens + counts.cacheWriteTokens
         }
       }
     }
+    for (const acct of p.accounts) addDays(acct.days)
+    // The provider pill counts the whole provider, and earlier history belongs to no account.
+    addDays(p.preTrackingDays)
     providerRangeTotals.set(p.provider, total)
   }
 
@@ -536,54 +546,66 @@ export function buildUsageDashboard(
   let earliestFilteredDate: string | undefined
   let latestFilteredDate: string | undefined
 
+  const accumulate = (
+    provider: TrackedProvider,
+    account: string | undefined,
+    date: string,
+    models: ModelSums,
+  ): void => {
+    const inHeatmap = date >= heatmapStartDate && date <= todayUtc
+    const inRange = fixedStartDate === undefined ? true : (date >= fixedStartDate && date <= todayUtc)
+
+    for (const [model, counts] of Object.entries(models)) {
+      const totals = countsToTotals(counts)
+      if (totals.totalTokens <= 0 && totals.reasoningTokens <= 0) continue
+
+      if (inHeatmap) {
+        accumulateDay(heatmapAccumulators, date, provider, model, totals)
+      }
+
+      if (inRange) {
+        if (earliestFilteredDate === undefined || date < earliestFilteredDate) earliestFilteredDate = date
+        if (latestFilteredDate === undefined || date > latestFilteredDate) latestFilteredDate = date
+        accumulateDay(rangeAccumulators, date, provider, model, totals)
+        addTotals(summaryTotals, totals)
+
+        if (totals.totalTokens > 0) {
+          activeModelsSet.add(`${provider}\u0000${model}`)
+          activeDaysSet.add(date)
+          // Earlier history has no account, so it never adds one.
+          if (account !== undefined) activeAccountsSet.add(`${provider}\u0000${account}`)
+        }
+
+        const modelKey = `${provider}\u0000${model}`
+        let modelBucket = modelTotalsMap.get(modelKey)
+        if (modelBucket === undefined) {
+          modelBucket = { provider, model, totals: emptyTotals() }
+          modelTotalsMap.set(modelKey, modelBucket)
+        }
+        addTotals(modelBucket.totals, totals)
+
+        let providerBucket = providerBreakdownMap.get(provider)
+        if (providerBucket === undefined) {
+          providerBucket = { totals: emptyTotals(), models: new Set(), accounts: new Set() }
+          providerBreakdownMap.set(provider, providerBucket)
+        }
+        addTotals(providerBucket.totals, totals)
+        if (totals.totalTokens > 0) {
+          providerBucket.models.add(model)
+          if (account !== undefined) providerBucket.accounts.add(account)
+        }
+      }
+    }
+  }
+
   for (const p of matchedProviders) {
     for (const acct of p.accounts) {
       if (filterAccount !== 'all' && acct.key !== filterAccount) continue
-      for (const [date, models] of Object.entries(acct.days)) {
-        const inHeatmap = date >= heatmapStartDate && date <= todayUtc
-        const inRange = fixedStartDate === undefined ? true : (date >= fixedStartDate && date <= todayUtc)
-
-        for (const [model, counts] of Object.entries(models)) {
-          const totals = countsToTotals(counts)
-          if (totals.totalTokens <= 0 && totals.reasoningTokens <= 0) continue
-
-          if (inHeatmap) {
-            accumulateDay(heatmapAccumulators, date, p.provider, model, totals)
-          }
-
-          if (inRange) {
-            if (earliestFilteredDate === undefined || date < earliestFilteredDate) earliestFilteredDate = date
-            if (latestFilteredDate === undefined || date > latestFilteredDate) latestFilteredDate = date
-            accumulateDay(rangeAccumulators, date, p.provider, model, totals)
-            addTotals(summaryTotals, totals)
-
-            if (totals.totalTokens > 0) {
-              activeModelsSet.add(`${p.provider}\u0000${model}`)
-              activeDaysSet.add(date)
-              activeAccountsSet.add(`${p.provider}\u0000${acct.key}`)
-            }
-
-            const modelKey = `${p.provider}\u0000${model}`
-            let modelBucket = modelTotalsMap.get(modelKey)
-            if (modelBucket === undefined) {
-              modelBucket = { provider: p.provider, model, totals: emptyTotals() }
-              modelTotalsMap.set(modelKey, modelBucket)
-            }
-            addTotals(modelBucket.totals, totals)
-
-            let providerBucket = providerBreakdownMap.get(p.provider)
-            if (providerBucket === undefined) {
-              providerBucket = { totals: emptyTotals(), models: new Set(), accounts: new Set() }
-              providerBreakdownMap.set(p.provider, providerBucket)
-            }
-            addTotals(providerBucket.totals, totals)
-            if (totals.totalTokens > 0) {
-              providerBucket.models.add(model)
-              providerBucket.accounts.add(acct.key)
-            }
-          }
-        }
-      }
+      for (const [date, models] of Object.entries(acct.days)) accumulate(p.provider, acct.key, date, models)
+    }
+    // The before-tracking days belong to no account: only the "all accounts" view can show them.
+    if (filterAccount === 'all') {
+      for (const [date, models] of Object.entries(p.preTrackingDays)) accumulate(p.provider, undefined, date, models)
     }
   }
 

@@ -1,9 +1,10 @@
 /**
  * DSH's session history up to `trackingStartedAt`, folded once and
- * stored as one total per provider and model in `<provider>/pre-tracking.json`.
+ * stored per provider as UTC daily totals in `<provider>/pre-tracking.json`.
  *
  * Two parts:
- * - {@link PreTrackingFolder}, pure: session logs in, per-provider model sums out.
+ * - {@link PreTrackingFolder}, pure: session logs in, per-provider daily and
+ *   model sums out.
  * - {@link PreTracking}, the side-effect boundary: the one-time background
  *   scan through `ctx.sessionQuery`, the atomic write, and the status a
  *   reader shows. Nothing here runs on the request path, and reading the
@@ -17,7 +18,7 @@ import {
 } from './constants.js'
 import { HOST_EVENT, HOST_STREAM, type HostSessionEvent, type HostSessionLog, type HostSessionQuery, type HostTokenUsage } from './host-events.js'
 import { servedModel, usageCounts } from './request-counts.js'
-import { parsePreTracking, pruneModels, type ModelSums, type PreTrackingTotal, type UsageMeta } from './usage-schema.js'
+import { parsePreTracking, pruneModels, modelsOfDays, type DaySums, type ModelSums, type PreTrackingTotal, type UsageMeta } from './usage-schema.js'
 import {
   errorCode, nodeUsageFileSystem, readOptional, readUsageMeta, sleep, usageLock, usageLockWaitMs, writeAtomic, type UsageFileSystem,
 } from './usage-files.js'
@@ -27,7 +28,10 @@ export type { PreTrackingTotal } from './usage-schema.js'
 
 /** What the fold of a whole history gives. */
 export interface PreTrackingFold {
+  /** Totals per provider and model, the sum of `days`. */
   totals: Record<TrackedProvider, ModelSums>
+  /** Totals per provider, UTC day and model. */
+  days: Record<TrackedProvider, DaySums>
   /** Usage samples with no provider at all: in no total, reported as a diagnostic. */
   unattributed: number
   /** Usage samples rejected whole: a bucket not a non-negative safe integer, or a sum past `MAX_SAFE_INTEGER`. */
@@ -47,8 +51,8 @@ interface Route {
 interface Slot {
   turn: number
   step: number
-  /** The provider and model the sample was added to; absent when it was not counted. */
-  counted?: { provider: TrackedProvider, model: string, counts: TokenCounts }
+  /** The provider, model and UTC day the sample was added to; absent when it was not counted. */
+  counted?: { provider: TrackedProvider, model: string, day: string, counts: TokenCounts }
 }
 
 /** What {@link PreTrackingFolder.count} returns for a sample rejected whole, as opposed to one merely not counted. */
@@ -111,6 +115,17 @@ function isTurnStep(data: Json): data is Json & { turn: number, step: number } {
 }
 
 /**
+ * The UTC date of an event time, 'YYYY-MM-DD', or `undefined` when the time
+ * is no date a day bucket can name. The fold rejects such a sample whole, so
+ * the daily sums always add up to the model totals.
+ */
+function utcDay(time: number): string | undefined {
+  const date = new Date(time)
+  if (!Number.isFinite(date.getTime()) || date.getUTCFullYear() < 0 || date.getUTCFullYear() > 9999) return undefined
+  return date.toISOString().slice(0, 10)
+}
+
+/**
  * Folds DSH session logs into per-provider, per-model totals of the usage
  * before `trackingStartedAt` (PRE-FOLD). Pure: no clock, no I/O. Logs are
  * added one at a time, so a scan never holds more than one in memory.
@@ -131,6 +146,7 @@ function isTurnStep(data: Json): data is Json & { turn: number, step: number } {
  */
 export class PreTrackingFolder {
   private readonly totals = Object.fromEntries(USAGE_TRACKED_PROVIDERS.map(provider => [provider, {}])) as Record<TrackedProvider, ModelSums>
+  private readonly days = Object.fromEntries(USAGE_TRACKED_PROVIDERS.map(provider => [provider, {}])) as Record<TrackedProvider, DaySums>
   private unattributed = 0
   private invalid = 0
 
@@ -149,7 +165,7 @@ export class PreTrackingFolder {
         // dsh-token-meter: a retry closes the slot, so the retried attempt adds.
         if (slot !== undefined && isObject(event.data) && slot.turn === event.data.turn && slot.step === event.data.step) slot = undefined
       } else if (event.type === HOST_EVENT.compactionSummary) {
-        if (own && isObject(event.data)) this.count(routeOf(event.data), usageOf(event.data.usage))
+        if (own && isObject(event.data)) this.count(routeOf(event.data), usageOf(event.data.usage), event.time)
       } else {
         const sample = this.sampleOf(event, context)
         if (sample !== undefined) slot = this.place(slot, sample, own)
@@ -157,15 +173,20 @@ export class PreTrackingFolder {
     }
   }
 
-  /** The totals so far. */
+  /** The totals so far: the daily sums, and their sum per model. */
   result(): PreTrackingFold {
     // A replaced sample can leave a model at zero: no empty rows.
-    const totals = Object.fromEntries(USAGE_TRACKED_PROVIDERS.map(provider => [provider, structuredClone(pruneModels(this.totals[provider]))])) as Record<TrackedProvider, ModelSums>
-    return { totals, unattributed: this.unattributed, invalid: this.invalid }
+    const days = Object.fromEntries(USAGE_TRACKED_PROVIDERS.map(provider => [
+      provider, structuredClone(pruneDays(this.days[provider])),
+    ])) as Record<TrackedProvider, DaySums>
+    const totals = Object.fromEntries(USAGE_TRACKED_PROVIDERS.map(provider => [
+      provider, modelsOfDays(days[provider]),
+    ])) as Record<TrackedProvider, ModelSums>
+    return { totals, days, unattributed: this.unattributed, invalid: this.invalid }
   }
 
-  /** The usage sample of an assistant settlement, with its slot and route; `undefined` for any other event or none. */
-  private sampleOf(event: HostSessionEvent, context: Route | undefined): (Slot & { route?: Route, usage: HostTokenUsage }) | undefined {
+  /** The usage sample of an assistant settlement, with its slot, route and event time; `undefined` for any other event or none. */
+  private sampleOf(event: HostSessionEvent, context: Route | undefined): (Slot & { route?: Route, usage: HostTokenUsage, at: number }) | undefined {
     if (event.type !== HOST_EVENT.assistantMessage && event.type !== HOST_EVENT.assistantAttempt) return undefined
     const data = event.data
     if (!isObject(data) || !isTurnStep(data)) return undefined
@@ -174,7 +195,7 @@ export class PreTrackingFolder {
     const usage = (isMessage ? usageOf(data.usage) : undefined) ?? lastStreamUsage(data.stream)
     if (usage === undefined) return undefined
     const route = routeOf(isMessage && isObject(data.message) ? data.message.source : undefined) ?? context
-    return { turn: data.turn, step: data.step, usage, ...route === undefined ? {} : { route } }
+    return { turn: data.turn, step: data.step, usage, at: event.time, ...route === undefined ? {} : { route } }
   }
 
   /**
@@ -190,21 +211,21 @@ export class PreTrackingFolder {
    *.
    * @returns the slot held after the sample.
    */
-  private place(previous: Slot | undefined, sample: Slot & { route?: Route, usage: HostTokenUsage }, own: boolean): Slot | undefined {
+  private place(previous: Slot | undefined, sample: Slot & { route?: Route, usage: HostTokenUsage, at: number }, own: boolean): Slot | undefined {
     if (!own) return { turn: sample.turn, step: sample.step }
     const replaced = previous?.turn === sample.turn && previous.step === sample.step ? previous.counted : undefined
     // Taken out first, so the overflow check sees the sums the sample would join.
-    if (replaced !== undefined) addModel(this.totals[replaced.provider], replaced.model, negate(replaced.counts))
-    const counted = this.count(sample.route, sample.usage)
+    if (replaced !== undefined) this.removeCounted(replaced)
+    const counted = this.count(sample.route, sample.usage, sample.at)
     if (counted === REJECTED) {
-      if (replaced !== undefined) addModel(this.totals[replaced.provider], replaced.model, replaced.counts)
+      if (replaced !== undefined) this.addCounted(replaced)
       return previous
     }
     return { turn: sample.turn, step: sample.step, ...counted === undefined ? {} : { counted } }
   }
 
-  /** Add one sample to its provider's total; `undefined` when it was not added, {@link REJECTED} when it was rejected whole. */
-  private count(route: Route | undefined, usage: HostTokenUsage | undefined): Slot['counted'] | typeof REJECTED {
+  /** Add one sample to its provider's daily and model totals; `undefined` when it was not added, {@link REJECTED} when it was rejected whole. */
+  private count(route: Route | undefined, usage: HostTokenUsage | undefined, at: number): Slot['counted'] | typeof REJECTED {
     if (usage === undefined) return undefined
     const counts = usageCounts(usage)
     if (!validCounts(counts)) {
@@ -218,15 +239,51 @@ export class PreTrackingFolder {
     }
     // Copilot and non-subscription routes are out of scope.
     if (!isTrackedProvider(route.provider)) return undefined
+    const day = utcDay(at)
+    if (day === undefined) {
+      // The sample cannot be put in any daily bucket, so it is left out of
+      // the totals too rather than making them disagree with the days.
+      this.invalid++
+      return REJECTED
+    }
     const model = servedModel(route.model)
     const models = this.totals[route.provider]
-    if (overflows(models, model, counts)) {
+    const dayModels = this.days[route.provider][day] ?? {}
+    if (overflows(models, model, counts) || overflows(dayModels, model, counts)) {
       this.invalid++
       return REJECTED
     }
     addModel(models, model, counts)
-    return { provider: route.provider, model, counts }
+    addModel((this.days[route.provider][day] ??= {}), model, counts)
+    return { provider: route.provider, model, day, counts }
   }
+
+  /** Put one counted sample back, into its day and into its provider's total. */
+  private addCounted(counted: NonNullable<Slot['counted']>): void {
+    addModel(this.totals[counted.provider], counted.model, counted.counts)
+    addModel((this.days[counted.provider][counted.day] ??= {}), counted.model, counted.counts)
+  }
+
+  /** Take one counted sample out again, dropping the day when its last model leaves. */
+  private removeCounted(counted: NonNullable<Slot['counted']>): void {
+    addModel(this.totals[counted.provider], counted.model, negate(counted.counts))
+    const day = this.days[counted.provider][counted.day]
+    if (day === undefined) return
+    addModel(day, counted.model, negate(counted.counts))
+    const kept = pruneModels(day)
+    if (Object.keys(kept).length === 0) delete this.days[counted.provider][counted.day]
+    else this.days[counted.provider][counted.day] = kept
+  }
+}
+
+/** The days with their empty models and their empty days dropped. */
+function pruneDays(days: DaySums): DaySums {
+  const kept: DaySums = {}
+  for (const [day, models] of Object.entries(days)) {
+    const sums = pruneModels(models)
+    if (Object.keys(sums).length > 0) kept[day] = sums
+  }
+  return kept
 }
 
 /**
@@ -389,7 +446,10 @@ export class PreTracking {
     const missing: TrackedProvider[] = []
     for (const provider of USAGE_TRACKED_PROVIDERS) {
       if (meta.clearedAt[provider] !== undefined) continue
-      if ((await this.readTotal(provider))?.trackingStartedAt !== meta.trackingStartedAt) missing.push(provider)
+      const total = await this.readTotal(provider)
+      // A version 1 total has no days: it is shown meanwhile, and scanned again
+      // so the dashboard gets the daily sums.
+      if (total?.v !== 2 || total.trackingStartedAt !== meta.trackingStartedAt) missing.push(provider)
     }
     return missing
   }
@@ -418,7 +478,7 @@ export class PreTracking {
     // Past this point the fold is complete, so the writes go on even if the
     // plugin is disposed meanwhile (detach waits for them, within its bound).
     for (const provider of USAGE_TRACKED_PROVIDERS) {
-      await this.store(provider, { v: 1, trackingStartedAt, models: result.totals[provider] })
+      await this.store(provider, { v: 2, trackingStartedAt, days: result.days[provider], models: result.totals[provider] })
     }
   }
 
@@ -449,8 +509,11 @@ export class PreTracking {
     try {
       const meta = await readUsageMeta(this.fs, this.dir)
       if (meta === undefined || meta.trackingStartedAt !== total.trackingStartedAt || meta.clearedAt[provider] !== undefined) return
-      if ((await this.readTotal(provider))?.trackingStartedAt === total.trackingStartedAt) return
-      await writeAtomic(this.fs, this.path(provider), `${JSON.stringify(total, null, 2)}\n`)
+      const stored = await this.readTotal(provider)
+      if (stored?.v === 2 && stored.trackingStartedAt === total.trackingStartedAt) return
+      // Only the days are stored: the model totals are their sum, derived on read.
+      const file = { v: total.v, trackingStartedAt: total.trackingStartedAt, days: total.days }
+      await writeAtomic(this.fs, this.path(provider), `${JSON.stringify(file, null, 2)}\n`)
     } finally {
       await release()
     }
