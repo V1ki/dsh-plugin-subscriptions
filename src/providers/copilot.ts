@@ -35,6 +35,10 @@ import {
   toChatMessages,
   toChatTools,
 } from '../translate/chat-completions.js'
+import {
+  isCopilotGeminiModel,
+  sanitizeCopilotGeminiChatTools,
+} from '../translate/copilot-gemini-schema.js'
 import { streamResponses, toResponsesInput, toResponsesTools } from '../translate/responses.js'
 import type { ReasoningReplayItem, ResponsesRequestInput, ResponsesStreamEvent } from '../translate/responses.js'
 import {
@@ -767,11 +771,16 @@ export function copilotChatRequestBody(
   options: GenerateOptions,
   messages: Record<string, unknown>[],
 ): Record<string, unknown> {
+  const tools = options.tools !== undefined && options.tools.length > 0
+    ? (isCopilotGeminiModel(options.model)
+        ? sanitizeCopilotGeminiChatTools(toChatTools(options.tools))
+        : toChatTools(options.tools))
+    : undefined
   return {
     model: options.model,
     messages: sanitizeCopilotChatMessages(messages),
-    ...options.tools !== undefined && options.tools.length > 0
-      ? { tools: toChatTools(options.tools), tool_choice: 'auto' }
+    ...tools !== undefined && tools.length > 0
+      ? { tools, tool_choice: 'auto' }
       : {},
     ...options.maxTokens !== undefined ? { max_completion_tokens: options.maxTokens } : {},
     // The harness only passes an effort the resolved model advertised (the

@@ -1663,6 +1663,86 @@ test('CopilotAdapter.stream (/chat/completions) sanitizes Codex→Copilot switch
   }
 })
 
+test('copilotChatRequestBody applies Gemini tool-schema sanitization only for Gemini models', () => {
+  const dshTools: GenerateOptions['tools'] = [
+    {
+      name: 'str_replace_editor',
+      description: 'Edit files.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+          file_text: { oneOf: [{ type: 'string' }, { type: 'null' }], description: 'File text.' },
+        },
+        required: ['path'],
+      },
+    },
+    {
+      name: 'run_workflow',
+      description: 'Run workflow.',
+      parameters: {
+        type: 'object',
+        properties: {
+          args: { type: 'object', additionalProperties: true, description: 'Workflow args.' },
+        },
+      },
+    },
+    {
+      name: 'cordis_inspect_query',
+      description: 'Query provider.',
+      parameters: {
+        type: 'object',
+        properties: {
+          input: { description: 'Arbitrary JSON input.' },
+        },
+      },
+    },
+  ]
+  const snapshot = structuredClone(dshTools)
+
+  const geminiBody = copilotChatRequestBody(
+    { ...BODY_OPTIONS, model: 'gemini-4-hydrogen', tools: dshTools },
+    [{ role: 'user', content: 'hi' }],
+  )
+  const geminiTools = geminiBody.tools as { function: { name: string; parameters: Record<string, unknown> } }[]
+  assert.deepEqual(geminiTools[0]!.function.parameters, {
+    type: 'object',
+    properties: {
+      path: { type: 'string' },
+      file_text: { type: 'string', nullable: true, description: 'File text.' },
+    },
+    required: ['path'],
+  })
+  assert.deepEqual(geminiTools[1]!.function.parameters, {
+    type: 'object',
+    properties: {
+      args: { type: 'object', properties: {}, description: 'Workflow args.' },
+    },
+  })
+  assert.deepEqual(geminiTools[2]!.function.parameters, {
+    type: 'object',
+    properties: {
+      input: { type: 'string', description: 'Arbitrary JSON input.' },
+    },
+  })
+
+  // Non-Gemini models (Claude / GPT) receive the standard chat tool schemas untouched.
+  const claudeBody = copilotChatRequestBody(
+    { ...BODY_OPTIONS, model: 'claude-sonnet-5.5', tools: dshTools },
+    [{ role: 'user', content: 'hi' }],
+  )
+  const claudeTools = claudeBody.tools as { function: { parameters: Record<string, unknown> } }[]
+  assert.deepEqual(
+    (claudeTools[0]!.function.parameters.properties as Record<string, unknown>).file_text,
+    { oneOf: [{ type: 'string' }, { type: 'null' }], description: 'File text.' },
+  )
+  assert.deepEqual(
+    (claudeTools[1]!.function.parameters.properties as Record<string, unknown>).args,
+    { type: 'object', additionalProperties: true, description: 'Workflow args.' },
+  )
+  assert.deepEqual(dshTools, snapshot, 'input tools must not be mutated')
+})
+
 test('CopilotAdapter.stream sets copilot-vision-request header for images nested inside legacy tool-result blocks', async () => {
   const ref = { attachmentId: 'img-nested', mediaType: 'image/png', bytes: 2, width: 1, height: 1 }
   const { calls, restore } = recordingHeaderFetch([{ body: chatSseBody('saw image') }])
