@@ -44,7 +44,7 @@ const rpc = { call: async (_channel: string, method: string, payload: any) => {
       const now = Date.now()
       state.resetExpiry = now + 86_400_000
       return { ok: true, value: {
-        supported: true, credits: { balance: 0 },
+        supported: true, credits: { hasCredits: true, unlimited: false, balance: '12.5' },
         windows: [{ kind: 'weekly', usedPercent: payload.force ? 90 : 47, resetsAt: now + 86_400_000 }],
         resetCredits: [3, 1, 2].map(days => ({ id: String(days), expiresAt: now + days * 86_400_000 })),
       } }

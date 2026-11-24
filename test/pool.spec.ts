@@ -576,6 +576,49 @@ for (const strategy of ['priority', 'quota_aware', 'quota_normalized'] as const)
     assert.deepEqual(codex.accounts, ['a2'])
   })
 
+  test(`${strategy}: sticky credit-funded account yields when another account still has near-full included quota`, async () => {
+    const funded = { ...windowUsage(100, 60_000), credits: { hasCredits: true, unlimited: false, balance: '12.5' } }
+    const data: Record<string, ProviderUsage> = {
+      'codex/a1': funded,
+      'codex/a2': windowUsage(100, 60_000),
+    }
+    const codex = new FakeAdapter((_options, account) => serveOk(account))
+    const { pool, usage } = makePool({ codex }, { strategy, usage: usageFetchers(data) })
+    const options = { ...OPTIONS, sessionId: SessionId('sticky-credits-yields') }
+    await collect(pool.stream(options))
+    data['codex/a2'] = windowUsage(96, 60_000)
+    usage.invalidate('codex', 'a2')
+    await collect(pool.stream(options))
+    assert.deepEqual(codex.accounts, ['a1', 'a2'])
+  })
+
+  test(`${strategy}: sticky credit-funded account holds when all included quota is exhausted`, async () => {
+    const funded = { ...windowUsage(100, 60_000), credits: { hasCredits: true, unlimited: false, balance: '12.5' } }
+    const data: Record<string, ProviderUsage> = {
+      'codex/a1': windowUsage(100, 60_000),
+      'codex/a2': funded,
+      'codex/a3': windowUsage(100, 60_000),
+    }
+    const family = new Map<string, PoolDefinition>([
+      [poolKey('codex', 'm'), {
+        members: [
+          { provider: 'codex', account: 'a1', model: 'm' },
+          { provider: 'codex', account: 'a2', model: 'm' },
+          { provider: 'codex', account: 'a3', model: 'm' },
+        ],
+      }],
+    ])
+    const codex = new FakeAdapter((_options, account) => serveOk(account))
+    const { pool, usage } = makePool({ codex }, { strategy, families: family, usage: usageFetchers(data) })
+    const options = { ...OPTIONS, sessionId: SessionId('sticky-credits-holds') }
+    await collect(pool.stream(options))
+    data['codex/a1'] = funded
+    usage.invalidate('codex', 'a1')
+    await collect(pool.stream(options))
+    await collect(pool.stream({ ...OPTIONS, sessionId: SessionId('fresh-credits') }))
+    assert.deepEqual(codex.accounts, ['a2', 'a2', 'a1'])
+  })
+
   test(`${strategy}: sticky account loses eligibility once exhausted and returns after reset`, async () => {
     let firstUsed = 10
     const codex = new FakeAdapter((_options, account) => serveOk(account))

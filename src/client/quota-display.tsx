@@ -23,12 +23,17 @@ export function formatCreditBalance(value: string): string {
   return negative ? `-${text}` : text
 }
 
-/** Display line for a disclosed Codex credit balance; undefined when absent. */
+/** Display line for a disclosed positive Codex credit balance; undefined when absent or non-positive. */
 export function creditBalanceText(credits: CreditBalance | undefined, t: Translate): string | undefined {
   if (credits === undefined) return undefined
   if (credits.overageLimitReached === true) return t('creditsOverage')
   if (credits.unlimited) return t('creditsUnlimited')
-  if (credits.balance !== undefined) return t('creditsBalance', { balance: formatCreditBalance(credits.balance) })
+  if (credits.balance !== undefined) {
+    const amount = Number(credits.balance)
+    return Number.isFinite(amount) && amount > 0
+      ? t('creditsBalance', { balance: formatCreditBalance(credits.balance) })
+      : undefined
+  }
   return credits.hasCredits ? t('creditsAvailableUnknown') : undefined
 }
 

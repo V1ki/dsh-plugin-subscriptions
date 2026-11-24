@@ -389,12 +389,13 @@ export class PoolAdapter extends LlmAdapter {
         ? ordered
         : [stickyMember, ...ordered.filter(member => member !== stickyMember)]
     }
-    const scored = eligible.filter(member => quotas.get(member)?.available === true)
-    const quotaFull = eligible.filter(member => quotas.get(member)?.available === false)
+    const scored = included.filter(member => quotas.get(member)?.available === true)
+    const nearFull = included.filter(member => quotas.get(member)?.available === false)
     const byUrgency = (a: ConcretePoolMember, b: ConcretePoolMember): number =>
       (quotas.get(b)?.urgency ?? 0) - (quotas.get(a)?.urgency ?? 0)
     scored.sort(byUrgency)
-    quotaFull.sort(byUrgency)
+    nearFull.sort(byUrgency)
+    const quotaFull = [...nearFull, ...creditFunded]
     if (stickyMember !== undefined && scored.includes(stickyMember)) {
       const best = scored[0]
       const stickyUrgency = quotas.get(stickyMember)?.urgency ?? 0
@@ -404,8 +405,8 @@ export class PoolAdapter extends LlmAdapter {
         scored.splice(scored.indexOf(stickyMember), 1)
         scored.unshift(stickyMember)
       }
-    } else if (scored.length === 0 && stickyMember !== undefined && quotaFull.includes(stickyMember)) {
-      // Included quota is gone; keep the credit-funded session on its account.
+    } else if (scored.length === 0 && stickyMember !== undefined && !stickySpendsCredits && quotaFull.includes(stickyMember)) {
+      // Sticky holds when it stays on included quota, or when all included quota is gone.
       quotaFull.splice(quotaFull.indexOf(stickyMember), 1)
       quotaFull.unshift(stickyMember)
     }

@@ -64,7 +64,7 @@ try {
   assert.equal(order, true, 'providers and accounts precede quota preferences; proxy is last')
   await tab(page, 'Zulu').click()
   const codex = await selected(page, 'Zulu')
-  const balance = codex.getByText('Credits: 0', { exact: true })
+  const balance = codex.getByText('Credits: 12.5', { exact: true })
   const disclosure = codex.locator('summary').filter({ hasText: '3 available resets' })
   await disclosure.waitFor()
   assert.match(await disclosure.innerText(), /Expand/)
