@@ -1,5 +1,4 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
-import type { CSSProperties } from 'react'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import type { AccountPreferences, PromptCacheTtlSetting, ProviderPreferences } from '../provider-settings.js'
 import type { SubscriptionProvider } from './SubscriptionsSection.js'
@@ -10,7 +9,7 @@ import type { AccountCatalogRow } from './account-preferences.js'
 import { ProviderModelEditor } from './ProviderModelEditor.js'
 import type { ProviderModelEditorHandle } from './ProviderModelEditor.js'
 import { notifyDisplayNameChange } from './display-name-events.js'
-import { providerSettingsCss } from './provider-settings-styles.js'
+import { dialogLayout, providerSettingsCss } from './provider-settings-styles.js'
 import { SubscriptionTabs } from './SubscriptionTabs.js'
 import { SettingHelp } from './SettingHelp.js'
 import { CODEX_DEFAULT_MAX_TOKENS } from '../codex-budget-defaults.js'
@@ -31,9 +30,7 @@ interface Props {
   t: (key: SubscriptionsKey, params?: Record<string, unknown>) => string
   onClose: () => void
 }
-const border = '0.5px solid var(--dsw-alias-border-l2)'
-const stack: CSSProperties = { display: 'grid', gap: 12, minWidth: 0 }
-const actions: CSSProperties = { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }
+const { border, stack, actions } = dialogLayout
 
 /** Native top-layer dialog provides keyboard containment, Escape and focus restoration. */
 export function ProviderAccountManager({ provider, name, accountsVersion, rpc, t, onClose }: Props) {
@@ -161,13 +158,14 @@ export function ProviderAccountManager({ provider, name, accountsVersion, rpc, t
       const latest = await callSubscriptionsAuth<Catalog>(rpc, 'providerSettings', { provider })
       if (!alive.current) return
       const base = models.settings === undefined ? latest.settings : mergeLatestAccounts(models.settings, latest.settings)
-      const { displayName: _staleName, promptCacheTtl: _staleTtl, contextWindow: _staleContext, defaultMaxTokens: _staleReserve, ...rest } = mergeAccountChanges(base, changes)
+      const { displayName: _staleName, promptCacheTtl: _staleTtl, contextWindow: _staleContext, defaultMaxTokens: _staleReserve, enabled: _staleEnabled, ...rest } = mergeAccountChanges(base, changes)
       const savedName = nameDirty ? displayName.trim() : latest.settings.displayName
       const savedTtl = cacheTtlDirty ? cacheTtl : latest.settings.promptCacheTtl
       const savedContext = contextDirty ? parseBudget(contextWindow) : latest.settings.contextWindow
       const savedReserve = reserveDirty ? parseBudget(outputReserve) : latest.settings.defaultMaxTokens
       const settings = {
         ...rest,
+        ...(latest.settings.enabled === true ? { enabled: true } : {}),
         ...(savedName ? { displayName: savedName } : {}),
         ...(savedTtl ? { promptCacheTtl: savedTtl } : {}),
         ...(savedContext === undefined ? {} : { contextWindow: savedContext }),
@@ -236,8 +234,8 @@ export function ProviderAccountManager({ provider, name, accountsVersion, rpc, t
           })} />}
         {catalog.accounts.map(account => {
           const preferences = changes[account.key] ?? catalog.settings.accounts?.[account.key] ?? {}
-          const selected = accountPoolSelection(preferences, account.models)
-          const models = accountModelRows(account, preferences).sort((a, b) =>
+          const selected = accountPoolSelection(preferences, account.models, provider)
+          const models = accountModelRows(account, preferences, provider).sort((a, b) =>
             b.name.localeCompare(a.name, undefined, { sensitivity: 'base', numeric: true }) || b.id.localeCompare(a.id))
           return <div key={account.key} role="tabpanel" id={`${tabIdPrefix}-panel-${accountId(account.key)}`}
             aria-labelledby={`${tabIdPrefix}-tab-${accountId(account.key)}`} hidden={activeAccount !== account.key} tabIndex={0}>
@@ -261,7 +259,7 @@ export function ProviderAccountManager({ provider, name, accountsVersion, rpc, t
             <p className="dsh-subscription-hint">{t('accountsIndependentHint')}</p>
             <details>
               <summary style={{ cursor: 'pointer', fontSize: 13 }}>{t('accountsModels')} · {preferences.poolModels === undefined
-                ? t('accountsModelsAll') : t('accountsModelsCount', { count: preferences.poolModels.length })}</summary>
+                ? t('accountsModelsAll') : t('accountsModelsCount', { count: selected.size })}</summary>
               <div style={{ ...stack, marginTop: 12 }}>
                 <p className="dsh-subscription-hint">{t('accountsModelsHint')}</p>
                 <label><input type="checkbox" checked={preferences.poolModels === undefined} onChange={event => {

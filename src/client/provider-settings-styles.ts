@@ -1,9 +1,17 @@
+import type { CSSProperties } from 'react'
+
 /**
  * The host loads one JS client bundle, so keep this small, scoped stylesheet
  * with the dialog instead of relying on a separate CSS asset. Geometry and
  * theme tokens follow the host's settings-form and ui-primitives controls.
  */
 const formScope = ':is(.dsh-subscription-manager, .dsh-subscriptions-settings)'
+
+export const dialogLayout = {
+  border: '0.5px solid var(--dsw-alias-border-l2)',
+  stack: { display: 'grid', gap: 12, minWidth: 0 },
+  actions: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' },
+} satisfies { border: string, stack: CSSProperties, actions: CSSProperties }
 
 export const providerSettingsCss = `
 .dsh-subscription-manager {
@@ -203,6 +211,31 @@ ${formScope} select {
   font-size: 13px;
   font-weight: 400;
   line-height: 1.5;
+}
+.dsh-subscription-select-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+}
+${formScope} select.dsh-subscription-select {
+  appearance: none;
+  -webkit-appearance: none;
+  height: 36px;
+  padding: 0 34px 0 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-base));
+  cursor: pointer;
+}
+.dsh-subscription-select-chevron {
+  position: absolute;
+  right: 11px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+  color: var(--dsw-alias-label-tertiary);
 }
 ${formScope} input::placeholder {
   color: var(--dsw-alias-label-tertiary);

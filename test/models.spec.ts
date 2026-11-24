@@ -482,6 +482,81 @@ test('grok discovery maps the data array', async () => {
   assert.deepEqual(models.map(model => model.id), ['grok-4-1', 'grok-code-2'])
 })
 
+test('grok discovery exposes catalog context tiers and clamps the requested window', async () => {
+  // Both the api.x.ai list and the CLI catalog read the same injected payload:
+  // the ids come from the former, the window metadata from the latter.
+  const payload = {
+    data: [
+      { id: 'grok-4.7', name: 'Grok 4.7', context_window: 256_000, context_windows: [500_000, 256_000, 500_000, 0, -1, 1.5] },
+      { id: 'grok-4.6', name: 'Grok 4.6', context_window: 256_000, context_windows: [500_000] },
+      { id: 'grok-4.3', name: 'Grok 4.3', context_window: 256_000 },
+    ],
+  }
+  let requested: number | undefined = 872_000
+  const adapter = new GrokAdapter({
+    models: STATIC_GROK,
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens(grokSession),
+    discovery: true,
+    fetchFn: fakeFetch(payload).fetchFn,
+    contextWindowOf: () => requested,
+  })
+  const models = await adapter.listModels('grok')
+  assert.deepEqual(models.map(model => model.id), ['grok-4.7', 'grok-4.6', 'grok-4.3'])
+  // The catalog's tiers are the only source of the ceiling (issue #149).
+  assert.deepEqual(await adapter.contextLimits('grok-4.7'), {
+    default: 256_000, max: 500_000, options: [256_000, 500_000],
+  })
+  // A single extra tier combines with the scalar default so the choice is preserved.
+  assert.deepEqual(await adapter.contextLimits('grok-4.6'), {
+    default: 256_000, max: 500_000, options: [256_000, 500_000],
+  })
+  assert.deepEqual(await adapter.contextLimits('grok-4.3'), { default: 256_000, max: 256_000 })
+  // A request above the largest tier is capped; following the provider stays
+  // on the advertised default; a smaller request is honoured as-is.
+  assert.equal((await adapter.resolveModel('grok', 'grok-4.7')).context?.contextWindow, 500_000)
+  // Models without a tier list can shrink but never grow past the default.
+  assert.equal((await adapter.resolveModel('grok', 'grok-4.3')).context?.contextWindow, 256_000)
+  requested = undefined
+  assert.equal((await adapter.resolveModel('grok', 'grok-4.7')).context?.contextWindow, 256_000)
+  requested = 500_000
+  assert.equal((await adapter.resolveModel('grok', 'grok-4.7')).context?.contextWindow, 500_000)
+  requested = 128_000
+  assert.equal((await adapter.resolveModel('grok', 'grok-4.7')).context?.contextWindow, 128_000)
+})
+
+test('grok contextLimits and resolveOwnModel scope lookups to the named account', async () => {
+  const accounts = new Map<string, GrokSession>([
+    ['alice', { ...grokSession, accessToken: 'tok-alice', account: 'alice@example.com' }],
+    ['bob', { ...grokSession, accessToken: 'tok-bob', account: 'bob@example.com' }],
+  ])
+  const tokens = {
+    async list() { return [...accounts.entries()].map(([key, session]) => ({ key, session })) },
+    async defaultAccount() { return 'alice' },
+    async hasSession(account?: string) { return accounts.has(account ?? 'alice') },
+    async session(account?: string) { return accounts.get(account ?? 'alice')! },
+  } as unknown as AccountTokenManager<GrokSession>
+  const fetchFn: FetchFn = async (_url, init) => {
+    const auth = (init?.headers as Record<string, string> | undefined)?.authorization
+    const data = auth === 'Bearer tok-alice'
+      ? [{ id: 'grok-4.7', name: 'Grok 4.7', context_window: 256_000 }]
+      : [{ id: 'grok-4.7', name: 'Grok 4.7', context_window: 256_000, context_windows: [256_000, 500_000] }]
+    return new Response(JSON.stringify({ data }), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+  const adapter = new GrokAdapter({
+    models: STATIC_GROK,
+    streamIdleTimeoutMs: 1000,
+    tokens,
+    discovery: true,
+    fetchFn,
+    contextWindowOf: () => 500_000,
+  })
+  assert.deepEqual(await adapter.contextLimits('grok-4.7', 'alice'), { default: 256_000, max: 256_000 })
+  assert.deepEqual(await adapter.contextLimits('grok-4.7', 'bob'), { default: 256_000, max: 500_000, options: [256_000, 500_000] })
+  assert.equal((await adapter.resolveOwnModel('grok', 'grok-4.7', 'alice')).context?.contextWindow, 256_000)
+  assert.equal((await adapter.resolveOwnModel('grok', 'grok-4.7', 'bob')).context?.contextWindow, 500_000)
+})
+
 test('claude logged in returns the static catalog', async () => {
   const claude = new ClaudeAdapter({
     models: STATIC_CLAUDE,

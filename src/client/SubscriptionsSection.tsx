@@ -45,6 +45,7 @@ const MODEL_FILTER_THRESHOLD = 8
 
 /** Subscription provider ids, fixed by the node half's OAuth adapters. */
 export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity' | 'kimi' | 'glm' | 'qwen'
+export type UsageProvider = Exclude<SubscriptionProvider, 'copilot'>
 
 /** One logged-in account as answered by the `status` endpoint. */
 export interface AccountStatus {
@@ -60,6 +61,8 @@ export interface ProviderStatus {
   /** Picker selection; absent follows discovery, [] hides all model quotas. */
   visibleModels?: string[]
   displayName?: string
+  /** False when the provider is disabled by default and requires manual opt-in. */
+  enabled?: boolean
   busy: boolean
   accounts: AccountStatus[]
   detail?: string
@@ -176,7 +179,12 @@ export interface SubscriptionsSectionInjected {
  * Props delivered by the slot outlet: the inject face spread flat (the
  * renderer erases the share boundary at the render call).
  */
-export type SubscriptionsSectionProps = Partial<SubscriptionsSectionInjected>
+export type SubscriptionsSectionProps = Partial<SubscriptionsSectionInjected> & {
+  /** Omit the pointer to the sidebar Usage page when already hosted inside it. */
+  hideUsageHint?: boolean
+  /** Expand section max-width comfortably when rendered inside the full-width sidebar page. */
+  embedded?: boolean
+}
 
 /** Card display metadata, in page order (names are brand names, not translated). */
 const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [
@@ -199,11 +207,20 @@ const MANUAL_CALLBACK_PROVIDERS: ReadonlySet<SubscriptionProvider> = new Set([
   'codex', 'claude', 'grok', 'antigravity',
 ])
 
-/** Sort the visible provider names within connected and disconnected groups. */
+/** Whether a provider is currently disabled via the opt-in gate (Antigravity defaults to false). */
+export function isProviderDisabled(status: ProviderStatus | undefined): boolean {
+  return status?.enabled === false
+}
+
+/** Sort the visible provider names within connected, disconnected, and disabled groups. */
 export function sortedSubscriptionProviders(statuses: Partial<Record<SubscriptionProvider, ProviderStatus>>) {
+  const rank = (status: ProviderStatus | undefined): number => {
+    if (isProviderDisabled(status)) return 2
+    return hasAccount(status) ? 0 : 1
+  }
   return [...PROVIDERS].sort((a, b) => {
-    const connectionOrder = Number(hasAccount(statuses[b.id])) - Number(hasAccount(statuses[a.id]))
-    return connectionOrder || (statuses[a.id]?.displayName || a.name).localeCompare(statuses[b.id]?.displayName || b.name)
+    const order = rank(statuses[a.id]) - rank(statuses[b.id])
+    return order || (statuses[a.id]?.displayName || a.name).localeCompare(statuses[b.id]?.displayName || b.name)
       || a.id.localeCompare(b.id)
   })
 }
@@ -325,10 +342,25 @@ const styles: Record<string, CSSProperties> = {
   },
   modalHeader: { display: 'flex', alignItems: 'center', gap: 8 },
   modalTitle: { fontWeight: 500, fontSize: 16, lineHeight: '24px', color: 'var(--dsw-alias-label-primary)' },
+  warnBanner: {
+    display: 'flex', flexDirection: 'column', gap: 4, marginTop: 4,
+    padding: '10px 12px', borderRadius: 'var(--dsw-radius-lg, 12px)',
+    border: '0.5px solid var(--dsw-alias-state-warn-label, #d97706)',
+    background: 'color-mix(in srgb, var(--dsw-alias-state-warn-label, #d97706) 8%, transparent)',
+  },
+  warnBannerTitle: {
+    fontSize: 12, lineHeight: '18px', fontWeight: 600,
+    color: 'var(--dsw-alias-state-warn-label, #b45309)',
+  },
+  warnBannerBody: {
+    margin: 0, fontSize: 12, lineHeight: '18px',
+    color: 'var(--dsw-alias-label-secondary)',
+  },
 }
 
 /** Status dot color for one provider state. */
 function dotColor(status: ProviderStatus | undefined): string {
+  if (isProviderDisabled(status)) return 'var(--dsw-alias-label-dimmed)'
   if (status?.busy === true) return 'var(--dsw-alias-state-warn-label)'
   if ((status?.accounts.length ?? 0) > 0) return 'var(--dsw-alias-state-success-primary)'
   return 'var(--dsw-alias-label-dimmed)'
@@ -342,7 +374,17 @@ function dotColor(status: ProviderStatus | undefined): string {
  * @returns true when the provider serves at least one account.
  */
 function hasAccount(status: ProviderStatus | undefined): boolean {
-  return (status?.accounts.length ?? 0) > 0
+  return !isProviderDisabled(status) && (status?.accounts.length ?? 0) > 0
+}
+
+/** Persistent risk & availability banner shown inside the Google Antigravity panel. */
+export function AntigravityRiskNotice({ t }: { t: SubscriptionsSectionInjected['t'] }) {
+  return (
+    <div role="note" className="dsh-subscription-antigravity-notice" style={styles.warnBanner}>
+      <strong style={styles.warnBannerTitle}>{t('antigravityNoticeTitle')}</strong>
+      <p style={styles.warnBannerBody}>{t('antigravityNoticeBody')}</p>
+    </div>
+  )
 }
 
 /** The CLI version a route presents, beside the provider name; nothing for routes without one. */
@@ -366,6 +408,7 @@ export function ClientVersionTag({ clientVersion, t }: {
  */
 function statusText(t: SubscriptionsSectionInjected['t'], status: ProviderStatus | undefined): string {
   if (status === undefined) return t('checking')
+  if (isProviderDisabled(status)) return t('antigravityDisabledStatus')
   if (status.busy) return t('loginInProgress')
   if (status.accounts.length > 0) return t('loggedInCount', { count: status.accounts.length })
   return t('notLoggedIn')
@@ -512,7 +555,7 @@ export function modelDefaultsSignature(
 export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const quotaMode = useQuotaDisplayMode()
   const quotaNow = useQuotaClock()
-  const { rpc } = props
+  const { rpc, hideUsageHint = false, embedded = false } = props
   const t = props.t ?? fallbackTranslate
   const [statuses, setStatuses] = useState<Partial<Record<SubscriptionProvider, ProviderStatus>>>({})
   // Undefined until a status snapshot arrives or the user chooses a tab.
@@ -552,6 +595,14 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     if (resetConfirmation) resetDialogRef.current?.showModal()
     else resetDialogRef.current?.close()
   }, [resetConfirmation])
+  const [antigravityConfirmOpen, setAntigravityConfirmOpen] = useState(false)
+  const [antigravityAcknowledged, setAntigravityAcknowledged] = useState(false)
+  const [antigravityToggleBusy, setAntigravityToggleBusy] = useState(false)
+  const antigravityDialogRef = useRef<HTMLDialogElement>(null)
+  useEffect(() => {
+    if (antigravityConfirmOpen) antigravityDialogRef.current?.showModal()
+    else antigravityDialogRef.current?.close()
+  }, [antigravityConfirmOpen])
   const resetInflight = useRef(false)
   const mountedRef = useRef(true)
   const pollersRef = useRef(new Map<SubscriptionProvider, ReturnType<typeof setInterval>>())
@@ -736,6 +787,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   useEffect(() => {
     const live = new Set<string>()
     for (const { id } of PROVIDERS) {
+      if (isProviderDisabled(statuses[id])) continue
       for (const account of statuses[id]?.accounts ?? []) {
         const key = `${id}:${account.key}`
         live.add(key)
@@ -749,6 +801,21 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     setUsages(prev => dropStale(prev, live))
     setUsageErrors(prev => dropStale(prev, live))
   }, [statuses, usages, usageErrors, loadUsage])
+
+  const toggleProviderEnabled = useCallback(async (provider: SubscriptionProvider, enabled: boolean): Promise<void> => {
+    if (rpc === undefined || antigravityToggleBusy) return
+    setAntigravityToggleBusy(true)
+    setProviderError(provider, undefined)
+    try {
+      await callSubscriptionsAuth<{ ok: true }>(rpc, 'setProviderEnabled', { provider, enabled })
+      if (mountedRef.current) setAntigravityConfirmOpen(false)
+      await refresh()
+    } catch (error) {
+      setProviderError(provider, messageOf(error))
+    } finally {
+      if (mountedRef.current) setAntigravityToggleBusy(false)
+    }
+  }, [rpc, antigravityToggleBusy, setProviderError, refresh])
 
   const login = useCallback(async (provider: SubscriptionProvider, method?: 'oauth' | 'keychain'): Promise<void> => {
     if (rpc === undefined) return
@@ -943,29 +1010,16 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     return <p style={styles.intro}>{t('unavailable')}</p>
   }
 
-  return (
-    <div className="dsh-subscriptions-settings" style={styles.section}>
-      <style>{providerSettingsCss}</style>
-      <p style={styles.intro}>{t('intro')}</p>
-      <div className="dsh-subscription-provider-area">
-      <SubscriptionTabs prefix={tabIdPrefix} label={t('providerTabs')} active={activeProvider}
-        scrollLeftLabel={t('scrollProvidersLeft')} scrollRightLabel={t('scrollProvidersRight')}
-        onSelect={setSelectedProvider} tabRefs={tabRefs} tabs={sortedProviders.map(({ id, name }) => {
-          const status = statuses[id]
-          const displayName = status?.displayName || name
-          return { key: id, id, label: displayName, provider: id,
-            ariaLabel: displayName + ' — ' + statusText(t, status),
-            content: <><span aria-hidden="true" style={{ ...styles.dot, background: dotColor(status) }} />{displayName}</> }
-        })} />
-      {sortedProviders.map(({ id, name }) => {
+  const providerPanels = sortedProviders.map(({ id, name }) => {
         const status = statuses[id]
-        const busy = status?.busy === true
+        const providerDisabled = isProviderDisabled(status)
+        const busy = !providerDisabled && status?.busy === true
         const deviceCode = deviceCodes[id]
         const accounts = status?.accounts ?? []
         return (
           <div key={id} role="tabpanel" data-subscription-provider={id} id={`${tabIdPrefix}-panel-${id}`}
             aria-labelledby={`${tabIdPrefix}-tab-${id}`} hidden={activeProvider !== id} tabIndex={0}>
-          <div style={styles.card}>
+          <div className="dsh-subscription-settings-card" style={styles.card}>
             <div className="dsh-subscription-provider-header">
               <div className="dsh-subscription-provider-identity">
                 <div style={{ ...styles.cardHeader, flexWrap: 'wrap' }}>
@@ -977,43 +1031,65 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 <p style={styles.statusLine}>{statusText(t, status)}</p>
               </div>
               <div className="dsh-subscription-provider-actions">
-                {!busy && id !== 'qwen' && accounts.length === 0 && (
-                  <button type="button" onClick={() => { void login(id) }}>
-                    {t('login')}
+                {providerDisabled ? (
+                  <button
+                    type="button"
+                    disabled={antigravityToggleBusy}
+                    aria-haspopup="dialog"
+                    onClick={() => {
+                      setAntigravityAcknowledged(false)
+                      setAntigravityConfirmOpen(true)
+                    }}
+                  >
+                    {t('antigravityEnable')}
                   </button>
-                )}
-                {!busy && accounts.length > 0 && id === 'claude' && (
-                  <>
+                ) : <>
+                  {!busy && id !== 'qwen' && accounts.length === 0 && (
+                    <button type="button" onClick={() => { void login(id) }}>
+                      {t('login')}
+                    </button>
+                  )}
+                  {!busy && accounts.length > 0 && id === 'claude' && (
+                    <>
+                      <div className="dsh-subscription-add-account">
+                        <SettingHelp title={t('addAccountOAuth')} hint={t('addAccountHint')} t={t} />
+                        <button type="button" onClick={() => { void login(id, 'oauth') }}>
+                          <ProviderActionIcon icon="add" />{t('addAccountOAuth')}
+                        </button>
+                      </div>
+                      <button type="button" onClick={() => { void login(id, 'keychain') }}>
+                        {t('addAccountKeychain')}
+                      </button>
+                    </>
+                  )}
+                  {!busy && accounts.length > 0 && id !== 'claude' && id !== 'qwen' && (
                     <div className="dsh-subscription-add-account">
-                      <SettingHelp title={t('addAccountOAuth')} hint={t('addAccountHint')} t={t} />
-                      <button type="button" onClick={() => { void login(id, 'oauth') }}>
-                        <ProviderActionIcon icon="add" />{t('addAccountOAuth')}
+                      <SettingHelp title={t('addAccount')} hint={t('addAccountHint')} t={t} />
+                      <button type="button" onClick={() => { void login(id) }}>
+                        <ProviderActionIcon icon="add" />{t('addAccount')}
                       </button>
                     </div>
-                    <button type="button" onClick={() => { void login(id, 'keychain') }}>
-                      {t('addAccountKeychain')}
+                  )}
+                  {/* 与同排其它按钮一致：登录/取消进行中不开第二个写配置的弹窗。 */}
+                  {!busy && <button type="button" aria-haspopup="dialog"
+                    onClick={() => setManagedProvider({ id, name })}>
+                    <ProviderActionIcon icon="manage" />{t('accountsManage')}
+                  </button>}
+                  {!busy && id === 'antigravity' && (
+                    <button
+                      type="button"
+                      disabled={antigravityToggleBusy}
+                      onClick={() => { void toggleProviderEnabled('antigravity', false) }}
+                    >
+                      {t('antigravityDisable')}
                     </button>
-                  </>
-                )}
-                {!busy && accounts.length > 0 && id !== 'claude' && id !== 'qwen' && (
-                  <div className="dsh-subscription-add-account">
-                    <SettingHelp title={t('addAccount')} hint={t('addAccountHint')} t={t} />
-                    <button type="button" onClick={() => { void login(id) }}>
-                      <ProviderActionIcon icon="add" />{t('addAccount')}
+                  )}
+                  {busy && (
+                    <button type="button" onClick={() => { void cancel(id) }}>
+                      {t('cancel')}
                     </button>
-                  </div>
-                )}
-                {/* 与同排其它按钮一致：登录/取消进行中不开第二个写配置的弹窗。 */}
-                {!busy && <button type="button" aria-haspopup="dialog"
-                  onClick={() => setManagedProvider({ id, name })}>
-                  <ProviderActionIcon icon="manage" />{t('accountsManage')}
-                </button>}
-
-                {busy && (
-                  <button type="button" onClick={() => { void cancel(id) }}>
-                    {t('cancel')}
-                  </button>
-                )}
+                  )}
+                </>}
               </div>
             </div>
             {!busy && id === 'qwen' && (
@@ -1041,11 +1117,32 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 </p>
               </>
             )}
-            {status?.detail !== undefined && status.detail !== '' && (
+            {id === 'antigravity' && <AntigravityRiskNotice t={t} />}
+            {!providerDisabled && status?.detail !== undefined && status.detail !== '' && (
               <p style={styles.statusLine}>{status.detail}</p>
             )}
             {errors[id] !== undefined && <p style={styles.errorLine}>{errors[id]}</p>}
-            {accounts.map((account) => {
+            {providerDisabled && accounts.length > 0 && <>
+              <p style={styles.statusLine}>{t('antigravitySavedAccounts', { count: accounts.length })}</p>
+              {accounts.map((account) => {
+                const display = account.account ?? account.key
+                return (
+                  <div key={account.key} style={styles.accountRow}>
+                    <div style={styles.accountHeader}>
+                      <span style={styles.accountName}>{display}</span>
+                      <button
+                        type="button"
+                        style={{ marginLeft: 'auto', flexShrink: 0 }}
+                        onClick={() => { void logout(id, account.key, display, name) }}
+                      >
+                        {t('logout')}
+                      </button>
+                    </div>
+                  </div>
+                )
+              })}
+            </>}
+            {!providerDisabled && accounts.map((account) => {
               const usageKey = `${id}:${account.key}`
               const usage = usages[usageKey]
               const shownWindows = visibleUsageWindows(id, usage?.windows, status?.visibleModels)
@@ -1218,29 +1315,79 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
           </div>
           </div>
         )
-      })}
+      })
+
+  const proxyCardNode = (
+    <div
+      className={embedded ? 'dsh-subscription-settings-card' : undefined}
+      style={embedded ? { ...styles.card, padding: '14px 16px', gap: 8 } : styles.proxyCard}
+    >
+      <div style={styles.cardHeader}>
+        <span style={{
+          ...styles.dot,
+          background: proxy?.enabled === true
+            ? 'var(--dsw-alias-state-success-primary)'
+            : 'var(--dsw-alias-label-dimmed)',
+        }} />
+        <span style={styles.name}>{t('proxyTitle')}</span>
+        <button
+          type="button"
+          style={{ marginLeft: 'auto', flexShrink: 0 }}
+          onClick={openProxyDialog}
+        >
+          {t('proxyConfigure')}
+        </button>
       </div>
-      <div style={styles.separator} />
-      <UsageBadgeDisplaySetting t={t} />
-      <div style={styles.proxyCard}>
-        <div style={styles.cardHeader}>
-          <span style={{
-            ...styles.dot,
-            background: proxy?.enabled === true
-              ? 'var(--dsw-alias-state-success-primary)'
-              : 'var(--dsw-alias-label-dimmed)',
-          }} />
-          <span style={styles.name}>{t('proxyTitle')}</span>
-          <button
-            type="button"
-            style={{ marginLeft: 'auto', flexShrink: 0 }}
-            onClick={openProxyDialog}
-          >
-            {t('proxyConfigure')}
-          </button>
-        </div>
-        <p style={styles.statusLine}>{proxyStatusText(t, proxy, proxyLoadError)}</p>
-      </div>
+      <p style={styles.statusLine}>{proxyStatusText(t, proxy, proxyLoadError)}</p>
+    </div>
+  )
+
+  const providerTabsNode = (
+    <SubscriptionTabs prefix={tabIdPrefix} label={t('providerTabs')} active={activeProvider}
+      scrollLeftLabel={t('scrollProvidersLeft')} scrollRightLabel={t('scrollProvidersRight')}
+      onSelect={setSelectedProvider} tabRefs={tabRefs} tabs={sortedProviders.map(({ id, name }) => {
+        const status = statuses[id]
+        const displayName = status?.displayName || name
+        return { key: id, id, label: displayName, provider: id,
+          ariaLabel: displayName + ' — ' + statusText(t, status),
+          content: <><span aria-hidden="true" style={{ ...styles.dot, background: dotColor(status) }} />{displayName}</> }
+      })} />
+  )
+
+  return (
+    <div
+      className={embedded ? 'dsh-subscriptions-settings dsh-subscriptions-settings-embedded' : 'dsh-subscriptions-settings'}
+      style={embedded ? { ...styles.section, maxWidth: 'none', width: '100%' } : styles.section}
+    >
+      <style>{providerSettingsCss}</style>
+      <p style={styles.intro}>{t('intro')}</p>
+      {!hideUsageHint && <p style={styles.statusLine}>{t('usageSettingsHint')}</p>}
+      {embedded ? (
+        <>
+          <div className="dsh-subscription-provider-area">
+            {providerTabsNode}
+          </div>
+          <div className="dsh-subscriptions-embedded-grid">
+            <div className="dsh-subscriptions-embedded-main">
+              {providerPanels}
+            </div>
+            <aside className="dsh-subscriptions-embedded-aside">
+              <UsageBadgeDisplaySetting t={t} />
+              {proxyCardNode}
+            </aside>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="dsh-subscription-provider-area">
+            {providerTabsNode}
+            {providerPanels}
+          </div>
+          <div style={styles.separator} />
+          <UsageBadgeDisplaySetting t={t} />
+          {proxyCardNode}
+        </>
+      )}
       {managedProvider && <ProviderAccountManager provider={managedProvider.id} name={managedProvider.name}
         rpc={rpc} t={t} accountsVersion={JSON.stringify((statuses[managedProvider.id]?.accounts ?? []).map(account => account.key).sort())}
         onClose={() => { setManagedProvider(undefined); void refresh() }} />}
@@ -1269,6 +1416,26 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
               style={{ opacity: resetAcknowledged ? 1 : 0.35, cursor: resetAcknowledged ? 'pointer' : 'not-allowed' }}
               disabled={!resetAcknowledged || resetBusy}
               onClick={() => { void consumeReset() }}>{t('resetUseConfirm')}</button>
+          </div>
+        </>}
+      </dialog>
+      <dialog ref={antigravityDialogRef} className="subscriptions-reset-dialog"
+        aria-labelledby="subscriptions-antigravity-enable-title" onCancel={() => setAntigravityConfirmOpen(false)}
+        onClose={() => setAntigravityConfirmOpen(false)}
+        style={{ ...styles.modal, display: antigravityConfirmOpen ? 'flex' : 'none', margin: 'auto', color: 'var(--dsw-alias-label-primary)' }}>
+        {antigravityConfirmOpen && <>
+          <h3 id="subscriptions-antigravity-enable-title" style={{ ...styles.modalTitle, margin: 0 }}>{t('antigravityEnableConfirmTitle')}</h3>
+          <p style={{ ...styles.statusLine, margin: '4px 0', color: 'var(--dsw-alias-label-secondary)' }}>{t('antigravityEnableConfirmBody')}</p>
+          <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 12 }}>
+            <input type="checkbox" checked={antigravityAcknowledged} onChange={e => setAntigravityAcknowledged(e.target.checked)} />
+            {t('antigravityEnableAcknowledge')}
+          </label>
+          <div className="dsh-subscription-dialog-actions" style={{ ...styles.actions, justifyContent: 'flex-end', marginTop: 8 }}>
+            <button type="button" autoFocus onClick={() => setAntigravityConfirmOpen(false)}>{t('cancel')}</button>
+            <button type="button" className="dsh-subscription-primary"
+              style={{ opacity: antigravityAcknowledged ? 1 : 0.35, cursor: antigravityAcknowledged ? 'pointer' : 'not-allowed' }}
+              disabled={!antigravityAcknowledged || antigravityToggleBusy}
+              onClick={() => { void toggleProviderEnabled('antigravity', true) }}>{t('antigravityEnableConfirm')}</button>
           </div>
         </>}
       </dialog>

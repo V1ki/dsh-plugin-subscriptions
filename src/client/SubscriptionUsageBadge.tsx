@@ -137,7 +137,18 @@ export function pillAccountOf(d: ProviderUsageDisplay): AccountUsageDisplay {
   return d.accounts.find(a => a.isDefault) ?? d.accounts[0]!
 }
 
-/** Brand display names (short form for the compact badge). */
+/** Connected accounts eligible for composer badge polling (skips disabled providers). */
+export function enabledBadgeRoster(
+  providers: Partial<Record<SubscriptionProvider, ProviderStatus>>,
+): { provider: SubscriptionProvider; account: AccountStatus }[] {
+  const roster: { provider: SubscriptionProvider; account: AccountStatus }[] = []
+  for (const provider of Object.keys(providers) as SubscriptionProvider[]) {
+    const status = providers[provider]
+    if (status?.enabled === false) continue
+    for (const account of accountsOf(status)) roster.push({ provider, account })
+  }
+  return roster
+}
 const PROVIDER_NAMES: Record<SubscriptionProvider, string> = {
   codex: 'Codex',
   claude: 'Claude',
@@ -366,13 +377,10 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
       statusRef.current = statusResp
       if (!mountedRef.current) return
 
-      // Every logged-in account of every provider, in a stable order (the
+      // Every logged-in account of every enabled provider, in a stable order (the
       // `status` provider order, default account first) so rows don't jump
       // around as polls settle at different times.
-      const roster: { provider: SubscriptionProvider; account: AccountStatus }[] = []
-      for (const provider of Object.keys(statusResp.providers) as SubscriptionProvider[]) {
-        for (const account of accountsOf(statusResp.providers[provider])) roster.push({ provider, account })
-      }
+      const roster = enabledBadgeRoster(statusResp.providers)
       const keyOf = (provider: SubscriptionProvider, account: AccountStatus): string => `${provider}:${account.key}`
 
       const lastKnown = lastKnownRef.current

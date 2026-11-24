@@ -70,6 +70,19 @@ The `video_generate` tool plays the generated clip inline:
 
 ![video_generate plays the clip inline](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/video-generate-inline.png)
 
+## Usage Dashboard & token history
+
+Open **Subscriptions** from the DSH sidebar to view the unified page with **Usage** (default) and **Settings** tabs (older hosts without sidebar panels keep **Settings → Subscriptions** unchanged). The Usage Dashboard aggregates tracked input, output, cache-read, and cache-write tokens across **Codex**, **Claude**, **Grok**, and **Antigravity** — filterable by provider, account (including signed-out historical accounts), and time range (`7D`, `30D`, `90D`, `All`). Reasoning tokens, when reported, are part of output and never double-counted; overlapping 5-hour and weekly quota windows are deduplicated in daily and KPI totals. Copilot is not tracked.
+
+- **Overview & trends**: KPI summary cards, a **26-week UTC calendar heatmap** (click any day cell to inspect its per-model and per-provider breakdown), a daily stacked token trend chart, and a ranked **By Model / By Provider** distribution view.
+- **Quota cycles**: a dual-axis combo chart comparing each 5-hour or weekly cycle's token consumption (bars) against its observed quota utilization percentage (line, with peak markers and gap breaks when quota `%` was not observed), plus quick pills for active cycles and an inline cycle inspector.
+
+![Sidebar Subscriptions Usage Dashboard with KPIs, 26-week heatmap, daily trend, and model distribution](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/usage-dashboard.png)
+
+![Quota Cycles dual-axis combo chart comparing cycle tokens and quota utilization percentage](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/usage-quota-cycles.png)
+
+The plugin saves aggregate counts, cycle quota percentages, and window metadata locally under `~/.dsh/plugins/subscriptions/usage/` (mode `0600`); it does not store prompts, credentials, or per-request logs there. **Clear history** removes this plugin's local usage history for a selected provider or all providers without affecting DSH sessions, accounts, or live quota. Opening the dashboard makes no extra quota requests and does not estimate cost.
+
 ## Providers
 
 | Route    | Subscription      | Models |
@@ -185,6 +198,8 @@ Either way, restart `dsh web` afterwards so the new version loads.
 2. Settings → **Subscriptions**: click **Connect** on a provider. For Claude, credentials are imported instantly if you have run `claude` and logged in at least once; without them, Claude authorizes in the browser like the others. For Codex, Grok, and Antigravity, authorize in the opened browser tab; Copilot shows a GitHub device code to enter at `github.com/login/device`; if a browser flow can't complete (headless host), expand the manual fallback and paste the callback URL or code.
 3. In any session, open the model picker (`/model`) and choose a model under **ChatGPT (Codex)** / **Claude (Subscription)** / **Grok (Subscription)** / **GitHub Copilot** / **Google Antigravity**.
 
+> **Note on Google Antigravity:** Google Antigravity is disabled by default due to high account-suspension (ToS) risk and upstream HTTP 429 rejections on native DSH chat requests. Even if enabled manually in **Settings → Subscriptions**, models currently cannot be used — it is effectively limited to checking account usage while waiting for an official approach.
+
 Not logged in? The provider stays out of the picker, and requests fail with `MISSING_CREDENTIAL` pointing at the Settings page; nothing else breaks.
 
 ### Multiple accounts
@@ -196,6 +211,8 @@ Every provider accepts several accounts: once one is connected, the card grows a
 Open **Settings → Subscriptions → provider → Edit model list**, search and select models, then **Save changes**. All discovered models are shown automatically by default. Selecting individual models, selecting all, or clearing the selection saves an explicit list; newly discovered models then stay hidden until selected. Enable automatic display again to restore discovery-driven visibility. Hidden models remain usable by existing sessions, and the editor retains the full catalog so they can be restored. Refreshing discovery preserves preferences. The dialog has one **Save changes** / **Cancel** pair: Save submits the model list together with the account settings above it, and Cancel discards both and closes the dialog.
 
 Codex models also accept a context budget in tokens; leave it blank to follow the provider. The plugin reads each account's `context_window` and `max_context_window`, caps the requested budget at that account's maximum, and uses the advertised default as the conservative ceiling when no maximum is provided. Account pools resolve each member separately and use the smallest window. This changes DSH's local history budget and compaction timing, without sending an API capacity override. Longer contexts can increase response latency.
+
+Grok models whose catalog publishes a `context_windows` tier list offer a window picker instead: keep **Follow provider** for the advertised default (currently 256K) or pick a tier such as **500K**. The plugin reads the tiers from the Grok CLI catalog, caps the choice at the largest advertised tier, keeps the advertised default when the catalog offers no list, and shows a still-saved tier as unavailable instead of silently dropping it after a refresh stops offering it. Like the Codex field above, this only changes DSH's local history budget and compaction timing; it does not raise the API's own capacity, and the provider decides how a larger window is billed. New sessions pick up the updated window immediately; existing sessions apply it on the next message.
 
 The same editor controls Codex Web Search and image generation, plus Grok image generation, video generation, and X search. Changes apply only to sessions created after saving; existing sessions retain their creation-time policy, including after restart. Image generation is shared: it disappears only when neither configured provider enables it, and execution never falls back to a provider disabled for that session. Claude and Copilot currently have no standalone subscription tools to configure.
 

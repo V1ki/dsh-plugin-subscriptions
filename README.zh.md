@@ -70,6 +70,19 @@ Antigravity 用量优先读取 `retrieveUserQuotaSummary`，只展示服务端�
 
 ![video_generate 内联播放生成的视频](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/video-generate-inline.png)
 
+## 用量看板与 Token 历史
+
+点击 DSH 左侧边栏的 **订阅** 进入统一页面，顶部可在 **用量**（默认首页）与 **设置** 之间切换（旧版无侧边栏的宿主继续保留 **设置 → 订阅** 入口）。用量看板跨 **Codex**、**Claude**、**Grok** 与 **Antigravity** 聚合记录输入、输出、缓存读取与缓存写入 token，支持按服务商、账号（含已退出登录的历史账号）以及时间范围（`7 天`、`30 天`、`90 天`、`全部`）筛选。服务商上报的推理 token 已包含在输出中，不重复计入总数；重叠的 5 小时与每周额度窗口在每日统计与 KPI 汇总中自动去重。暂不统计 Copilot。
+
+- **总览与趋势**：KPI 汇总卡片、**26 周 UTC 日历热力图**（点击任意日期可下钻查看当日模型与服务商明细）、每日 Token 堆叠柱状趋势图，以及 **按模型 / 按服务商** 分布视图。
+- **额度周期统计**：双轴组合图同屏对比每个 5 小时 / 每周周期的 Token 用量（左轴柱状）与额度消耗百分比（右轴折线，带峰值刻度；未采集到额度占比时自动断开不误画为 0%），并提供进行中周期快捷胶囊与行内周期详情卡。
+
+![侧边栏订阅用量看板：KPI 汇总、26 周日历热力图、每日趋势与用量分布](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/usage-dashboard.png)
+
+![额度周期统计双轴组合图：周期 Token 用量与额度消耗百分比对比](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/usage-quota-cycles.png)
+
+插件在本地 `~/.dsh/plugins/subscriptions/usage/`（权限 `0600`）保存汇总计数、周期额度占比和窗口元数据，不在这里保存提示词、凭据或逐请求日志。**清空历史** 支持清空单个服务商或全部服务商在该插件中的本地用量历史，不影响 DSH 会话、账号或实时额度。打开看板不会额外请求额度，也不估算费用。
+
 ## Provider 一览
 
 | 路由     | 订阅             | 模型 |
@@ -184,6 +197,8 @@ GitHub 安装的:重新执行一遍 `add github:V1ki/dsh-plugin-subscriptions` �
 2. **设置 → 订阅**:点对应 provider 的「连接」。若先运行过 `claude` 并登录,Claude 会即时导入凭据;没有凭据时,Claude 也和其他 provider 一样在浏览器里授权。Codex、Grok 和 Antigravity 在打开的标签页里授权;Copilot 会显示 GitHub 设备码,需在 `github.com/login/device` 输入;无浏览器环境下可展开手动兜底,粘贴回调 URL 或授权码。
 3. 在任意会话里打开模型选择器(`/model`),选择 **ChatGPT (Codex)** / **Claude (Subscription)** / **Grok (Subscription)** / **GitHub Copilot** / **Google Antigravity** 下的模型。
 
+> **关于 Google Antigravity 的说明**：由于直连上游私有端点存在较高的账号封禁（ToS）风控，且上游会直接拦截 DSH 原生对话请求并返回 429，**Google Antigravity 当前默认禁用**（老用户升级后同样默认关闭，本地凭据与配置会保留）。如需使用，需在 **设置 → 订阅** 中手动弹框确认启用；即使启用，目前也仅可查看账号用量，无法正常使用模型。
+
 未登录时:该 provider 不出现在选择器里;直接请求会报 `MISSING_CREDENTIAL` 并提示去设置页登录,不影响其他功能。
 
 ### 多账号
@@ -195,6 +210,8 @@ GitHub 安装的:重新执行一遍 `add github:V1ki/dsh-plugin-subscriptions` �
 在 **设置 → 订阅 → 对应 provider → 编辑模型列表** 中搜索并勾选要显示的模型，再点击 **保存更改**。默认自动显示全部模型；手动勾选、全选或清空后会保存明确的显示列表，以后发现的新模型不会自动加入。重新勾选「自动显示全部模型」即可恢复。隐藏仅影响模型选择器和默认推理档列表，已有会话仍可使用隐藏模型；编辑器始终保留完整目录，可随时恢复显示。刷新目录不会覆盖选择。对话框只有一组 **保存更改 / 取消**：保存会把模型列表与上方的账号设置一起提交，取消会同时丢弃两者并关闭对话框。
 
 Codex 模型还可填写上下文 token 数，留空跟随服务商。插件读取每个账号的 `context_window` 与 `max_context_window`，实际使用 `min(配置值, 账号最大值)`；未返回最大值时，保守地以上下文默认值为上限。账号池按实际成员分别解析并取最小窗口。这只调整 DSH 的本地上下文预算与压缩时机，不向 API 发送扩大容量的参数。更长的上下文可能增加响应延迟。
+
+Grok 模型若目录公布 `context_windows` 档位列表，编辑器会提供上下文窗口下拉：保持 **跟随服务商** 使用目录默认值（当前 256K），或选择 **500K** 这类档位。插件从 Grok CLI 目录读取档位，选择上限不超过目录公布的最大档；目录未提供列表时沿用公布默认值；刷新后不再提供的已选档位会标记为「当前目录未提供」，而不是静默清除。与上面的 Codex 字段一样，这只调整 DSH 的本地上下文预算与压缩时机，不会扩大 API 本身的容量；调大窗口后的计费由服务商决定。新建会话会立即生效；已有会话会在下一条消息更新上下文预算。
 
 同一区块可开关 Codex 的图片生成，以及 Grok 的图片生成、视频生成和 X 搜索。工具策略只影响保存后新建的会话；已有会话及其重启后的恢复保留创建时的策略。图片生成是共享工具，只有 Codex 与 Grok 均关闭或未配置时才完全隐藏；调用时也不会回退到该会话已禁用的 provider。Claude 和 Copilot 当前没有本插件提供的独立工具开关。
 

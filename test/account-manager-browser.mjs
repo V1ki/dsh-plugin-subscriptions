@@ -316,6 +316,27 @@ try {
   await editor.getByRole('textbox', { name: 'Filter models' }).fill('absent-model')
   await editor.getByText('No model matches “absent-model”.', { exact: true }).waitFor()
   await close()
+  // Legacy Antigravity effort selections follow an actually discovered family.
+  await page.evaluate(() => {
+    window.provider = 'antigravity'
+    window.models = [{ id: 'claude-sonnet-5-5', name: 'Sonnet' }]
+    window.accounts = [{ key: 'primary', label: 'Primary', models: window.models }]
+    window.settings = { accounts: { primary: { poolModels: ['claude-sonnet-5-5-low', 'claude-sonnet-5-5-high'] } } }
+  })
+  await open()
+  const primary = page.getByRole('group', { name: 'Primary', exact: true })
+  assert.match(await primary.locator('summary').textContent(), /1 selected/)
+  await primary.locator('summary').click()
+  assert.equal(await primary.getByLabel('Sonnet', { exact: true }).isChecked(), true)
+  assert.equal(await primary.getByText('claude-sonnet-5-5-low', { exact: false }).count(), 0)
+  await primary.getByLabel('Sonnet', { exact: true }).uncheck()
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click()
+  await page.getByRole('dialog').waitFor({ state: 'detached' })
+  assert.deepEqual(await page.evaluate(() => window.settings.accounts.primary.poolModels), [])
+  await open()
+  await primary.locator('summary').click()
+  assert.equal(await primary.getByLabel('Sonnet', { exact: true }).isChecked(), false)
+  await close()
   await page.evaluate(settings => {
     delete window.models; delete window.accounts; delete window.provider; window.settings = settings
   }, settingsBeforeEmpty)

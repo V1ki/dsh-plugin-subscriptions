@@ -16,6 +16,18 @@ import { PROVIDER_IDS, type ProviderId } from './store.js'
 import type { ProviderUsage } from '../providers/common.js'
 import type { ProxyConfigView, ProxyDraft, ProxyInput, ProxyTestResult } from '../http.js'
 import type { CliVersion } from '../providers/npm-cli-version.js'
+import type { TrackedProvider } from '../usage/constants.js'
+import {
+  DASHBOARD_RANGES,
+  UsageQueryRejected,
+  type AccountUsagePayload,
+  type DashboardRange,
+  type UsageDashboardPayload,
+  type UsageHistoryController,
+} from '../usage/usage-rpc.js'
+import { isTrackedProvider } from '../usage/window-tracker.js'
+import { UsageUnavailable } from '../usage/service.js'
+import { VIEW_KINDS } from '../usage/window-view.js'
 
 /** Internal endpoint dispatcher used after the host authenticates an exact Fetch route. */
 export type SubscriptionsRpcHandler = (
@@ -36,12 +48,13 @@ export const SUBSCRIPTIONS_AUTH_PREFIX = 'subscriptions-auth.'
  * Kept in one place so the route table and the switch cannot drift apart.
  */
 export const SUBSCRIPTIONS_AUTH_ENDPOINTS = [
-  'providerSettings', 'setProviderSettings',
+  'providerSettings', 'setProviderSettings', 'setProviderEnabled',
   'status', 'login', 'saveKey', 'manual', 'cancel', 'logout', 'setDefault', 'usage',
   'image', 'video', 'prepareReset', 'consumeReset',
   'speed', 'setSpeed',
   'proxyGet', 'proxySet', 'proxyTest',
   'modelDefaults', 'setModelDefault',
+  'usageDashboard', 'accountUsage', 'clearUsageHistory',
 ] as const
 
 /** Media types the attachment store accepts (ImageMediaType). */
@@ -100,6 +113,8 @@ export interface ProviderStatus {
   /** Saved picker visibility, attached by the status RPC from local preferences. */
   visibleModels?: string[]
   displayName?: string
+  /** False when the provider is disabled by default and requires manual opt-in. */
+  enabled?: boolean
   /** Whether a login attempt is currently waiting for its code. */
   busy: boolean
   /** Logged-in accounts, default first. */
@@ -160,6 +175,10 @@ export interface ProviderSettingsController {
   displayName?(provider: ProviderId): string | undefined
   /** Local picker selection, without triggering model discovery. */
   visibleModels?(provider: ProviderId): string[] | undefined
+  /** Local opt-in gate (Antigravity defaults to false). */
+  enabled?(provider: ProviderId): boolean
+  /** Persist only the opt-in gate without overwriting other provider settings. */
+  setEnabled?(provider: ProviderId, enabled: boolean): Promise<void>
   get(provider: ProviderId, force: boolean): Promise<unknown>
   set(provider: ProviderId, settings: unknown): Promise<void>
 }
@@ -235,6 +254,12 @@ export interface AuthController {
 
 /** Payload carried no usable provider id — an RPC client bug, not a server failure. */
 export class BadRequest extends Error {}
+
+/** A provider the endpoint does not serve: usage statistics for Copilot. */
+export class Unsupported extends Error {}
+
+/** Kinds a usage query may name; whether the account reports it is checked by the controller. */
+const USAGE_QUERY_KINDS: readonly string[] = VIEW_KINDS
 
 /**
  * Structural face of `connection.fetch.register` shared by both dsh lines.
@@ -325,10 +350,13 @@ function ok(value: unknown): RpcResult<unknown> {
 
 function failure(error: unknown): RpcResult<unknown> {
   const message = error instanceof Error ? error.message : String(error)
-  if (error instanceof BadRequest) {
+  if (error instanceof BadRequest || error instanceof UsageQueryRejected) {
     // The issues array is zod-shaped upstream; this channel validates by hand.
     return { ok: false, error: { code: 'bad-request', message, details: { issues: [] } } }
   }
+  if (error instanceof Unsupported) return { ok: false, error: { code: 'unsupported', message, details: {} } }
+  // Usage tracking off in this process, or no reader: a state, not a server fault.
+  if (error instanceof UsageUnavailable) return { ok: false, error: { code: 'unavailable', message, details: {} } }
   return { ok: false, error: { code: 'internal', message, details: {} } }
 }
 
@@ -339,6 +367,67 @@ function readProvider(payload: unknown): ProviderId {
     throw new BadRequest(`payload.provider must be one of ${PROVIDER_IDS.join(', ')}`)
   }
   return provider as ProviderId
+}
+
+/** A subscription provider with usage statistics; Copilot is a provider without them. */
+function readUsageProvider(payload: unknown): TrackedProvider {
+  const provider = readProvider(payload)
+  if (!isTrackedProvider(provider)) throw new Unsupported(`usage statistics are not supported for ${provider}`)
+  return provider
+}
+
+/** Validate the `accountUsage` payload's shape; the kind and scope are checked against the account's report later. */
+function readAccountUsage(payload: unknown): AccountUsagePayload {
+  const provider = readUsageProvider(payload)
+  const record = payload as Record<string, unknown>
+  const { account, kind, scope, at } = record
+  if (account !== undefined && (typeof account !== 'string' || account.length === 0)) throw new BadRequest('payload.account must be a non-empty string when present')
+  if (kind !== undefined && (typeof kind !== 'string' || !USAGE_QUERY_KINDS.includes(kind))) {
+    throw new BadRequest(`payload.kind must be one of ${USAGE_QUERY_KINDS.join(', ')} when present`)
+  }
+  if (scope !== undefined && (typeof scope !== 'string' || scope.length === 0)) throw new BadRequest('payload.scope must be a non-empty string when present')
+  if (scope !== undefined && kind === undefined) throw new BadRequest('payload.scope needs payload.kind')
+  if (at !== undefined && (typeof at !== 'number' || !Number.isFinite(at))) throw new BadRequest('payload.at must be a finite number when present')
+  return {
+    provider,
+    ...account === undefined ? {} : { account: account as string },
+    ...kind === undefined ? {} : { kind: kind as NonNullable<AccountUsagePayload['kind']> },
+    ...scope === undefined ? {} : { scope: scope as string },
+    ...at === undefined ? {} : { at: at as number },
+  }
+}
+
+/** Validate the `usageDashboard` payload's optional filters and range. */
+function readUsageDashboard(payload: unknown): UsageDashboardPayload {
+  if (payload === undefined || payload === null) return {}
+  if (typeof payload !== 'object' || Array.isArray(payload)) throw new BadRequest('payload must be an object')
+  const record = payload as Record<string, unknown>
+  const { provider, account, range } = record
+  let parsedProvider: TrackedProvider | 'all' | undefined
+  if (provider !== undefined) {
+    if (provider === 'all') parsedProvider = 'all'
+    else parsedProvider = readUsageProvider({ provider })
+  }
+  if (account !== undefined && (typeof account !== 'string' || account.length === 0)) {
+    throw new BadRequest('payload.account must be a non-empty string when present')
+  }
+  if (range !== undefined && (typeof range !== 'string' || !(DASHBOARD_RANGES as readonly string[]).includes(range))) {
+    throw new BadRequest(`payload.range must be one of ${DASHBOARD_RANGES.join(', ')} when present`)
+  }
+  return {
+    ...parsedProvider === undefined ? {} : { provider: parsedProvider },
+    ...account === undefined ? {} : { account: account as string },
+    ...range === undefined ? {} : { range: range as DashboardRange },
+  }
+}
+
+/** `clearUsageHistory`: `'all'` or one tracked provider (Copilot is unsupported whatever `confirm` says), then `confirm: true` exactly. */
+function readClearUsage(payload: unknown): TrackedProvider | 'all' {
+  if (typeof payload !== 'object' || payload === null) throw new BadRequest('payload must be an object')
+  const record = payload as Record<string, unknown>
+  const provider = record.provider === 'all' ? 'all' : readUsageProvider(payload)
+  if (record.confirm !== true) throw new BadRequest('payload.confirm must be true')
+  return provider
 }
 
 function readString(payload: unknown, field: string): string {
@@ -536,8 +625,24 @@ async function dispatch(
   payload: unknown,
   signal: AbortSignal,
   providerSettings?: ProviderSettingsController,
+  usageHistory?: UsageHistoryController,
 ): Promise<RpcResult<unknown>> {
   switch (endpoint) {
+    case 'usageDashboard': {
+      const input = readUsageDashboard(payload)
+      if (usageHistory === undefined) throw new UsageUnavailable('usage history is unavailable')
+      return ok(await usageHistory.usageDashboard(input))
+    }
+    case 'accountUsage': {
+      const input = readAccountUsage(payload)
+      if (usageHistory === undefined) throw new UsageUnavailable('usage history is unavailable')
+      return ok(await usageHistory.accountUsage(input))
+    }
+    case 'clearUsageHistory': {
+      const provider = readClearUsage(payload)
+      if (usageHistory === undefined) throw new UsageUnavailable('usage history is unavailable')
+      return ok(await usageHistory.clearUsageHistory(provider))
+    }
     case 'providerSettings':
       if (!providerSettings) throw new BadRequest('provider settings are unavailable')
       return ok(await providerSettings.get(readProvider(payload), readForce(payload)))
@@ -545,6 +650,14 @@ async function dispatch(
       if (!providerSettings) throw new BadRequest('provider settings are unavailable')
       const provider = readProvider(payload)
       await providerSettings.set(provider, (payload as Record<string, unknown>).settings)
+      return ok({ ok: true })
+    }
+    case 'setProviderEnabled': {
+      if (!providerSettings?.setEnabled) throw new BadRequest('provider settings are unavailable')
+      const provider = readProvider(payload)
+      const enabled = (payload as Record<string, unknown>).enabled
+      if (typeof enabled !== 'boolean') throw new BadRequest('payload.enabled must be a boolean')
+      await providerSettings.setEnabled(provider, enabled)
       return ok({ ok: true })
     }
     case 'status': {
@@ -561,8 +674,10 @@ async function dispatch(
       return ok({ providers: Object.fromEntries(entries.map(([provider, status]) => {
         const displayName = providerSettings?.displayName?.(provider)
         const visibleModels = providerSettings?.visibleModels?.(provider)
+        const enabled = providerSettings?.enabled?.(provider)
         return [provider, { ...status, ...(displayName ? { displayName } : {}),
-          ...(visibleModels === undefined ? {} : { visibleModels }) }]
+          ...(visibleModels === undefined ? {} : { visibleModels }),
+          ...(enabled === false ? { enabled: false } : {}) }]
       })) })
     }
     case 'login': {
@@ -646,6 +761,7 @@ async function dispatch(
  * @param speed - the per-session speed-tier state backing the Speed toggle.
  * @param proxy - optional proxy-config controller backing `proxyGet`/`proxySet`/`proxyTest`.
  * @param modelDefaults - optional per-model default-effort state backing `modelDefaults`/`setModelDefault`.
+ * @param usageHistory - optional usage reader backing `accountUsage`/`clearUsageHistory`.
  */
 export function registerAuthRpc(
   ctx: Context,
@@ -654,6 +770,7 @@ export function registerAuthRpc(
   proxy: ProxyConfigController | undefined = undefined,
   modelDefaults: ModelDefaultsController | undefined = undefined,
   providerSettings: ProviderSettingsController | undefined = undefined,
+  usageHistory: UsageHistoryController | undefined = undefined,
 ): void {
   // `connection` is not in this plugin's inject list (headless compositions
   // lack it), so its startup order is unconstrained: defer registration until
@@ -671,7 +788,7 @@ export function registerAuthRpc(
     const connection = ctx.get('connection') as HostConnectionHandle
     const handler: SubscriptionsRpcHandler = async (endpoint, payload, signal) => {
       try {
-        return await dispatch(controller, speed, proxy, modelDefaults, endpoint, payload, signal, providerSettings)
+        return await dispatch(controller, speed, proxy, modelDefaults, endpoint, payload, signal, providerSettings, usageHistory)
       } catch (error) {
         return failure(error)
       }

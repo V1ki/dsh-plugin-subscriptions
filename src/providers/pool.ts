@@ -28,7 +28,7 @@ import { poolKey } from './pool-family.js'
 import { accountKey, classifyPoolFailure, memberKey, PoolHealthRegistry } from './pool-health.js'
 import type { MemberQuota, PoolUsageTracker } from './pool-usage.js'
 import { llmErrorFromFailure, withAbortSignal } from './common.js'
-import { streamAccountWithReplay } from './replay.js'
+import { streamAccountWithReplay, type RequestEndObserver } from './replay.js'
 
 /** Member-selection strategy: plain priority failover or quota-aware scheduling. */
 export type PoolStrategy = 'priority' | 'quota_aware' | 'quota_normalized'
@@ -50,6 +50,8 @@ export interface PoolAdapterOptions {
   /** User-configured extra picker entries (heterogeneous fallbacks), by pool id. */
   tiers: Record<string, PoolMemberRef[]>
   onWarn: (message: string) => void
+  /** Usage tracking: told about every member attempt that reported usage, failed ones included. */
+  onRequestEnd?: RequestEndObserver
 }
 
 /** Bound on sticky-session memory; oldest entries evict past it. */
@@ -270,7 +272,7 @@ export class PoolAdapter extends LlmAdapter {
       if (adapter === undefined) continue
       tried += 1
       const iterator = streamAccountWithReplay(
-        adapter, { ...options, provider: member.provider }, member.account, member.model,
+        adapter, { ...options, provider: member.provider }, member.account, member.model, this.options.onRequestEnd,
       )[Symbol.asyncIterator]()
       let first: IteratorResult<StreamChunk>
       const leadingUsage: StreamChunk[] = []
@@ -387,12 +389,13 @@ export class PoolAdapter extends LlmAdapter {
         ? ordered
         : [stickyMember, ...ordered.filter(member => member !== stickyMember)]
     }
-    const scored = eligible.filter(member => quotas.get(member)?.available === true)
-    const quotaFull = eligible.filter(member => quotas.get(member)?.available === false)
+    const scored = included.filter(member => quotas.get(member)?.available === true)
+    const nearFull = included.filter(member => quotas.get(member)?.available === false)
     const byUrgency = (a: ConcretePoolMember, b: ConcretePoolMember): number =>
       (quotas.get(b)?.urgency ?? 0) - (quotas.get(a)?.urgency ?? 0)
     scored.sort(byUrgency)
-    quotaFull.sort(byUrgency)
+    nearFull.sort(byUrgency)
+    const quotaFull = [...nearFull, ...creditFunded]
     if (stickyMember !== undefined && scored.includes(stickyMember)) {
       const best = scored[0]
       const stickyUrgency = quotas.get(stickyMember)?.urgency ?? 0
@@ -402,8 +405,8 @@ export class PoolAdapter extends LlmAdapter {
         scored.splice(scored.indexOf(stickyMember), 1)
         scored.unshift(stickyMember)
       }
-    } else if (scored.length === 0 && stickyMember !== undefined && quotaFull.includes(stickyMember)) {
-      // Included quota is gone; keep the credit-funded session on its account.
+    } else if (scored.length === 0 && stickyMember !== undefined && !stickySpendsCredits && quotaFull.includes(stickyMember)) {
+      // Sticky holds when it stays on included quota, or when all included quota is gone.
       quotaFull.splice(quotaFull.indexOf(stickyMember), 1)
       quotaFull.unshift(stickyMember)
     }

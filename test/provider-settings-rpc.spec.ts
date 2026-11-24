@@ -173,8 +173,25 @@ test('Antigravity registers the real multi-account adapter with provider setting
     assert.deepEqual(llm.listProviders(), [{ id: 'antigravity', name: 'Google Antigravity' }])
     assert.deepEqual((await listAccounts('antigravity')).map(entry => entry.key), ['alice', 'bob'])
     const adapter = adapters.get('antigravity')!
-    assert.deepEqual((await adapter.listModels('antigravity')).map(model => model.id), ['m1', 'm2'])
     const call = (endpoint: string, payload: unknown) => connection.handler(endpoint, payload, new AbortController().signal)
+
+    // Antigravity is disabled by default even when saved accounts already exist.
+    assert.deepEqual(await adapter.listModels('antigravity'), [])
+    await assert.rejects(() => adapter.resolveModel('antigravity', 'm1'), /disabled/)
+    const disabledStatus = await call('status', {})
+    assert.ok(disabledStatus.ok)
+    assert.equal((disabledStatus.value as { providers: { antigravity: { enabled?: boolean } } }).providers.antigravity.enabled, false)
+    assert.equal((await call('login', { provider: 'antigravity' })).ok, false)
+    assert.equal((await call('providerSettings', { provider: 'antigravity' })).ok, false)
+    const disabledUsage = await call('usage', { provider: 'antigravity', account: 'alice' })
+    assert.ok(disabledUsage.ok)
+    assert.deepEqual(disabledUsage.value, { supported: false })
+    assert.equal((await call('setProviderEnabled', { provider: 'codex', enabled: false })).ok, false)
+    assert.equal((await call('setProviderEnabled', { provider: 'antigravity', enabled: 'yes' })).ok, false)
+
+    // Manually enabling Antigravity activates routes immediately without restarting.
+    assert.equal((await call('setProviderEnabled', { provider: 'antigravity', enabled: true })).ok, true)
+    assert.deepEqual((await adapter.listModels('antigravity')).map(model => model.id), ['m1', 'm2'])
     const catalog = await call('providerSettings', { provider: 'antigravity', force: true })
     assert.ok(catalog.ok)
     assert.deepEqual((catalog.value as { models: { id: string }[] }).models.map(model => model.id), ['m1', 'm2'])
@@ -190,10 +207,11 @@ test('Antigravity registers the real multi-account adapter with provider setting
     const selection = async () => {
       const result = await call('status', {})
       assert.ok(result.ok)
-      return (result.value as { providers: { antigravity: { visibleModels?: string[] } } }).providers.antigravity
+      return (result.value as { providers: { antigravity: { visibleModels?: string[]; enabled?: boolean } } }).providers.antigravity
     }
     try {
       assert.deepEqual((await selection()).visibleModels, ['m2'])
+      assert.equal((await selection()).enabled, undefined, 'saving provider settings preserves enabled state')
       assert.equal((await call('setProviderSettings', { provider: 'antigravity', settings: { visibleModels: [] } })).ok, true)
       assert.deepEqual((await selection()).visibleModels, [])
       assert.equal((await call('setProviderSettings', { provider: 'antigravity', settings: {} })).ok, true)
@@ -202,6 +220,11 @@ test('Antigravity registers the real multi-account adapter with provider setting
       adapter.listOwnModels = originalList
     }
     assert.equal((await call('setProviderSettings', { provider: 'antigravity', settings: { tools: { image_generate: true } } })).ok, false)
+    // Disabling again hides models and blocks dispatch while keeping saved accounts intact.
+    assert.equal((await call('setProviderEnabled', { provider: 'antigravity', enabled: false })).ok, true)
+    assert.deepEqual(await adapter.listModels('antigravity'), [])
+    await assert.rejects(() => adapter.resolveModel('antigravity', 'm1'), /disabled/)
+    assert.deepEqual((await listAccounts('antigravity')).map(entry => entry.key), ['alice', 'bob'])
   } finally {
     await runtime.dispose()
     if (previous === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previous
@@ -229,6 +252,7 @@ test('Antigravity cached roster remains available immediately after clearing and
     runtime = ctx.plugin(plugin, { providers: ['antigravity'], pool: { enabled: false }, antigravity: { onboard: false } })
     await new Promise(resolve => setTimeout(resolve, 50))
     const call = (endpoint: string, payload: unknown) => connection.handler(endpoint, payload, new AbortController().signal)
+    assert.equal((await call('setProviderEnabled', { provider: 'antigravity', enabled: true })).ok, true)
     const result = await call('providerSettings', { provider: 'antigravity' })
     assert.ok(result.ok)
     const ids = (result.value as { models: { id: string }[] }).models.map(model => model.id)
@@ -237,6 +261,65 @@ test('Antigravity cached roster remains available immediately after clearing and
     assert.deepEqual(await adapters.get('antigravity')!.listModels('antigravity'), [])
     assert.ok((await call('setProviderSettings', { provider: 'antigravity', settings: { visibleModels: ids } })).ok)
     assert.deepEqual((await adapters.get('antigravity')!.listModels('antigravity')).map(model => model.id), ids)
+  } finally {
+    await runtime?.dispose()
+    if (previous === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previous
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('Grok RPC exposes catalog context tiers and applies saved contextWindows overrides', async () => {
+  const { catalogStore } = await import('../src/providers/catalog-store.js')
+  const home = await mkdtemp(join(tmpdir(), 'grok-context-rpc-'))
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  const ctx = new Context()
+  const llm = new LlmRuntime(ctx)
+  const adapters = new Map<string, AccountAwareAdapter>()
+  const register = llm.registerAdapter.bind(llm)
+  llm.registerAdapter = (routes: string[], adapter: AccountAwareAdapter) => { adapters.set(routes[0], adapter); return register(routes, adapter) }
+  const connection = createFakeConnection()
+  ctx.provide('connection', connection.connection)
+  ctx.provide('tools', { register: () => () => {} })
+  let runtime: ReturnType<typeof ctx.plugin> | undefined
+  try {
+    await saveAccountSession('grok', 'grok-user', {
+      accessToken: 'tok',
+      refreshToken: 'ref',
+      expiresAt: Date.now() + 3600_000,
+      tokenEndpoint: 'https://auth.x.ai/oauth2/token',
+      account: 'grok-user@example.com',
+    })
+    await catalogStore('grok').save({
+      at: Date.now(),
+      models: [
+        { id: 'grok-4.7', name: 'Grok 4.7', contextWindow: 256_000, contextWindowOptions: [256_000, 500_000] },
+        { id: 'grok-4.3', name: 'Grok 4.3', contextWindow: 256_000 },
+      ],
+    })
+    runtime = ctx.plugin(plugin, { providers: ['grok'], pool: { enabled: false } })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    const call = (endpoint: string, payload: unknown) => connection.handler(endpoint, payload, new AbortController().signal)
+    const adapter = adapters.get('grok')!
+
+    const initial = await call('providerSettings', { provider: 'grok' })
+    assert.ok(initial.ok)
+    const rows = (initial.value as { models: { id: string; defaultContextWindow?: number; maxContextWindow?: number; contextWindowOptions?: number[] }[] }).models
+    const g47 = rows.find(row => row.id === 'grok-4.7')
+    const g43 = rows.find(row => row.id === 'grok-4.3')
+    assert.deepEqual(g47 && { default: g47.defaultContextWindow, max: g47.maxContextWindow, options: g47.contextWindowOptions }, {
+      default: 256_000, max: 500_000, options: [256_000, 500_000],
+    })
+    assert.deepEqual(g43 && { default: g43.defaultContextWindow, max: g43.maxContextWindow, options: g43.contextWindowOptions }, {
+      default: 256_000, max: 256_000, options: undefined,
+    })
+    assert.equal((await adapter.resolveModel('grok', 'grok-4.7')).context?.contextWindow, 256_000)
+
+    assert.equal((await call('setProviderSettings', { provider: 'grok', settings: { contextWindows: { 'grok-4.7': 500_000 } } })).ok, true)
+    assert.equal((await adapter.resolveModel('grok', 'grok-4.7')).context?.contextWindow, 500_000)
+    assert.equal((await call('setProviderSettings', { provider: 'grok', settings: { contextWindows: { 'grok-4.7': 0 } } })).ok, false)
+    assert.equal((await call('setProviderSettings', { provider: 'grok', settings: {} })).ok, true)
+    assert.equal((await adapter.resolveModel('grok', 'grok-4.7')).context?.contextWindow, 256_000)
   } finally {
     await runtime?.dispose()
     if (previous === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previous

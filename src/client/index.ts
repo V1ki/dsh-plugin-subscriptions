@@ -36,8 +36,14 @@ import { en, zh } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
 import { fastCommandDescription } from './fast-command.js'
 import { SubscriptionNavIcon } from './SubscriptionNavIcon.js'
+import { SubscriptionsPage } from './SubscriptionsPage.js'
+import type { SubscriptionsPageInjected } from './SubscriptionsPage.js'
 
 export type { SubscriptionsSectionInjected, SubscriptionsSectionProps } from './SubscriptionsSection.js'
+export type { SubscriptionsPageInjected, SubscriptionsPageProps, SubscriptionsPageTab } from './SubscriptionsPage.js'
+export { SubscriptionsPage } from './SubscriptionsPage.js'
+export type { UsageDashboardInjected, UsageDashboardProps } from './UsageDashboard.js'
+export { UsageDashboard, UsageDashboardView } from './UsageDashboard.js'
 export type { ImageGenerateToolviewInjected, ImageGenerateToolviewProps } from './ImageGenerateToolview.js'
 export type { VideoGenerateToolviewInjected, VideoGenerateToolviewProps } from './VideoGenerateToolview.js'
 export type { SpeedSelectInjected, SpeedSelectProps, SpeedState, SpeedTier } from './SpeedSelect.js'
@@ -45,18 +51,23 @@ export type { SubscriptionUsageBadgeInjected, SubscriptionUsageBadgeProps } from
 export type { SubscriptionsKey } from './locales.js'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
-  // DSH 0.2.2 exposes this optional icon slot; older hosts simply never declare it.
+  // DSH 0.2.2 exposes these optional sidebar/icon slots; older hosts simply never declare them.
   interface SlotMap {
     'settings.section.icon': { kind: 'list'; scope: 'root'; inline: true; owner: { size: number; active: boolean } }
+    'sidebar.panellist': { kind: 'list'; scope: 'root'; owner: { size: number; active: boolean } }
+    'main': { kind: 'keyed'; scope: 'root' }
   }
   interface LocaleNamespaceMap {
-    /** The Subscriptions settings page copy. */
+    /** The Subscriptions settings page and Usage Dashboard copy. */
     'settings.subscriptions': SubscriptionsKey
   }
 }
 
 /** Dictionary namespace owned by this plugin. */
 const NS = 'settings.subscriptions'
+
+/** Sidebar panel id shared between `sidebar.panellist` and `main` slots. */
+const SUBSCRIPTIONS_PANEL_ID = 'subscriptions'
 
 /**
  * Required services (cordis fiber inject): `slots` carries the registration
@@ -101,6 +112,21 @@ export function apply(ctx: ClientContext): void {
   ctx.slots.inject('settings.section.icon', () => ctx.slots.register({
     name: 'settings.section.icon', id: 'subscriptions',
   }, SubscriptionNavIcon))
+
+  // Register the unified Subscriptions sidebar panel + main page (Top Tabs: Usage & Settings).
+  // Both calls stay dormant on older hosts that do not declare these slots.
+  const pageInjected = (): SubscriptionsPageInjected => ({ rpc: connection.rpc, t })
+  ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
+    name: 'sidebar.panellist',
+    id: SUBSCRIPTIONS_PANEL_ID,
+    order: 20,
+    label: () => t('nav'),
+  }, SubscriptionNavIcon))
+  ctx.slots.inject('main', () => ctx.slots.register({
+    name: 'main',
+    key: SUBSCRIPTIONS_PANEL_ID,
+    inject: pageInjected,
+  }, SubscriptionsPage))
 
   // The image_generate keyed toolview owns how image calls render inline; its
   // gallery bytes ride the same channel through the injected loader. The
