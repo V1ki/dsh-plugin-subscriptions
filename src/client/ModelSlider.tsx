@@ -9,15 +9,18 @@ import { SliderComets, sliderCometCss } from './SliderComets.js'
 import type { SpeedSelectInjected } from './speed.js'
 import { useSliderSpeed } from './use-slider-speed.js'
 import { useComposerDisplay } from './composer-display-preferences.js'
+import { SliderEffort } from './SliderEffort.js'
+import type { SliderReasoning } from './SliderEffort.js'
 
 type SliderProvider = 'codex' | 'claude'
 const providerLabels: Record<SliderProvider, string> = { codex: 'Codex', claude: 'Claude' }
 
-type Selection = { provider: string; model: string }
+type Selection = { provider: string; model: string; reasoningEffort?: string }
+type CatalogGroup = { id: string; models: readonly (SliderGroup['models'][number] & { reasoning?: SliderReasoning })[] }
 interface DirectoryState {
   current: Selection | null
   routable?: boolean | null
-  groups: readonly (Omit<SliderGroup, 'provider'> & { id: string })[]
+  groups: readonly CatalogGroup[]
   status: string
 }
 
@@ -54,6 +57,8 @@ export function ModelSlider({ directory, speed, loadProviders, t, sliderSessionI
 const railInset = 12
 const groupsFor = (state: DirectoryState) => state.groups.map(({ id, models }) => ({ provider: id, models }))
 const stopsFor = (state: DirectoryState) => modelSliderStops(groupsFor(state), state.current)
+const reasoningFor = (state: DirectoryState) => state.groups.find(group => group.id === state.current?.provider)
+  ?.models.find(model => model.id === state.current?.model)?.reasoning
 
 export function ModelSliderView({ directory, speed, loadProviders, t = key => en[key] }: SliderProps) {
   const state = useSyncExternalStore(
@@ -84,6 +89,7 @@ export function ModelSliderView({ directory, speed, loadProviders, t = key => en
   const busy = pending !== null || state.status === 'selecting'
 
   const sliderShown = useComposerDisplay('slider') === 'shown'
+  const pickerHidden = useComposerDisplay('picker') === 'hidden'
   // DSH retains the last selection and catalog during a refresh (routable: null).
   // Keep the controls mounted while both still match; a confirmed missing route falls back.
   const resolved = state.routable !== false && (state.routable !== null || state.status === 'loading')
@@ -100,6 +106,7 @@ export function ModelSliderView({ directory, speed, loadProviders, t = key => en
   const providerOptions = providers.filter(provider => sliderProviderTarget(groupsFor(state), provider) !== undefined)
   const canSwitchProvider = showTrack && providerOptions.some(provider => provider !== current?.provider)
   const showFast = codexModel !== undefined && fast.visible
+  const reasoning = showTrack && pickerHidden ? reasoningFor(state) : undefined
   if (!showTrack && !showFast) return null
 
   const fastDescription = t(current?.model === 'gpt-6.2-astra' || current?.model === 'gpt-5.6'
@@ -131,20 +138,23 @@ export function ModelSliderView({ directory, speed, loadProviders, t = key => en
     : hint?.premium ? t('modelSliderPremium') : undefined
   const cancel = () => { drag.current = null; setPreview(null) }
 
-  const commit = async (origin: Selection | null, target: Selection) => {
+  const commit = async (origin: Selection | null, target: Selection, effortOnly = false): Promise<boolean> => {
     // The native picker may have changed the shared selection during a drag.
     const latest = directory.store.getSnapshot()
     if (saving.current || latest.status === 'selecting'
       || latest.current?.provider !== origin?.provider || latest.current?.model !== origin?.model
-      || (target.provider === origin?.provider && target.model === origin.model)) return
+      || (effortOnly ? latest.current?.reasoningEffort !== origin?.reasoningEffort
+        : target.provider === origin?.provider && target.model === origin.model)) return false
     saving.current = true
     setFailed(false)
     setPending(target)
     try {
-      // As in the native picker, switching model uses the new model's default effort.
-      setFailed(!(await directory.select(target)).ok)
+      const { ok } = await directory.select(target)
+      if (!effortOnly) setFailed(!ok)
+      return ok
     } catch {
-      setFailed(true)
+      if (!effortOnly) setFailed(true)
+      return false
     } finally {
       saving.current = false
       setPending(null)
@@ -185,6 +195,17 @@ export function ModelSliderView({ directory, speed, loadProviders, t = key => en
         </div>
       </div>}
       {fastButton}
+      {current && reasoning && reasoning.efforts.length > 0 && <SliderEffort
+        key={JSON.stringify([current.provider, current.model])}
+        reasoning={reasoning} effort={current.reasoningEffort} busy={busy || preview !== null} t={t}
+        apply={effort => {
+          const latest = directory.store.getSnapshot()
+          if (effort !== undefined && !reasoningFor(latest)?.efforts.some(level => level.id === effort)) return Promise.resolve(false)
+          return commit(current, { provider: current.provider, model: current.model,
+            ...(effort === undefined ? {} : { reasoningEffort: effort }),
+          }, true)
+        }}
+      />}
       {showTrack && <div className="dsh-model-slider-track"
         style={{ '--slider-inset': `${railInset}px` } as CSSProperties}
       >

@@ -15,9 +15,12 @@ let snapshot: Snapshot = {
   routable: true,
   current: codex('gpt-5-luna'),
   groups: [{ id: 'codex', models: [
-    { id: 'gpt-5-luna', name: 'Luna' },
+    { id: 'gpt-5-luna', name: 'Luna', reasoning: {
+      efforts: [{ id: 'medium', name: 'Medium' }, { id: 'high', name: 'High' }],
+      defaultEffort: 'medium',
+    } },
     { id: 'gpt-5-terra', name: 'Terra' },
-    { id: 'gpt-5-sol', name: 'Sol' },
+    { id: 'gpt-5-sol', name: 'Sol', reasoning: { efforts: [{ id: 'low', name: 'Low' }] } },
     { id: 'gpt-6.2-astra', name: 'Astra' },
   ] }, { id: 'claude', models: [
     { id: 'claude-sonnet-5-5', name: 'Sonnet' },
