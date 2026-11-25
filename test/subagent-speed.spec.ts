@@ -1,7 +1,7 @@
 /** Exercise real plugin RPC, agent lookup, account routing, and intercepted Codex requests. */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { Context } from '@deepseek-ai/cordis'
@@ -14,7 +14,7 @@ import { saveAccountSession } from '../src/auth/store.js'
 import * as plugin from '../src/index.js'
 import { createFakeConnection } from './fake-connection.js'
 
-test('main speed and per-model subagent defaults stay independent through RPC, routing and restart', async (t) => {
+test('explicit speed follows a session across models and leaves per-model fallbacks independent', async (t) => {
   const home = await mkdtemp(join(tmpdir(), 'subagent-speed-rpc-'))
   const previous = process.env.DSH_HOME
   process.env.DSH_HOME = home
@@ -25,6 +25,7 @@ test('main speed and per-model subagent defaults stay independent through RPC, r
     if (url.includes('/codex/models')) return new Response(JSON.stringify({ models: [
       { slug: 'fast-model', display_name: 'Fast model', service_tiers: supportsFast ? [{ id: 'priority' }] : [] },
       { slug: 'plain-model', display_name: 'Plain model' },
+      { slug: 'other-fast-model', display_name: 'Other Fast model', service_tiers: [{ id: 'priority' }] },
     ] }))
     if (url.endsWith('/codex/responses')) {
       requests.push(JSON.parse(String(init?.body)))
@@ -65,8 +66,14 @@ test('main speed and per-model subagent defaults stay independent through RPC, r
       assert.equal(requests.length, before + 1)
       assert.equal(requests.at(-1)!.service_tier, expected, `${id}/${model}`)
     }
-    const setSpeed = async (sessionId: string, tier: 'standard' | 'fast') => {
-      assert.equal((await call('setSpeed', { sessionId, tier })).ok, true)
+    const setSpeed = async (sessionId: string, tier: 'standard' | 'fast', model?: string) => {
+      assert.equal((await call('setSpeed', { sessionId, tier, model })).ok, true)
+    }
+    const expectSpeed = async (sessionId: string, model: string, tier: 'standard' | 'fast', sessionTier?: 'standard' | 'fast') => {
+      const reply = await call('speed', { sessionId, model })
+      assert.ok(reply.ok)
+      const { fastModels: _, ...speeds } = reply.value as import('../src/auth/rpc.js').SpeedState
+      assert.deepEqual(speeds, { tier, ...(sessionTier === undefined ? {} : { sessionTier }) }, `${sessionId}/${model}`)
     }
     const setDefaults = async (tier: 'standard' | 'fast') => {
       assert.equal((await call('setProviderSettings', { provider: 'codex', settings: {
@@ -74,7 +81,7 @@ test('main speed and per-model subagent defaults stay independent through RPC, r
         accounts: { a: { independentEntry: true } },
       } })).ok, true)
     }
-    return { runtime, call, stream, setSpeed, setDefaults }
+    return { runtime, call, stream, setSpeed, expectSpeed, setDefaults }
   }
   let host: Awaited<ReturnType<typeof mount>> | undefined
   try {
@@ -84,6 +91,7 @@ test('main speed and per-model subagent defaults stay independent through RPC, r
     host = await mount()
     await host.setSpeed('parent', 'fast')
     await host.stream('parent', 'priority')
+    await host.expectSpeed('parent', 'other-fast-model', 'fast', 'fast') // legacy model-less override
     await host.stream('child', undefined, 'fast-model')
     await host.setSpeed('parent', 'standard')
     await host.setDefaults('fast')
@@ -93,12 +101,14 @@ test('main speed and per-model subagent defaults stay independent through RPC, r
     await host.stream('child', undefined, 'plain-model')
     await host.stream('child', 'priority', accountModelId('a', 'fast-model'))
     assert.deepEqual(await host.call('speed', { sessionId: 'child', model: accountModelId('a', 'fast-model') }), {
-      ok: true, value: { tier: 'fast', fastModels: ['fast-model', accountModelId('a', 'fast-model')] },
+      ok: true, value: { tier: 'fast', fastModels: [
+        'fast-model', 'other-fast-model', accountModelId('a', 'fast-model'), accountModelId('a', 'other-fast-model'),
+      ] },
     })
     assert.equal((await host.call('speed', { sessionId: 'child', model: 1 })).ok, false)
     const catalog = await host.call('providerSettings', { provider: 'codex' })
     assert.ok(catalog.ok)
-    assert.deepEqual((catalog.value as { models: { fastTier: boolean }[] }).models.map(row => row.fastTier), [true, false])
+    assert.deepEqual((catalog.value as { models: { fastTier: boolean }[] }).models.map(row => row.fastTier), [true, false, true])
     await host.setDefaults('standard')
     await host.setSpeed('parent', 'fast')
     await host.stream('parent', 'priority')
@@ -107,16 +117,34 @@ test('main speed and per-model subagent defaults stay independent through RPC, r
     await host.setSpeed('child', 'standard')
     await host.stream('child', undefined)
     await host.stream('nested', 'priority')
-    assert.equal((await host.call('speed', { sessionId: 'child', model: 'fast-model' }) as { value: { tier: string } }).value.tier, 'standard')
-    // Model-bound choices survive switching and restart, without changing child defaults.
-    assert.equal((await host.call('setSpeed', { sessionId: 'parent', model: 'fast-model', tier: 'fast' })).ok, true)
-    assert.equal((await host.call('setSpeed', { sessionId: 'parent', model: 'plain-model', tier: 'standard' })).ok, true)
-    assert.equal((await host.call('speed', { sessionId: 'fresh', model: 'fast-model' }) as { value: { tier: string } }).value.tier, 'fast')
+    await host.expectSpeed('child', 'fast-model', 'standard', 'standard')
+    // Model switches only change the model in subsequent RPC/stream calls; no speed write is needed.
+    await host.setSpeed('parent', 'fast', 'fast-model')
+    await host.expectSpeed('parent', 'plain-model', 'standard', 'fast')
+    await host.stream('parent', undefined, 'plain-model')
+    await host.expectSpeed('parent', 'other-fast-model', 'fast', 'fast')
+    await host.stream('parent', 'priority', 'other-fast-model')
+    await host.stream('parent', 'priority', accountModelId('a', 'other-fast-model'))
+    await host.expectSpeed('fresh', 'fast-model', 'fast')
+    await host.expectSpeed('fresh', 'other-fast-model', 'standard')
+    await host.stream('fresh', undefined, 'other-fast-model')
+    await host.stream('child', undefined, 'other-fast-model')
+    await host.stream('nested', 'priority')
+
+    // Standard is also sticky and beats the other model's saved Fast preference.
+    await host.setSpeed('parent', 'standard', accountModelId('a', 'other-fast-model'))
+    await host.expectSpeed('parent', 'fast-model', 'standard', 'standard')
+    await host.stream('parent', undefined)
+    await host.stream('fresh', 'priority')
+    await host.stream('nested', 'priority')
+    const speedsPath = join(home, 'plugins', 'subscriptions', 'model-speeds.json')
+    assert.deepEqual(JSON.parse(await readFile(speedsPath, 'utf8')), { 'fast-model': 'fast', 'other-fast-model': 'standard' })
+
     await host.runtime.dispose()
     host = await mount(true, true)
-    assert.equal((await host.call('speed', { sessionId: 'fresh', model: 'fast-model' }) as { value: { tier: string } }).value.tier, 'fast')
-    assert.equal((await host.call('speed', { sessionId: 'fresh', model: 'plain-model' }) as { value: { tier: string } }).value.tier, 'standard')
-    await host.stream('parent', 'priority') // remembered composer model choice survives
+    await host.expectSpeed('parent', 'fast-model', 'fast') // only the per-model fallback survives restart
+    await host.expectSpeed('parent', 'other-fast-model', 'standard')
+    await host.stream('parent', 'priority')
     await host.stream('child', 'priority') // saved child default stays independent
     await host.stream('child', 'priority', accountModelId('a', 'fast-model'))
     supportsFast = false

@@ -12,6 +12,7 @@ const listeners = new Set<() => void>()
 const selections: Selection[] = []
 let snapshot: Snapshot = {
   status: 'ready',
+  routable: true,
   current: codex('gpt-5-luna'),
   groups: [{ id: 'codex', models: [
     { id: 'gpt-5-luna', name: 'Luna' },
@@ -23,8 +24,9 @@ let snapshot: Snapshot = {
     { id: 'claude-opus-5-5', name: 'Opus' },
   ] }],
 }
-const publish = (current: Selection) => {
-  snapshot = { ...snapshot, current }
+const publish = (current: Selection, loading = false) => {
+  snapshot = { ...snapshot, current, status: loading ? 'loading' : 'ready',
+    routable: loading ? null : snapshot.groups.some(group => group.id === current.provider && group.models.some(model => model.id === current.model)) }
   for (const listener of listeners) listener()
 }
 
@@ -44,7 +46,7 @@ const directory: SliderDirectory = {
   },
 }
 
-let tier: SpeedTier = 'standard'
+let sessionTier: SpeedTier | undefined
 let resolveSolSpeed!: () => void
 const solSpeedGate = new Promise<void>(resolve => { resolveSolSpeed = resolve })
 const speedWrites: { model: string | undefined; tier: SpeedTier }[] = []
@@ -53,13 +55,14 @@ const speed: SpeedSelectInjected = {
     const model = snapshot.current?.model
     const fastModels = ['gpt-5-luna', 'gpt-5-sol', 'gpt-6.2-astra', 'gpt-6.2-sol-removed']
     if (model === 'gpt-5-sol') await solSpeedGate
+    const override = sessionTier === undefined ? {} : { sessionTier }
     return model && fastModels.includes(model)
-      ? { visible: true, tier, model, fastModels }
-      : { visible: false, tier: 'standard', fastModels }
+      ? { visible: true, tier: sessionTier ?? 'standard', model, fastModels, ...override }
+      : { visible: false, tier: 'standard', fastModels, ...override }
   },
   async setSpeed(next, model) {
     speedWrites.push({ model, tier: next })
-    tier = next
+    sessionTier = next
     return true
   },
 }
@@ -71,6 +74,7 @@ Object.assign(window, { modelSliderFixture: {
     : model === 'external-model' ? { provider: 'external', model } : codex(model)),
   speedWrites: () => speedWrites,
   resolveSolSpeed,
+  refreshCatalog: (loading: boolean) => { if (snapshot.current) publish(snapshot.current, loading) },
 } })
 
 const loadProviders = async () => ['codex', 'claude'] as const

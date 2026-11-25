@@ -19,6 +19,7 @@ export function useSliderSpeed(model: string | undefined, speed: SpeedSelectInje
   const enabled = model !== undefined && speed !== undefined
   const [view, setView] = useState<{ model: string; value: SliderSpeed }>()
   const [fastModels, setFastModels] = useState<ReadonlySet<string>>()
+  const [sessionTier, setSessionTier] = useState<SpeedTier>()
   const saving = useRef(false)
 
   // Slot renders may replace the adapters without changing the model or session.
@@ -27,7 +28,6 @@ export function useSliderSpeed(model: string | undefined, speed: SpeedSelectInje
   useLayoutEffect(() => {
     if (!enabled || model === undefined) {
       setView(undefined)
-      setFastModels(undefined)
       return
     }
     const displayedModel = model
@@ -58,6 +58,7 @@ export function useSliderSpeed(model: string | undefined, speed: SpeedSelectInje
           setFastModels(previous => previous?.size === supported.size
             && [...supported].every(id => previous.has(id)) ? previous : supported)
         }
+        setSessionTier(result.sessionTier)
         publish(result.visible ? result.tier : undefined, false, false)
       } catch {
         if (active && revision === started) publish(value.tier, false, true)
@@ -83,6 +84,7 @@ export function useSliderSpeed(model: string | undefined, speed: SpeedSelectInje
       } finally {
         saving.current = false
       }
+      if (saved) setSessionTier(next)
       if (active) publish(saved ? next : tier, false, !saved)
     }
 
@@ -96,7 +98,8 @@ export function useSliderSpeed(model: string | undefined, speed: SpeedSelectInje
 
   if (!enabled || model === undefined) return idle
   const current = view?.model === model ? view.value : idle
-  // Keep the same button in place when support is known, without borrowing another model’s tier.
+  // During a model refresh, use only a confirmed session-wide preference, not
+  // the previous model’s individual default. Keep writes gated until the fresh read.
   return current.tier === undefined && fastModels?.has(model)
-    ? { ...current, visible: true, busy: true } : current
+    ? { ...current, visible: true, tier: sessionTier, busy: true } : current
 }

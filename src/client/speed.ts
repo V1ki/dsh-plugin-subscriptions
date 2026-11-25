@@ -7,6 +7,7 @@ export type SpeedTier = 'standard' | 'fast'
 /** `speed` endpoint value, mirrored from the node half. */
 export interface SpeedState {
   tier: SpeedTier
+  sessionTier?: SpeedTier
   fastModels: string[]
 }
 
@@ -15,6 +16,7 @@ export interface SpeedSelectState {
   visible: boolean
   model?: string
   tier: SpeedTier
+  sessionTier?: SpeedTier
   /** Codex capability list, independent of the currently selected model’s preference. */
   fastModels?: readonly string[]
 }
@@ -78,6 +80,7 @@ export function createSpeedLoader(
       visible, tier: state.tier,
       ...(visible && current ? { model: current.model } : {}),
       ...(current?.provider === 'codex' ? { fastModels: state.fastModels } : {}),
+      ...(state.sessionTier !== undefined ? { sessionTier: state.sessionTier } : {}),
     }
   }
 }

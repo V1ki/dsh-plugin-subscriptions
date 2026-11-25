@@ -84,9 +84,9 @@ export function ModelSliderView({ directory, speed, loadProviders, t = key => en
   const busy = pending !== null || state.status === 'selecting'
 
   const sliderShown = useComposerDisplay('slider') === 'shown'
-  // The directory can retain a saved selection after its route leaves the catalog.
-  // Match the native picker and wait for confirmation when the host is resolving it.
-  const resolved = state.routable !== false && state.routable !== null
+  // DSH retains the last selection and catalog during a refresh (routable: null).
+  // Keep the controls mounted while both still match; a confirmed missing route falls back.
+  const resolved = state.routable !== false && (state.routable !== null || state.status === 'loading')
   const showTrack = sliderShown && resolved && selected >= 0
   const codexModel = resolved && current?.provider === 'codex'
     && state.groups.some(group => group.id === 'codex' && group.models.some(model => model.id === current.model))
