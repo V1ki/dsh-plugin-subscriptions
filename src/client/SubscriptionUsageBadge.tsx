@@ -38,7 +38,7 @@ import { useDismissOnOutsidePointer } from '@deepseek-ai/dsh-client-ui-primitive
 import { useBadgePosition } from './use-badge-position.js'
 import { callSubscriptionsAuth, usageBarColor } from './SubscriptionsSection.js'
 import type { AccountStatus, ProviderStatus, ProviderUsage, SubscriptionProvider, UsageWindow } from './SubscriptionsSection.js'
-import type { ModelDirectoriesLike } from './SpeedSelect.js'
+import type { ModelDirectoriesLike } from './speed.js'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
 import { hostIcon } from './host-icons.js'

@@ -397,14 +397,6 @@ export const subscriptionChromeCss = `
   --dsw-elevation-stroke-color: var(--dsw-alias-border-l1);
   backdrop-filter: var(--dsw-menu-backdrop-filter, none);
 }
-.dsh-subscription-speed button:hover:not(:disabled) {
-  --dsh-subscription-speed-hover: var(--dsw-alias-interactive-bg-hover);
-}
-.dsh-subscription-speed button:active:not(:disabled) {
-  --dsh-subscription-speed-hover: var(--dsw-alias-interactive-bg-active);
-}
-.dsh-subscription-speed button:disabled { opacity: 0.4; cursor: default; }
-.dsh-subscription-speed button:focus-visible,
 .dsh-subscription-usage-pill:focus-visible {
   outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
   outline-offset: 2px;

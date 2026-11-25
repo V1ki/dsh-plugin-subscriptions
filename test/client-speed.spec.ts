@@ -2,7 +2,7 @@ import './css-hook.js'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
-const { createSpeedLoader, createSpeedSetter } = await import('../src/client/SpeedSelect.js')
+const { createSpeedLoader, createSpeedSetter } = await import('../src/client/speed.js')
 
 test('Speed selector resolves a child default for the current model and rechecks model switches', async () => {
   const requests: unknown[] = []
@@ -15,9 +15,9 @@ test('Speed selector resolves a child default for the current model and rechecks
     assert.equal(id, 'child')
     return { load: async () => ({ current }) }
   } }), 'child')
-  assert.deepEqual(await load(), { visible: true, tier: 'fast', model: 'fast-model' })
+  assert.deepEqual(await load(), { visible: true, tier: 'fast', model: 'fast-model', fastModels: ['fast-model'] })
   current = { provider: 'codex', model: 'plain-model' }
-  assert.deepEqual(await load(), { visible: false, tier: 'standard' })
+  assert.deepEqual(await load(), { visible: false, tier: 'standard', fastModels: ['fast-model'] })
   current = { provider: 'claude', model: 'fast-model' }
   assert.deepEqual(await load(), { visible: false, tier: 'standard' })
   assert.deepEqual(requests, [

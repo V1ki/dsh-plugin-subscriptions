@@ -1,0 +1,222 @@
+// Run from the repo root with Chromium installed for Playwright:
+// PLAYWRIGHT_PATH=/path/to/node_modules/playwright node test/model-slider-browser.mjs
+// PLAYWRIGHT_CHROMIUM_EXECUTABLE optionally selects an existing Chromium executable.
+import assert from 'node:assert/strict'
+import { createRequire } from 'node:module'
+import { resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+
+const { PLAYWRIGHT_PATH, PLAYWRIGHT_CHROMIUM_EXECUTABLE } = process.env
+const { chromium } = await import(PLAYWRIGHT_PATH
+  ? pathToFileURL(resolve(PLAYWRIGHT_PATH, 'index.mjs'))
+  : 'playwright')
+const require = createRequire(import.meta.url)
+const requireTsdown = createRequire(require.resolve('tsdown'))
+const { build } = await import(pathToFileURL(requireTsdown.resolve('rolldown')))
+const bundle = await build({
+  input: fileURLToPath(new URL('./model-slider-browser.fixture.tsx', import.meta.url)),
+  platform: 'browser',
+  resolve: { alias: { 'react-dom/client': require.resolve('react-dom/client') } },
+  transform: { define: { 'process.env.NODE_ENV': '"production"' } },
+  plugins: [{ name: 'test-css', load(id) { return id.endsWith('.css') ? 'export default {}' : null } }],
+  output: { format: 'iife' },
+  write: false,
+})
+const browser = await chromium.launch({ headless: true, executablePath: PLAYWRIGHT_CHROMIUM_EXECUTABLE })
+try {
+  const page = await browser.newPage({ offline: true })
+  page.setDefaultTimeout(5000)
+  const errors = []
+  page.on('pageerror', error => errors.push(error.message))
+  await page.route('https://subscriptions.test/', route => route.fulfill({
+    contentType: 'text/html', body: '<div id="root" style="margin: 80px"></div>',
+  }))
+  await page.goto('https://subscriptions.test/')
+  await page.addScriptTag({ content: bundle.output.find(file => file.type === 'chunk').code })
+
+  const slider = page.getByRole('slider', { name: 'Quick model switch' })
+  const expectValue = async (name, position) => {
+    await slider.and(page.locator(`[aria-valuetext="${name}"][aria-valuenow="${position}"]`)).waitFor()
+  }
+  const read = () => page.evaluate(() => window.modelSliderFixture.read())
+  const external = model => page.evaluate(id => window.modelSliderFixture.selectExternally(id), model)
+  const luna = { provider: 'codex', model: 'gpt-5-luna' }
+  const terra = { provider: 'codex', model: 'gpt-5-terra' }
+  const sol = { provider: 'codex', model: 'gpt-5-sol' }
+
+  await expectValue('Luna', 1)
+  const box = await slider.boundingBox()
+  assert.ok(box)
+  assert.equal(box.width, 130, 'the wider rail gives the stops more room')
+  assert.equal(box.height, 32, 'matches the height of neighboring Composer controls')
+  const rail = await slider.locator('.dsh-model-slider-rail').boundingBox()
+  assert.equal(rail?.height, 18, 'the idle rail is legible without hovering')
+  const tick = slider.locator('.dsh-model-slider-tick').nth(1)
+  assert.equal((await tick.boundingBox())?.height, 6, 'step markers are large enough to see')
+  assert.equal(await slider.evaluate(el => getComputedStyle(el).boxShadow), 'none', 'no outer frame')
+
+  const fast = page.getByRole('button', { name: 'Fast mode' })
+  const fastState = value => fast.and(page.locator(`[aria-pressed="${value}"]`))
+  await fastState(false).waitFor()
+  assert.ok((await fast.boundingBox()).x < box.x, 'Fast sits to the left of the rail')
+  await fast.click()
+  await fastState(true).waitFor()
+  const note = page.locator('.dsh-model-slider-caption small')
+  assert.equal(await note.innerText(), 'Faster tokens\n2× the Standard credit rate')
+  const comets = slider.locator('.dsh-model-slider-comet')
+  const durations = await comets.evaluateAll(nodes => nodes.map(el => getComputedStyle(el).animationDuration))
+  assert.ok(new Set(durations).size > 1, 'neutral Fast has independently paced particles')
+  const drift = await comets.first().evaluate(el => {
+    const animation = el.getAnimations()[0]
+    if (!animation) return null
+    animation.pause()
+    const duration = animation.effect.getComputedTiming().duration
+    const xAt = fraction => {
+      animation.currentTime = duration * (1 + fraction) + animation.effect.getTiming().delay
+      return new DOMMatrix(getComputedStyle(el).transform).m41
+    }
+    return [xAt(0.25), xAt(0.75)]
+  })
+  assert.ok(drift && drift[0] > drift[1], 'particles travel from right to left')
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  assert.equal(await comets.first().evaluate(el => getComputedStyle(el).animationName), 'none')
+  await page.emulateMedia({ reducedMotion: 'no-preference' })
+  await fast.click()
+  await fastState(false).waitFor()
+  assert.deepEqual(await page.evaluate(() => window.modelSliderFixture.speedWrites()), [
+    { model: luna.model, tier: 'fast' }, { model: luna.model, tier: 'standard' },
+  ])
+  assert.equal(await comets.count(), 0, 'neutral Standard has no particles')
+  await page.mouse.move(0, 0)
+  await page.waitForFunction(() => getComputedStyle(document.querySelector('.dsh-model-slider-hint')).opacity === '0')
+  const y = box.y + box.height / 2
+  const [left, center, right] = [0.1, 0.36, 0.64].map(fraction => box.x + box.width * fraction)
+  const hint = page.locator('.dsh-model-slider-hint')
+  assert.equal(await hint.evaluate(el => getComputedStyle(el).opacity), '0', 'no frame at rest')
+  // Hover near a different stop: the expanded surface should show the selected model.
+  await page.mouse.move(right, y)
+  await page.waitForFunction(() => getComputedStyle(document.querySelector('.dsh-model-slider-hint')).opacity === '1')
+  assert.equal(await hint.locator('.dsh-model-slider-caption > span').textContent(), 'Luna')
+  const surface = await hint.boundingBox()
+  assert.ok(surface.y < box.y && surface.y + surface.height >= box.y + box.height, 'one surface contains the caption and rail')
+  const bolt = await fast.boundingBox()
+  assert.ok(surface.x <= bolt.x && surface.x + surface.width >= box.x + box.width, 'expanded border encloses bolt and rail')
+  assert.equal(await hint.evaluate(el => getComputedStyle(el).clipPath), 'none')
+  assert.deepEqual(await slider.boundingBox(), box, 'hover does not reflow the Composer')
+  assert.deepEqual(await slider.locator('.dsh-model-slider-rail').boundingBox(), rail, 'only the caption expands on hover')
+  await page.mouse.move(left, y)
+  await page.mouse.down()
+  await page.mouse.move(center, y, { steps: 3 })
+  await expectValue('Terra', 2)
+  assert.equal(await hint.locator('.dsh-model-slider-caption > span').textContent(), 'Terra')
+  const fill = await slider.locator('.dsh-model-slider-fill').boundingBox()
+  const thumb = await slider.locator('.dsh-model-slider-thumb').boundingBox()
+  assert.equal(fill.x, rail.x, 'fill starts at the physical left edge even at intermediate stops')
+  assert.ok(Math.abs(fill.x + fill.width - thumb.x - thumb.width / 2) < 1, 'fill ends beneath the thumb')
+  assert.deepEqual(await read(), { current: luna, selections: [] }, 'intermediate stop only previews')
+  // Move below the rail: real pointer capture must deliver this move and release.
+  await page.mouse.move(right, y + box.height, { steps: 3 })
+  await expectValue('Sol', 3)
+  assert.deepEqual(await read(), { current: luna, selections: [] }, 'final stop only previews until release')
+  await page.mouse.up()
+  await expectValue('Sol', 3)
+  assert.deepEqual(await read(), { current: sol, selections: [sol] }, 'release commits only the final stop once')
+  assert.equal(await fast.isVisible(), true, 'the lightning bolt stays visible before the Sol RPC resolves')
+  assert.equal(await fast.getAttribute('aria-disabled'), 'true')
+  assert.equal(await fast.getAttribute('aria-pressed'), null, 'do not show Luna’s preference as Sol’s')
+  assert.deepEqual(await slider.boundingBox(), box, 'pending Fast state does not shift the slider')
+  await page.evaluate(() => window.modelSliderFixture.resolveSolSpeed())
+  await fastState(false).waitFor()
+  assert.deepEqual(await slider.boundingBox(), box, 'confirmed Fast state does not shift the slider')
+
+  await slider.press('ArrowLeft')
+  await expectValue('Terra', 2)
+  await slider.press('ArrowRight')
+  await expectValue('Sol', 3)
+  const committed = [sol, terra, sol]
+  assert.deepEqual(await read(), { current: sol, selections: committed }, 'arrows commit adjacent stops')
+
+  await external(luna.model)
+  await expectValue('Luna', 1)
+  assert.deepEqual(await read(), { current: luna, selections: committed }, 'shared-store update does not write back')
+
+  await page.mouse.move(left, y)
+  await page.mouse.down()
+  await page.mouse.move(right, y)
+  await expectValue('Sol', 3)
+  await external(terra.model)
+  await page.mouse.up()
+  await expectValue('Terra', 2)
+  assert.deepEqual(await read(), { current: terra, selections: committed }, 'a stale drag does not overwrite external selection')
+  await fast.waitFor({ state: 'detached' })
+  await external('gpt-6.2-astra')
+  await expectValue('Astra', 4)
+  await fast.hover()
+  assert.equal(await note.textContent(), 'May use more of your quota')
+  await fast.click()
+  await fastState(true).waitFor()
+  assert.equal(await note.innerText(), '≈1.5× the token speed\n2× the Standard credit rate')
+  await fast.click()
+  await fastState(false).waitFor()
+  assert.equal(await note.textContent(), 'May use more of your quota')
+  await external('claude-sonnet-5-5')
+  await expectValue('Sonnet', 1)
+  assert.equal(await fast.count(), 0, 'Claude never shows the Fast button')
+  await external(luna.model)
+  await fastState(false).waitFor()
+  const sliderSetting = page.getByRole('combobox', { name: 'Model slider', exact: true })
+  const pickerSetting = page.getByRole('combobox', { name: 'Native model picker' })
+  const composerPicker = page.getByRole('button', { name: 'Composer model' })
+  const quota = page.getByRole('combobox', { name: 'Quota percentages' })
+  const badge = page.getByRole('combobox', { name: 'Status-bar quota display' })
+  assert.equal(await page.locator('.dsh-subscription-settings-card').filter({ has: badge }).getByRole('combobox').count(), 4, 'all display preferences share one card')
+  assert.equal((await quota.boundingBox()).y, (await badge.boundingBox()).y, 'quota preferences share a row')
+  assert.equal((await sliderSetting.boundingBox()).y, (await pickerSetting.boundingBox()).y, 'Composer preferences share a row')
+  assert.equal(await sliderSetting.inputValue(), 'shown')
+  assert.equal(await pickerSetting.inputValue(), 'shown')
+  await sliderSetting.selectOption('hidden')
+  await slider.waitFor({ state: 'detached' })
+  assert.equal(await composerPicker.isVisible(), true, 'slider preference does not affect the native picker')
+  assert.match(await fast.getAttribute('title'), /Faster tokens/)
+  await fast.click()
+  await fastState(true).waitFor()
+  await pickerSetting.selectOption('hidden')
+  await composerPicker.waitFor()
+  assert.equal(await page.getByRole('button', { name: 'Other model surface' }).isVisible(), true)
+  await sliderSetting.selectOption('shown')
+  await slider.waitFor()
+  await composerPicker.waitFor({ state: 'hidden' })
+  await pickerSetting.selectOption('shown')
+  await composerPicker.waitFor()
+  await pickerSetting.selectOption('hidden')
+  await composerPicker.waitFor({ state: 'hidden' })
+  await slider.hover()
+  const providerRow = page.getByRole('group', { name: 'Model provider' })
+  await providerRow.getByRole('button', { name: 'Claude', exact: true }).click()
+  await expectValue('Sonnet', 1)
+  assert.equal(await fast.count(), 0)
+  await slider.hover()
+  await providerRow.getByRole('button', { name: 'Codex', exact: true }).click()
+  await expectValue('Luna', 1)
+  await fast.waitFor()
+  await external('external-model')
+  await slider.waitFor({ state: 'detached' })
+  await fast.waitFor({ state: 'detached' })
+  await composerPicker.waitFor()
+  assert.equal(await pickerSetting.inputValue(), 'hidden', 'fallback does not overwrite the preference')
+  // Codex can still advertise Fast for an ID that is no longer in this session’s model directory.
+  await external('gpt-6.2-sol-removed')
+  assert.deepEqual((await read()).current, { provider: 'codex', model: 'gpt-6.2-sol-removed' })
+  await composerPicker.waitFor()
+  assert.equal(await fast.count(), 0, 'retained Codex selection without a catalog route does not show Fast')
+  await external(luna.model)
+  await expectValue('Luna', 1)
+  await composerPicker.waitFor({ state: 'hidden' })
+  await sliderSetting.selectOption('hidden')
+  await slider.waitFor({ state: 'detached' })
+  await composerPicker.waitFor()
+  assert.deepEqual(errors, [])
+  console.log('PASS ModelSliderView: drag previews, single release commit, arrow keys, and external store changes')
+} finally {
+  await browser.close()
+}
