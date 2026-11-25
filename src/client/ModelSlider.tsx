@@ -24,7 +24,6 @@ interface DirectoryState {
   status: string
 }
 
-/** Structural contract of the host's shared per-session model directory. */
 export interface SliderDirectory {
   load(): Promise<unknown>
   store: { getSnapshot(): DirectoryState; subscribe(listener: () => void): () => void }
@@ -90,8 +89,7 @@ export function ModelSliderView({ directory, speed, loadProviders, t = key => en
 
   const sliderShown = useComposerDisplay('slider') === 'shown'
   const pickerHidden = useComposerDisplay('picker') === 'hidden'
-  // DSH retains the last selection and catalog during a refresh (routable: null).
-  // Keep the controls mounted while both still match; a confirmed missing route falls back.
+  // A catalog refresh retains the old route with routable: null.
   const resolved = state.routable !== false && (state.routable !== null || state.status === 'loading')
   const showTrack = sliderShown && resolved && selected >= 0
   const codexModel = resolved && current?.provider === 'codex'
@@ -132,14 +130,12 @@ export function ModelSliderView({ directory, speed, loadProviders, t = key => en
   const thumb = stops.findIndex(stop => stop.id === (preview ?? (pending?.provider === current?.provider ? pending?.model : undefined)))
   const shown = thumb === -1 ? selected : thumb
   const hint = stops[shown]
-  // Fast is per model: while scrubbing, do not attribute the old preference to the preview.
   const detail = failed ? t('modelSliderFailed')
     : fast.tier === 'fast' && hint && hint.id === current?.model ? fastDescription
     : hint?.premium ? t('modelSliderPremium') : undefined
   const cancel = () => { drag.current = null; setPreview(null) }
 
   const commit = async (origin: Selection | null, target: Selection, effortOnly = false): Promise<boolean> => {
-    // The native picker may have changed the shared selection during a drag.
     const latest = directory.store.getSnapshot()
     if (saving.current || latest.status === 'selecting'
       || latest.current?.provider !== origin?.provider || latest.current?.model !== origin?.model

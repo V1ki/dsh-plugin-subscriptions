@@ -1,6 +1,5 @@
 import type { CSSProperties } from 'react'
 
-// Fixed phases keep the field scattered on first paint and across slider rerenders.
 const comets = [
   { y: 18, phase: .73, size: 1.2, tail: 3, light: .52, seconds: 7.1 },
   { y: 64, phase: .14, size: 2.2, tail: 8, light: .95, seconds: 4.3 },

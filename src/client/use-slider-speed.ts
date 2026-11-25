@@ -13,7 +13,6 @@ interface SliderSpeed {
 
 const idle: SliderSpeed = { visible: false, tier: undefined, busy: false, failed: false, toggle: () => {} }
 
-/** Follow the session speed for the Codex model currently shown by the slider. */
 export function useSliderSpeed(model: string | undefined, speed: SpeedSelectInjected | undefined): SliderSpeed {
   const api = useRef(speed)
   const enabled = model !== undefined && speed !== undefined
@@ -80,7 +79,7 @@ export function useSliderSpeed(model: string | undefined, speed: SpeedSelectInje
       try {
         saved = await adapter.setSpeed(next, displayedModel)
       } catch {
-        // Keep the previously confirmed tier even if the adapter rejects.
+        saved = false
       } finally {
         saving.current = false
       }
@@ -98,8 +97,7 @@ export function useSliderSpeed(model: string | undefined, speed: SpeedSelectInje
 
   if (!enabled || model === undefined) return idle
   const current = view?.model === model ? view.value : idle
-  // During a model refresh, use only a confirmed session-wide preference, not
-  // the previous model’s individual default. Keep writes gated until the fresh read.
+  // While refreshing, only a confirmed session override carries over.
   return current.tier === undefined && fastModels?.has(model)
     ? { ...current, visible: true, tier: sessionTier, busy: true } : current
 }

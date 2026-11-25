@@ -64,7 +64,6 @@ function providerLadder(
   })
 }
 
-/** Build the current provider’s slider from selectable catalog rows only. */
 export function modelSliderStops(
   groups: readonly SliderGroup[],
   current: { provider: string; model: string } | null,
@@ -72,13 +71,10 @@ export function modelSliderStops(
   if (!current || (current.provider !== 'codex' && current.provider !== 'claude')) return []
 
   const ladder = providerLadder(groups, current.provider, current.model)
-  // If the exact selection is not routable, moving its marker to a sibling
-  // would imply the session had selected a different model.
   if (ladder.length < 2 || !ladder.some(({ stop }) => stop.id === current.model)) return []
   return ladder.map(({ stop }) => stop)
 }
 
-/** Restore a remembered model or choose a balanced entry into the provider’s ladder. */
 export function sliderProviderTarget(
   groups: readonly SliderGroup[],
   provider: 'codex' | 'claude',

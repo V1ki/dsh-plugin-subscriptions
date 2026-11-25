@@ -1,7 +1,6 @@
-/** Session speed adapters used by /fast and the shared current-model readers. */
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import { callSubscriptionsAuth } from './SubscriptionsSection.js'
-/** One session's speed choice: standard routing or the fast (priority) tier. */
+
 export type SpeedTier = 'standard' | 'fast'
 
 /** `speed` endpoint value, mirrored from the node half. */
@@ -11,52 +10,27 @@ export interface SpeedState {
   fastModels: string[]
 }
 
-/** Eligibility and current tier for the /fast command. */
 export interface SpeedSelectState {
   visible: boolean
   model?: string
   tier: SpeedTier
   sessionTier?: SpeedTier
-  /** Codex capability list, independent of the currently selected model’s preference. */
   fastModels?: readonly string[]
 }
 
-/**
- * Minimal structural face of ui-model-selection's `ctx.modelDirectories`
- * service (the sanctioned cross-plugin channel: cordis services, not value
- * imports — same mirroring discipline as ToolCallOwnerProps). Both dsh lines
- * ship it with this shape; it replaces rc.2's `connection.api.sessions.models`
- * read, which the 0.1.2-alpha removed along with the whole `.api` face.
- */
+// Structural type: the host exposes the directory through Cordis.
 export interface ModelDirectoriesLike {
-  /** Resolve one session's shared model directory (throws for unknown sessions). */
   directoryFor(sessionId: string): {
-    /** Load the directory; `current` is the session's effective model selection. */
     load(): Promise<{ current: { provider: string; model: string } | null }>
   }
 }
 
-/** Session-bound speed operations. */
 export interface SpeedSelectInjected {
-  /** Load the session's speed state and eligibility. */
   loadSpeed: () => Promise<SpeedSelectState>
-  /** Set the session's speed tier; resolves false when the write failed. */
   setSpeed: (tier: SpeedTier, displayedModel?: string) => Promise<boolean>
 }
 
-/**
- * The `loadSpeed` half of the inject face: the plugin's own speed state plus
- * the host's current model selection (the visibility gate). A model-RPC
- * failure throws rather than answering "hidden" — the caller keeps its last
- * known state, so a transient failure never locks the toggle away.
- *
- * `sessionId` is a plain string: slot and command contexts brand it through
- * different dsh-session copies, and only the service boundary needs one.
- *
- * `models` resolves lazily per call: the ui-model-selection service may
- * register after this plugin applies, and a shell without it (no model seat
- * at all) simply keeps the toggle hidden.
- */
+// Resolve the model service lazily; it can register after this plugin.
 export function createSpeedLoader(
   connection: ConnectionHandle,
   models: () => ModelDirectoriesLike | undefined,
@@ -85,7 +59,6 @@ export function createSpeedLoader(
   }
 }
 
-/** Write speed for a session and report whether it succeeded. */
 export function createSpeedSetter(
   connection: ConnectionHandle,
   sessionId: string,
@@ -102,7 +75,7 @@ export function createSpeedSetter(
       })
       return true
     } catch {
-      return false // The control keeps its last confirmed value on load or save failure.
+      return false
     }
   }
 }

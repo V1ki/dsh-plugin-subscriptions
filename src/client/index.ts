@@ -154,7 +154,6 @@ export function apply(ctx: ClientContext): void {
     inject: videoToolviewInjected,
   }, VideoGenerateToolview))
 
-  // Share the host's per-session model directory with the native picker.
   const models = (): ModelDirectoriesLike | undefined =>
     ctx.get('modelDirectories') as ModelDirectoriesLike | undefined
   const sliderProviders = ['codex', 'claude'] as const
@@ -166,8 +165,7 @@ export function apply(ctx: ClientContext): void {
     scope.slots.inject('conversation.input.right', () => scope.slots.register({
       name: 'conversation.input.right',
       id: 'subscription-model-slider',
-      // The host renders this slot before the native model picker. Sort after
-      // general Composer contributions so the two model controls sit together.
+      // Sort after other Composer tools, next to the native picker.
       priority: 100,
       order: 100,
       locale: NS,

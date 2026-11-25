@@ -50,7 +50,6 @@ function DisplayField({ t, label, hint, value, options, onChange }: {
   )
 }
 
-/** Browser-local display preferences, grouped by where they take effect. */
 export function UsageBadgeDisplaySetting({ t }: { t: Translate }) {
   const mode = useUsageBadgeMode()
   const quota = useQuotaDisplayMode()
