@@ -115,13 +115,24 @@ function isTurnStep(data: Json): data is Json & { turn: number, step: number } {
 }
 
 /**
+ * Whether `value` is a finite, non-negative epoch-millisecond time. A stored
+ * log carries whatever an earlier DSH wrote, so an event can have `null`
+ * (which compares below every number) or another value no day bucket can
+ * name; such an event is skipped rather than put in a 1970 bucket.
+ */
+function isEventTime(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+}
+
+/**
  * The UTC date of an event time, 'YYYY-MM-DD', or `undefined` when the time
  * is no date a day bucket can name. The fold rejects such a sample whole, so
  * the daily sums always add up to the model totals.
  */
-function utcDay(time: number): string | undefined {
+function utcDay(time: unknown): string | undefined {
+  if (!isEventTime(time)) return undefined
   const date = new Date(time)
-  if (!Number.isFinite(date.getTime()) || date.getUTCFullYear() < 0 || date.getUTCFullYear() > 9999) return undefined
+  if (!Number.isFinite(date.getTime()) || date.getUTCFullYear() > 9999) return undefined
   return date.toISOString().slice(0, 10)
 }
 
@@ -158,7 +169,7 @@ export class PreTrackingFolder {
     let context: Route | undefined
     let slot: Slot | undefined
     for (const [index, event] of log.events.entries()) {
-      const own = index >= inherited && event.time < this.trackingStartedAt
+      const own = index >= inherited && isEventTime(event.time) && event.time < this.trackingStartedAt
       if (event.type === HOST_EVENT.requestContext) {
         context = routeOf(event.data) ?? context
       } else if (event.type === HOST_EVENT.retryStarted) {

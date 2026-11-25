@@ -490,7 +490,7 @@ export function buildUsageDashboard(
       accounts,
       ...clearedAt === undefined ? {} : { clearedAt },
       preTracking,
-      preTrackingDays: preTracking.state === 'stored' ? preTracking.total.days : {},
+      preTrackingDays: clearedAt === undefined && preTracking.state === 'stored' ? preTracking.total.days : {},
       observed,
     })
   }

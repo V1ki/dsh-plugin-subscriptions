@@ -632,3 +632,34 @@ test('pre-tracking usage on the tracking-start day adds to that day instead of r
   assert.equal(res.summary.totalTokens, 15)
   assert.equal(res.daily.find(day => day.date === '2026-11-20')?.totalTokens, 15)
 })
+
+
+test('pre-tracking days are ignored when the provider is cleared', () => {
+  const start = Date.UTC(2026, 10, 20, 0, 0, 0)
+  const clearedAt = Date.UTC(2026, 10, 21, 0, 0, 0)
+  const res = buildUsageDashboard({
+    now: NOW,
+    trackingStartedAt: start,
+    providers: [{
+      provider: 'codex',
+      entries: [],
+      loggedIn: [],
+      observed: () => [],
+      clearedAt,
+      preTracking: {
+        state: 'stored',
+        total: {
+          v: 2,
+          trackingStartedAt: start,
+          days: { '2026-11-18': { 'gpt-5.4': counts(100) } },
+          models: { 'gpt-5.4': counts(100) },
+        },
+      },
+      errors: [],
+    }],
+  }, { range: 'all', provider: 'codex' })
+
+  assert.equal(res.summary.totalTokens, 0)
+  assert.equal(res.daily.length, 0)
+  assert.equal(res.cleared, true)
+})

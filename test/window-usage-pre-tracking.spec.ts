@@ -77,6 +77,26 @@ test('pre-tracking fold counts only own events and reports samples with no provi
   assert.equal(fold.result().unattributed, 1)
 })
 
+test('pre-tracking fold ignores events whose time cannot name a day', () => {
+  const at = Date.UTC(2026, 3, 30, 12)
+  const malformed = (turn: number, time: unknown) => ({
+    ...message(at, turn, 1, counts(999)),
+    time: time as number,
+  })
+  const fold = new PreTrackingFolder(START)
+  fold.add(log([
+    malformed(1, null),
+    malformed(2, -1),
+    malformed(3, Number.NaN),
+    malformed(4, Number.POSITIVE_INFINITY),
+    message(at, 5, 1, counts(10)),
+  ]))
+
+  const result = fold.result()
+  assert.deepEqual(result.days.codex, { '2026-04-30': { 'gpt-5.4': counts(10) } })
+  assert.deepEqual(result.totals.codex, { 'gpt-5.4': counts(10) })
+})
+
 test('pre-tracking files keep version 1 totals readable and reject malformed days', () => {
   const total = parsePreTracking({
     v: 2,
