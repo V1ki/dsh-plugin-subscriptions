@@ -1,7 +1,7 @@
 /** Exercise real plugin RPC, agent lookup, account routing, and intercepted Codex requests. */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { Context } from '@deepseek-ai/cordis'
@@ -9,12 +9,15 @@ import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import type { AccountAwareAdapter } from '../src/providers/accounts.js'
-import { accountModelId } from '../src/providers/account-preferences.js'
+import { accountModelId, parseAccountModelId } from '../src/providers/account-preferences.js'
 import { saveAccountSession } from '../src/auth/store.js'
 import * as plugin from '../src/index.js'
 import { createFakeConnection } from './fake-connection.js'
 
-test('explicit speed follows a session across models and leaves per-model fallbacks independent', async (t) => {
+const sol = 'gpt-6.2-sol'
+const astra = 'gpt-6.2-astra'
+
+test('session speed is independent of other conversations and subagent defaults', async (t) => {
   const home = await mkdtemp(join(tmpdir(), 'subagent-speed-rpc-'))
   const previous = process.env.DSH_HOME
   process.env.DSH_HOME = home
@@ -23,9 +26,9 @@ test('explicit speed follows a session across models and leaves per-model fallba
   t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
     if (url.includes('/codex/models')) return new Response(JSON.stringify({ models: [
-      { slug: 'fast-model', display_name: 'Fast model', service_tiers: supportsFast ? [{ id: 'priority' }] : [] },
+      { slug: sol, display_name: 'GPT-6.2 Sol', service_tiers: supportsFast ? [{ id: 'priority' }] : [] },
       { slug: 'plain-model', display_name: 'Plain model' },
-      { slug: 'other-fast-model', display_name: 'Other Fast model', service_tiers: [{ id: 'priority' }] },
+      { slug: astra, display_name: 'GPT-6.2 Astra', service_tiers: [{ id: 'priority' }] },
     ] }))
     if (url.endsWith('/codex/responses')) {
       requests.push(JSON.parse(String(init?.body)))
@@ -53,18 +56,21 @@ test('explicit speed follows a session across models and leaves per-model fallba
     }
     if (agents) {
       register('parent', {}, 'claude')
+      register('fresh', {})
       register('child', { origin: 'subagent', parentSession: 'parent' })
       register('nested', { origin: 'subagent', parentSession: 'child' })
       register('restored-fork', { origin: 'subagent', parentSession: 'absent-parent', isSeeded: true })
       register('ordinary-fork', { parentSession: 'parent', isSeeded: true })
     }
-    const stream = async (id: string | undefined, expected: 'priority' | undefined, model = 'fast-model') => {
+    const stream = async (id: string | undefined, expected: 'priority' | undefined, model = sol) => {
       const before = requests.length
       for await (const chunk of adapterMap.get('codex')!.stream({ provider: 'codex', model, messages: [],
         ...(id === undefined ? {} : { sessionId: id as NonNullable<GenerateOptions['sessionId']> }),
       })) void chunk
       assert.equal(requests.length, before + 1)
-      assert.equal(requests.at(-1)!.service_tier, expected, `${id}/${model}`)
+      const request = requests.at(-1)!
+      assert.equal(request.model, parseAccountModelId(model)?.model ?? model)
+      assert.equal(request.service_tier, expected, `${id}/${model}`)
     }
     const setSpeed = async (sessionId: string, tier: 'standard' | 'fast', model?: string) => {
       assert.equal((await call('setSpeed', { sessionId, tier, model })).ok, true)
@@ -77,7 +83,7 @@ test('explicit speed follows a session across models and leaves per-model fallba
     }
     const setDefaults = async (tier: 'standard' | 'fast') => {
       assert.equal((await call('setProviderSettings', { provider: 'codex', settings: {
-        subagentSpeeds: { 'fast-model': tier, 'plain-model': 'fast' },
+        subagentSpeeds: { [sol]: tier, 'plain-model': 'fast' },
         accounts: { a: { independentEntry: true } },
       } })).ok, true)
     }
@@ -88,21 +94,37 @@ test('explicit speed follows a session across models and leaves per-model fallba
     for (const account of ['a', 'b']) await saveAccountSession('codex', account, {
       accessToken: `synthetic-${account}`, refreshToken: 'synthetic-refresh', accountId: account, expiresAt: Date.now() + 86400000,
     })
+    const legacyDir = join(home, 'plugins', 'subscriptions')
+    const speedsPath = join(legacyDir, 'model-speeds.json')
+    const legacySpeeds = { [sol]: 'standard', [astra]: 'fast' }
+    await mkdir(legacyDir, { recursive: true })
+    await writeFile(speedsPath, JSON.stringify(legacySpeeds))
     host = await mount()
+    const main = host
+    await t.test('switching Sol Standard to Astra ignores legacy Fast until explicitly selected', async () => {
+      await main.expectSpeed('fresh', sol, 'standard')
+      await main.stream('fresh', undefined, sol)
+      await main.stream('fresh', undefined, astra)
+      await main.expectSpeed('fresh', astra, 'standard')
+      await main.setSpeed('fresh', 'fast', astra)
+      await main.expectSpeed('fresh', astra, 'fast', 'fast')
+      await main.stream('fresh', 'priority', astra)
+      await main.stream('parent', undefined, astra)
+    })
     await host.setSpeed('parent', 'fast')
     await host.stream('parent', 'priority')
-    await host.expectSpeed('parent', 'other-fast-model', 'fast', 'fast') // legacy model-less override
-    await host.stream('child', undefined, 'fast-model')
+    await host.expectSpeed('parent', astra, 'fast', 'fast') // legacy model-less override
+    await host.stream('child', undefined, sol)
     await host.setSpeed('parent', 'standard')
     await host.setDefaults('fast')
     await host.stream('parent', undefined)
     for (const child of ['child', 'nested', 'restored-fork']) await host.stream(child, 'priority')
     for (const id of ['ordinary-fork', 'unknown', undefined]) await host.stream(id, undefined)
     await host.stream('child', undefined, 'plain-model')
-    await host.stream('child', 'priority', accountModelId('a', 'fast-model'))
-    assert.deepEqual(await host.call('speed', { sessionId: 'child', model: accountModelId('a', 'fast-model') }), {
+    await host.stream('child', 'priority', accountModelId('a', sol))
+    assert.deepEqual(await host.call('speed', { sessionId: 'child', model: accountModelId('a', sol) }), {
       ok: true, value: { tier: 'fast', fastModels: [
-        'fast-model', 'other-fast-model', accountModelId('a', 'fast-model'), accountModelId('a', 'other-fast-model'),
+        sol, astra, accountModelId('a', sol), accountModelId('a', astra),
       ] },
     })
     assert.equal((await host.call('speed', { sessionId: 'child', model: 1 })).ok, false)
@@ -117,36 +139,37 @@ test('explicit speed follows a session across models and leaves per-model fallba
     await host.setSpeed('child', 'standard')
     await host.stream('child', undefined)
     await host.stream('nested', 'priority')
-    await host.expectSpeed('child', 'fast-model', 'standard', 'standard')
+    await host.expectSpeed('child', sol, 'standard', 'standard')
     // Model switches only change the model in subsequent RPC/stream calls; no speed write is needed.
-    await host.setSpeed('parent', 'fast', 'fast-model')
+    await host.setSpeed('parent', 'fast', sol)
     await host.expectSpeed('parent', 'plain-model', 'standard', 'fast')
     await host.stream('parent', undefined, 'plain-model')
-    await host.expectSpeed('parent', 'other-fast-model', 'fast', 'fast')
-    await host.stream('parent', 'priority', 'other-fast-model')
-    await host.stream('parent', 'priority', accountModelId('a', 'other-fast-model'))
-    await host.expectSpeed('fresh', 'fast-model', 'fast')
-    await host.expectSpeed('fresh', 'other-fast-model', 'standard')
-    await host.stream('fresh', undefined, 'other-fast-model')
-    await host.stream('child', undefined, 'other-fast-model')
+    await host.expectSpeed('parent', astra, 'fast', 'fast')
+    await host.stream('parent', 'priority', astra)
+    await host.stream('parent', 'priority', accountModelId('a', astra))
+    await host.expectSpeed('unknown', sol, 'standard')
+    await host.expectSpeed('unknown', astra, 'standard')
+    await host.stream('unknown', undefined, astra)
+    await host.stream('child', undefined, astra)
     await host.stream('nested', 'priority')
 
-    // Standard is also sticky and beats the other model's saved Fast preference.
-    await host.setSpeed('parent', 'standard', accountModelId('a', 'other-fast-model'))
-    await host.expectSpeed('parent', 'fast-model', 'standard', 'standard')
+    // Explicit Standard is also sticky, without changing another session’s Fast.
+    await host.setSpeed('parent', 'standard', accountModelId('a', astra))
+    await host.expectSpeed('parent', sol, 'standard', 'standard')
     await host.stream('parent', undefined)
     await host.stream('fresh', 'priority')
     await host.stream('nested', 'priority')
-    const speedsPath = join(home, 'plugins', 'subscriptions', 'model-speeds.json')
-    assert.deepEqual(JSON.parse(await readFile(speedsPath, 'utf8')), { 'fast-model': 'fast', 'other-fast-model': 'standard' })
+    assert.deepEqual(JSON.parse(await readFile(speedsPath, 'utf8')), legacySpeeds)
 
     await host.runtime.dispose()
     host = await mount(true, true)
-    await host.expectSpeed('parent', 'fast-model', 'fast') // only the per-model fallback survives restart
-    await host.expectSpeed('parent', 'other-fast-model', 'standard')
-    await host.stream('parent', 'priority')
+    await host.expectSpeed('fresh', astra, 'standard') // previously explicit Fast is not restored
+    await host.stream('fresh', undefined, astra)
+    await host.expectSpeed('parent', sol, 'standard')
+    await host.expectSpeed('parent', astra, 'standard')
+    await host.stream('parent', undefined)
     await host.stream('child', 'priority') // saved child default stays independent
-    await host.stream('child', 'priority', accountModelId('a', 'fast-model'))
+    await host.stream('child', 'priority', accountModelId('a', sol))
     supportsFast = false
     await host.call('providerSettings', { provider: 'codex', force: true })
     await host.stream('child', undefined) // retained setting cannot bypass current capability
@@ -154,7 +177,7 @@ test('explicit speed follows a session across models and leaves per-model fallba
     supportsFast = true
     host = await mount(false)
     await host.call('providerSettings', { provider: 'codex', force: true })
-    await host.stream('child', 'priority') // minimal host uses the saved composer preference
+    await host.stream('child', undefined) // without a registry, do not assume subagent origin
     await host.setSpeed('child', 'fast')
     await host.stream('child', 'priority') // existing explicit speed still works
   } finally {

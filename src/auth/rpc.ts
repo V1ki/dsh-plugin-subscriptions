@@ -80,7 +80,7 @@ export type SpeedTier = 'standard' | 'fast'
 
 /** `speed` endpoint value: effective speed, explicit override, and eligible models. */
 export interface SpeedState {
-  /** Effective speed after applying eligibility and model fallbacks. */
+  /** Effective speed after applying session/subagent settings and model eligibility. */
   tier: SpeedTier
   /** Explicit session speed, if set, even when the requested model is ineligible. */
   sessionTier?: SpeedTier
@@ -88,11 +88,11 @@ export interface SpeedState {
   fastModels: string[]
 }
 
-/** Session overrides plus persisted per-model fallbacks. */
+/** Session speed choices, independent of subagent defaults. */
 export interface SpeedController {
-  /** Pass the current Codex model to resolve eligibility and any model fallback. */
+  /** Pass the current Codex model to resolve eligibility and any configured subagent default. */
   speed(sessionId: string, model?: string): Promise<SpeedState>
-  /** Set the session override and save the preference for only the supplied model, if any. */
+  /** Set the session choice. The optional model is accepted for compatibility. */
   setSpeed(sessionId: string, tier: SpeedTier, model?: string): Promise<void>
 }
 

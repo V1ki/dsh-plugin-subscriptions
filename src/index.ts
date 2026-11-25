@@ -149,7 +149,6 @@ import { createImageGenerateTool } from './tools/image-generate.js'
 import { createVideoGenerateTool, videosDirectory } from './tools/video-generate.js'
 import { ensureConnectAttemptTimeout, proxiedFetch, proxyGetConfig, proxySetConfig, proxyTestConnection, restoreConnectAttemptTimeout } from './http.js'
 import { ProviderSettingsStore, PROVIDER_TOOLS, validatePreferences } from './provider-settings.js'
-import { ModelSpeeds } from './model-speeds.js'
 
 export type { ModelEntry, ProviderUsage, UsageWindow } from './providers/common.js'
 export type { RateLimitConfig, RateLimitWait } from './providers/rate-limit.js'
@@ -832,18 +831,16 @@ export function apply(ctx: Context, config: Config): void {
   // Usage lookups resolve the session through the refresh-aware path, so an
   // expired access token renews instead of failing the lookup.
   const usageFetchers: UsageFetchers = {}
-  // Explicit composer choices follow the session across eligible models. The
-  // saved per-model preferences are only fallbacks, separate from subagent defaults.
-  const modelSpeeds = new ModelSpeeds()
+  // Fast is opt-in for each main session, never restored from a model preference.
+  // Only identified subagents may use the separate Settings-page defaults.
   const speedBySession = new Map<string, SpeedTier>()
   const defaultSpeed = (sessionId: string, model?: string): SpeedTier => {
     if (model === undefined) return 'standard'
-    model = parseAccountModelId(model)?.model ?? model
     // The request itself carries no subagent flag. The live registry exposes
     // durable origin metadata for spawn, fork, and resumed subagents alike.
     const agent = ctx.get('agents')?.get(sessionId as NonNullable<GenerateOptions['sessionId']>)
-    if (agent?.session.header.origin === 'subagent') return preferences.subagentSpeed(model)
-    return modelSpeeds.get(model) ?? 'standard'
+    if (agent?.session.header.origin !== 'subagent') return 'standard'
+    return preferences.subagentSpeed(parseAccountModelId(model)?.model ?? model)
   }
   let codexAdapter: CodexAdapter | undefined
   let grokAdapter: GrokAdapter | undefined
@@ -1247,10 +1244,7 @@ export function apply(ctx: Context, config: Config): void {
         fastModels,
       }
     },
-    async setSpeed(sessionId, tier, model) {
-      // Only the explicitly selected model gets a persisted preference. Publish
-      // the session override after saving so a failed write leaves it unchanged.
-      if (model !== undefined) await modelSpeeds.set(parseAccountModelId(model)?.model ?? model, tier)
+    async setSpeed(sessionId, tier) {
       speedBySession.set(sessionId, tier)
     },
   }
