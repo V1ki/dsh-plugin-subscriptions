@@ -129,9 +129,6 @@ const SERVICE_ERRORS = {
   clearNotRecorded: (provider: string) => `the clear of ${provider} was not recorded`,
 } as const
 
-/** Pre-tracking states that cannot change without a clear, so they are cached. */
-const FINAL_TOTAL_STATES: ReadonlySet<PreTrackingStatus['state']> = new Set(['stored', 'cleared'])
-
 /** One file's parsed content, valid while its stat key is unchanged. */
 interface CachedFile {
   key: string
@@ -334,7 +331,9 @@ export class UsageService {
       const after = await this.readClearCutoff(provider)
       this.ensureOpen()
       if (cutoff !== after || generation !== (this.generations.get(provider) ?? 0)) continue
-      if (FINAL_TOTAL_STATES.has(total.state)) cache.total = total
+      // A clear is final. A version 1 stored total is not: the scan may
+      // still upgrade it to a version 2 one with days, so it is re-read.
+      if (total.state === 'cleared' || (total.state === 'stored' && total.total.v === 2)) cache.total = total
       this.caches.set(provider, cache)
       return { entries: this.combine(provider, files.entries), errors: files.errors, total, ...cutoff === undefined ? {} : { clearedAt: cutoff } }
     }

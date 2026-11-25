@@ -540,3 +540,126 @@ test('quotaCycles exposes current open cycles first, recent historical cycles ne
   assert.equal(hist[0]?.quotaUsedPercent, (44 * 2) % 100)
   assert.equal(hist[0]?.quotaPeakPercent, Math.min(100, (44 * 2) % 100 + 5))
 })
+
+test('pre-tracking daily history joins the all-accounts dashboard, not a single account', () => {
+  // Tracking started on 2026-11-20, after these sessions.
+  const laterStart = Date.UTC(2026, 10, 20, 0, 0, 0)
+  const preTracking = {
+    state: 'stored' as const,
+    total: {
+      v: 2 as const,
+      trackingStartedAt: laterStart,
+      days: {
+        '2026-11-18': { 'gpt-5.4': counts(1000, 100) },
+        '2026-01-01': { 'gpt-5.4-mini': counts(50) },
+      },
+      models: { 'gpt-5.4': counts(1000, 100), 'gpt-5.4-mini': counts(50) },
+    },
+  }
+  const ledger = makeEntry({
+    id: 'ledger',
+    provider: 'codex',
+    account: 'acct-1',
+    kind: 'weekly',
+    status: 'open',
+    countedFrom: Date.UTC(2026, 10, 22, 8),
+    resetsAt: Date.UTC(2026, 10, 25, 0),
+    models: { 'gpt-5.4': counts(300, 100) },
+    days: { '2026-11-22': { 'gpt-5.4': counts(300, 100) } },
+  })
+  const build = (account: string): ReturnType<typeof buildUsageDashboard> => buildUsageDashboard({
+    now: NOW,
+    trackingStartedAt: laterStart,
+    providers: [
+      { provider: 'codex', entries: [ledger], loggedIn: [{ key: 'acct-1', label: 'a1@test.dev' }], observed: () => [], preTracking, errors: [] },
+    ],
+  }, { range: 'all', account })
+
+  const all = build('all')
+  assert.equal(all.summary.totalTokens, 1550)
+  assert.equal(all.summary.activeModels, 2)
+  assert.equal(all.summary.activeDays, 3)
+  assert.equal(all.summary.activeAccounts, 1, 'earlier history invents no account')
+  assert.equal(all.daily.find(day => day.date === '2026-11-18')?.totalTokens, 1100)
+  assert.equal(all.daily.find(day => day.date === '2026-01-01')?.totalTokens, 50)
+  assert.equal(all.daily.find(day => day.date === '2026-11-22')?.totalTokens, 400)
+  assert.equal(all.heatmap.find(day => day.date === '2026-11-18')?.totalTokens, 1100)
+  assert.equal(all.heatmap.find(day => day.date === '2026-01-01'), undefined, 'older than the heatmap window')
+  assert.equal(all.models.find(model => model.model === 'gpt-5.4-mini')?.totalTokens, 50)
+  assert.equal(all.models.find(model => model.model === 'gpt-5.4')?.totalTokens, 1500)
+  assert.equal(all.providers[0]?.totalTokens, 1550)
+  // The account row keeps only what is attributed to it.
+  assert.equal(all.providers[0]?.accounts[0]?.totalTokens, 400)
+
+  const one = build('acct-1')
+  assert.equal(one.summary.totalTokens, 400, 'a single account cannot show unattributed history')
+  assert.equal(one.summary.activeModels, 1)
+  assert.equal(one.summary.activeDays, 1)
+  assert.equal(one.models.some(model => model.model === 'gpt-5.4-mini'), false)
+  assert.equal(one.daily.some(day => day.date === '2026-11-18' || day.date === '2026-01-01'), false)
+  assert.equal(one.daily.find(day => day.date === '2026-11-22')?.totalTokens, 400)
+})
+
+test('pre-tracking usage on the tracking-start day adds to that day instead of replacing the ledger', () => {
+  const start = Date.UTC(2026, 10, 20, 0, 0, 0)
+  const preTracking = {
+    state: 'stored' as const,
+    total: {
+      v: 2 as const,
+      trackingStartedAt: start,
+      days: { '2026-11-20': { 'gpt-5.4': counts(10) } },
+      models: { 'gpt-5.4': counts(10) },
+    },
+  }
+  const ledger = makeEntry({
+    id: 'same-day',
+    provider: 'codex',
+    account: 'acct-1',
+    kind: '5h',
+    status: 'open',
+    countedFrom: start,
+    models: { 'gpt-5.4': counts(5) },
+    days: { '2026-11-20': { 'gpt-5.4': counts(5) } },
+  })
+  const res = buildUsageDashboard({
+    now: NOW,
+    trackingStartedAt: start,
+    providers: [
+      { provider: 'codex', entries: [ledger], loggedIn: [{ key: 'acct-1' }], observed: () => [], preTracking, errors: [] },
+    ],
+  }, { range: 'all' })
+
+  assert.equal(res.summary.totalTokens, 15)
+  assert.equal(res.daily.find(day => day.date === '2026-11-20')?.totalTokens, 15)
+})
+
+
+test('pre-tracking days are ignored when the provider is cleared', () => {
+  const start = Date.UTC(2026, 10, 20, 0, 0, 0)
+  const clearedAt = Date.UTC(2026, 10, 21, 0, 0, 0)
+  const res = buildUsageDashboard({
+    now: NOW,
+    trackingStartedAt: start,
+    providers: [{
+      provider: 'codex',
+      entries: [],
+      loggedIn: [],
+      observed: () => [],
+      clearedAt,
+      preTracking: {
+        state: 'stored',
+        total: {
+          v: 2,
+          trackingStartedAt: start,
+          days: { '2026-11-18': { 'gpt-5.4': counts(100) } },
+          models: { 'gpt-5.4': counts(100) },
+        },
+      },
+      errors: [],
+    }],
+  }, { range: 'all', provider: 'codex' })
+
+  assert.equal(res.summary.totalTokens, 0)
+  assert.equal(res.daily.length, 0)
+  assert.equal(res.cleared, true)
+})

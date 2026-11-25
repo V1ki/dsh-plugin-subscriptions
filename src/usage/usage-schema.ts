@@ -109,13 +109,17 @@ function sanitizeBuckets(value: unknown, split: boolean): ModelSums | undefined 
 
 /** Keep only validated UTC dates and token counters; do not invent dates for old totals. */
 function sanitizeDays(provider: TrackedProvider, value: unknown): DaySums | undefined {
+  return sanitizeDaysWith(value, provider === CACHE_WRITE_SPLIT_PROVIDER)
+}
+
+function sanitizeDaysWith(value: unknown, split: boolean): DaySums | undefined {
   if (!isObject(value)) return undefined
   const days: DaySums = {}
   for (const [day, models] of Object.entries(value)) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return undefined
     const time = new Date(day)
     if (!Number.isFinite(time.getTime()) || time.toISOString().slice(0, 10) !== day) return undefined
-    const sums = sanitizeModels(provider, models)
+    const sums = sanitizeBuckets(models, split)
     if (sums === undefined) return undefined
     days[day] = sums
   }
@@ -209,23 +213,49 @@ export function sanitizeAccount(provider: TrackedProvider, value: unknown): Acco
 }
 
 /**
- * `<provider>/pre-tracking.json`: one provider's total from
- * before `trackingStartedAt`, per model. It holds the disjoint buckets only:
- * DSH logs never record the cache-write duration, so there is no
- * split, Claude included, and no account, session or per-event time.
+ * The sums of every day, per model.
+ */
+export function modelsOfDays(days: DaySums): ModelSums {
+  let models: ModelSums = {}
+  for (const day of Object.keys(days).sort()) models = combineModels(models, days[day])
+  return pruneModels(models)
+}
+
+/**
+ * `<provider>/pre-tracking.json`: one provider's usage from before
+ * `trackingStartedAt`, per UTC day and model. It holds the disjoint buckets
+ * only: DSH logs never record the cache-write duration, so there is no
+ * split, Claude included, and no account or session.
+ *
+ * A version 2 file stores only `days`; `models` is their sum, derived on read
+ * so the two can never disagree. A version 1 file (one total per model, no
+ * days) still reads, so its earlier-history total stays visible, and the scan
+ * runs again to fill in the days.
  */
 export interface PreTrackingTotal {
-  v: 1
+  v: 1 | 2
   /** The tracking start this total was folded up to (exclusive). */
   trackingStartedAt: number
+  /** UTC day sums. Empty for a version 1 total, which stored only `models`. */
+  days: DaySums
+  /** The provider's sums per model. */
   models: ModelSums
 }
 
 /** Parse `pre-tracking.json`; `undefined` when it is not a valid total. */
 export function parsePreTracking(value: unknown): PreTrackingTotal | undefined {
-  if (!isObject(value) || value.v !== 1 || !isInstant(value.trackingStartedAt)) return undefined
-  const models = sanitizeBuckets(value.models, false)
-  return models === undefined ? undefined : { v: 1, trackingStartedAt: value.trackingStartedAt, models }
+  if (!isObject(value) || !isInstant(value.trackingStartedAt)) return undefined
+  if (value.v === 1) {
+    const models = sanitizeBuckets(value.models, false)
+    return models === undefined
+      ? undefined
+      : { v: 1, trackingStartedAt: value.trackingStartedAt, days: {}, models }
+  }
+  if (value.v !== 2) return undefined
+  const days = sanitizeDaysWith(value.days, false)
+  return days === undefined
+    ? undefined
+    : { v: 2, trackingStartedAt: value.trackingStartedAt, days, models: modelsOfDays(days) }
 }
 
 /** Parse `meta.json`; `undefined` when it is not a valid meta file. */

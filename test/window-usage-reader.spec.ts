@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { UsageService, type UsageStoreView } from '../src/usage/service.js'
+import type { PreTrackingStatus } from '../src/usage/pre-tracking.js'
 import { createUsageHistoryController, UsageQueryRejected } from '../src/usage/usage-rpc.js'
 import { buildUsageView } from '../src/usage/window-view.js'
 import type { WindowUsageEntry } from '../src/usage/window-tracker.js'
@@ -57,7 +58,15 @@ test('another process clear marker invalidates previously shown provider totals 
     store,
     preTracking: { status: async () => {
       reads++
-      return { state: 'stored', total: { v: 1, trackingStartedAt: started, models: { history: tokens(13) } } }
+      return {
+        state: 'stored',
+        total: {
+          v: 2,
+          trackingStartedAt: started,
+          days: { '2026-11-20': { history: tokens(13) } },
+          models: { history: tokens(13) },
+        },
+      }
     } },
   })
   t.after(() => service.dispose())
@@ -122,4 +131,37 @@ test('accountUsage uses single snapshot load and falls back to default account w
   assert.equal(readdirCalls, 1, 'accountUsage must load provider files only once per request')
   assert.equal(res.account, 'logged-in', 'removed account falls back to default logged-in account')
   assert.equal(res.view.account, 'logged-in')
+})
+
+test('a version 1 before-tracking total is re-read, so an upgraded total shows without a restart', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'usage-reader-legacy-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const store: UsageStoreView = {
+    dir, ready: Promise.resolve(), trackingStartedAt: started, tracker: undefined,
+    entries: () => [], unsavedDeltas: () => new Map(), unsavedDayDeltas: () => new Map(),
+    clearedAt: () => undefined,
+    clearProvider: async () => { throw new Error('not called') },
+  }
+  let total: PreTrackingStatus = {
+    state: 'stored',
+    total: { v: 1, trackingStartedAt: started, days: {}, models: { history: tokens(13) } },
+  }
+  const service = new UsageService({ store, preTracking: { status: async () => total } })
+  t.after(() => service.dispose())
+
+  assert.equal((await service.snapshot('codex')).total.state, 'stored')
+  total = {
+    state: 'stored',
+    total: {
+      v: 2,
+      trackingStartedAt: started,
+      days: { '2026-11-20': { history: tokens(13) } },
+      models: { history: tokens(13) },
+    },
+  }
+  const upgraded = await service.snapshot('codex')
+  assert.equal(upgraded.total.state, 'stored')
+  if (upgraded.total.state !== 'stored') return
+  assert.equal(upgraded.total.total.v, 2)
+  assert.deepEqual(upgraded.total.total.days, { '2026-11-20': { history: tokens(13) } })
 })

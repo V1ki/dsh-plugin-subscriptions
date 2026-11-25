@@ -81,7 +81,7 @@ Antigravity 用量优先读取 `retrieveUserQuotaSummary`，只展示服务端�
 
 ![额度周期统计双轴组合图：周期 Token 用量与额度消耗百分比对比](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/usage-quota-cycles.png)
 
-插件在本地 `~/.dsh/plugins/subscriptions/usage/`（权限 `0600`）保存汇总计数、周期额度占比和窗口元数据，不在这里保存提示词、凭据或逐请求日志。**清空历史** 支持清空单个服务商或全部服务商在该插件中的本地用量历史，不影响 DSH 会话、账号或实时额度。打开看板不会额外请求额度，也不估算费用。
+启用统计之前的 DSH 会话用量，会在首次扫描时按事件时间汇总为各服务商的 UTC 逐日数据，仅在 **全部账号** 视图计入。插件在本地 `~/.dsh/plugins/subscriptions/usage/`（权限 `0600`）保存汇总计数、周期额度占比和窗口元数据，不在这里保存提示词、凭据或逐请求日志。**清空历史** 支持清空单个服务商或全部服务商在该插件中的本地用量历史，不影响 DSH 会话、账号或实时额度。打开看板不会额外请求额度，也不估算费用。
 
 ## Provider 一览
 
