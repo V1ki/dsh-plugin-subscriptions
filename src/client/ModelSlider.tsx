@@ -195,17 +195,6 @@ export function ModelSliderView({ directory, speed, loadProviders, t = key => en
         </div>
       </div>}
       {fastButton}
-      {current && reasoning && reasoning.efforts.length > 0 && <SliderEffort
-        key={JSON.stringify([current.provider, current.model])}
-        reasoning={reasoning} effort={current.reasoningEffort} busy={busy || preview !== null} t={t}
-        apply={effort => {
-          const latest = directory.store.getSnapshot()
-          if (effort !== undefined && !reasoningFor(latest)?.efforts.some(level => level.id === effort)) return Promise.resolve(false)
-          return commit(current, { provider: current.provider, model: current.model,
-            ...(effort === undefined ? {} : { reasoningEffort: effort }),
-          }, true)
-        }}
-      />}
       {showTrack && <div className="dsh-model-slider-track"
         style={{ '--slider-inset': `${railInset}px` } as CSSProperties}
       >
@@ -268,6 +257,17 @@ export function ModelSliderView({ directory, speed, loadProviders, t = key => en
           </div>
         </div>
       </div>}
+      {current && reasoning && reasoning.efforts.length > 0 && <SliderEffort
+        key={JSON.stringify([current.provider, current.model])}
+        reasoning={reasoning} effort={current.reasoningEffort} busy={busy || preview !== null} t={t}
+        apply={effort => {
+          const latest = directory.store.getSnapshot()
+          if (effort !== undefined && !reasoningFor(latest)?.efforts.some(level => level.id === effort)) return Promise.resolve(false)
+          return commit(current, { provider: current.provider, model: current.model,
+            ...(effort === undefined ? {} : { reasoningEffort: effort }),
+          }, true)
+        }}
+      />}
       <span className="dsh-model-slider-status" role="status">
         {fast.failed ? t('modelSliderFastFailed') : failed && selected >= 0 ? t('modelSliderFailed') : ''}
       </span>

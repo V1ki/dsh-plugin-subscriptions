@@ -93,7 +93,7 @@ export const modelSliderCss = `
 .dsh-model-slider-brain[data-explicit="true"] .dsh-model-slider-brain-lines { stroke: var(--dsw-alias-bg-layer-2, #303032); }
 .dsh-model-slider-brain[aria-disabled="true"] { cursor: progress; }
 .dsh-model-slider-effort-menu {
-  position: absolute; z-index: 2; bottom: calc(100% + 6px); inset-inline-start: -5px;
+  position: absolute; z-index: 2; bottom: calc(100% + 6px); inset-inline-end: -5px;
   width: max-content; min-width: 130px; max-width: 210px; padding: 5px;
   max-height: min(45vh, 240px); overflow: auto;
   border-radius: var(--dsw-radius-lg, 12px); border: 1px solid var(--dsw-alias-border-l3, #555);
