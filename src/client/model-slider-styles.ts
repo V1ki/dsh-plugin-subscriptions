@@ -39,6 +39,9 @@ export const modelSliderCss = `
 .dsh-model-slider-rail[data-premium="true"] .dsh-model-slider-fill {
   background: linear-gradient(100deg, #7099ff, #a27af7, #7446ee);
 }
+.dsh-model-slider-rail[data-premium="true"][data-provider="claude"] .dsh-model-slider-fill {
+  background: linear-gradient(100deg, #ffc477, #f99350, #d96036);
+}
 .dsh-model-slider-tick, .dsh-model-slider-thumb {
   position: absolute; top: 50%; transform: translate(-50%, -50%); border-radius: 50%;
 }

@@ -22,6 +22,7 @@ let snapshot: Snapshot = {
   ] }, { id: 'claude', models: [
     { id: 'claude-sonnet-5-5', name: 'Sonnet' },
     { id: 'claude-opus-5-5', name: 'Opus' },
+    { id: 'claude-fable-5-2', name: 'Fable' },
   ] }],
 }
 const publish = (current: Selection, loading = false) => {

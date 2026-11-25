@@ -231,7 +231,9 @@ export function ModelSliderView({ directory, speed, loadProviders, t = key => en
             if (!busy && current && drag.current === null) commitStop(current, stops[Math.max(0, Math.min(max, next))]!.id)
           }}
         >
-          <div className="dsh-model-slider-rail" aria-hidden="true" data-premium={stops[shown]!.premium}>
+          <div className="dsh-model-slider-rail" aria-hidden="true"
+            data-premium={stops[shown]!.premium} data-provider={current?.provider}
+          >
             <div className="dsh-model-slider-progress">
               <span className="dsh-model-slider-fill" style={{ right: shown === max ? 'var(--fill-start)' : distance(max - shown) }} />
             </div>
