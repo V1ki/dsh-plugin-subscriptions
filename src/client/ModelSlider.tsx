@@ -170,26 +170,15 @@ export function ModelSliderView({ directory, speed, loadProviders, t = key => en
 
   return (
     <div className="dsh-model-slider" onPointerEnter={() => { if (sliderShown) void refreshProviders() }}
-      onFocusCapture={() => { if (sliderShown) void refreshProviders() }}
+      onFocusCapture={event => {
+        if (event.target.matches(':focus-visible')) setOpened(true)
+        if (sliderShown) void refreshProviders()
+      }}
       onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setOpened(false) }}
       onKeyDown={event => { if (event.key === 'Escape') setOpened(false) }}
       data-subscriptions-model-slider-active={showTrack ? "true" : undefined}
       data-open={opened} data-fast={fast.tier === 'fast'} data-preview={preview !== null} data-failed={failed}>
       <style>{modelSliderCss}{sliderCometCss}</style>
-      {showTrack && <div className="dsh-model-slider-hint">
-        <div className="dsh-model-slider-caption">
-          {canSwitchProvider && <div className="dsh-model-slider-providers" role="group" aria-label={t('modelSliderProviders')}
-            onPointerDown={event => event.stopPropagation()}
-          >
-            {providerOptions.map(provider => <button key={provider} type="button"
-              aria-pressed={current?.provider === provider} aria-disabled={busy}
-              onClick={() => { if (!busy) switchProvider(provider) }}
-            >{providerLabels[provider]}</button>)}
-          </div>}
-          {hint && <span>{hint.name}</span>}
-          {detail && <small>{detail}</small>}
-        </div>
-      </div>}
       {fastButton}
       {showTrack && <div className="dsh-model-slider-track"
         style={{ '--slider-inset': `${railInset}px` } as CSSProperties}
@@ -251,6 +240,20 @@ export function ModelSliderView({ directory, speed, loadProviders, t = key => en
               <span className="dsh-model-slider-thumb" style={{ left: distance(shown) }} />
             </div>
           </div>
+        </div>
+      </div>}
+      {showTrack && <div className="dsh-model-slider-hint">
+        <div className="dsh-model-slider-caption">
+          {canSwitchProvider && <div className="dsh-model-slider-providers" role="group" aria-label={t('modelSliderProviders')}
+            onPointerDown={event => event.stopPropagation()}
+          >
+            {providerOptions.map(provider => <button key={provider} type="button"
+              aria-pressed={current?.provider === provider} aria-disabled={busy}
+              onClick={() => { if (!busy) switchProvider(provider) }}
+            >{providerLabels[provider]}</button>)}
+          </div>}
+          {hint && <span>{hint.name}</span>}
+          {detail && <small>{detail}</small>}
         </div>
       </div>}
       {current && reasoning && reasoning.efforts.length > 0 && <SliderEffort

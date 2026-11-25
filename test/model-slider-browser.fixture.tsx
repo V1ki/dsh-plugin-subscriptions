@@ -84,6 +84,7 @@ Object.assign(window, { modelSliderFixture: {
 const loadProviders = async () => ['codex', 'claude'] as const
 installComposerPickerVisibility()
 createRoot(document.getElementById('root')!).render(<>
+  <button>Before model controls</button>
   <div data-composer-card>
     <ModelSliderView directory={directory} speed={speed} loadProviders={loadProviders} />
     <div data-slot="conversation.input.model" style={{ display: 'contents' }}><button>Composer model</button></div>

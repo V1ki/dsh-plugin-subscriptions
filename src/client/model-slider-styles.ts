@@ -81,7 +81,8 @@ export const modelSliderCss = `
   color: var(--dsw-alias-label-secondary, #bbb);
 }
 .dsh-model-slider-providers button[aria-pressed="true"] { color: var(--dsw-alias-label-primary, #fff); font-weight: 600; }
-.dsh-model-slider-providers button:hover { background: var(--dsw-alias-interactive-bg-hover, #494949); }
+.dsh-model-slider-providers button:is(:hover, :focus-visible) { background: var(--dsw-alias-interactive-bg-hover, #494949); }
+.dsh-model-slider-providers button:focus-visible { outline: 2px solid currentColor; outline-offset: -2px; }
 .dsh-model-slider-providers button + button { margin-inline-start: 4px; position: relative; }
 .dsh-model-slider-providers button + button::before {
   content: ""; position: absolute; inset-inline-start: -5px; top: 4px; bottom: 4px; border-inline-start: 1px solid var(--dsw-alias-border-l3, #666);
