@@ -244,8 +244,13 @@ export function accountKeyOf(provider: ProviderId, session: StoredSession): stri
       return (session as KimiSession).account ?? tokenHash(session.refreshToken)
     case 'qwen':
       return (session as QwenSession).account ?? tokenHash(session.refreshToken)
-    case 'glm':
-      return (session as GlmSession).account ?? tokenHash(session.refreshToken)
+    case 'glm': {
+      // The same email can exist on both stations; the key must distinguish them.
+      const glm = session as GlmSession
+      return glm.account === undefined
+        ? tokenHash(session.refreshToken)
+        : JSON.stringify([glm.station, glm.account])
+    }
   }
 }
 

@@ -145,6 +145,18 @@ test('qwen-platform: the key product type selects the endpoint', () => {
   assert.match(QWEN_USER_AGENT, /^QwenCode\//)
 })
 
+test('glm: the account key distinguishes bigmodel from zai for the same email', () => {
+  const base: GlmSession = {
+    accessToken: 'kid.secret',
+    refreshToken: 'biz',
+    expiresAt: Date.now() + 3_600_000,
+    station: 'bigmodel',
+    account: 'dev@example.com',
+  }
+  assert.notEqual(accountKeyOf('glm', base), accountKeyOf('glm', { ...base, station: 'zai' }))
+  assert.equal(accountKeyOf('glm', base), accountKeyOf('glm', { ...base, accessToken: 'new.secret' }))
+})
+
 test('qwen-platform: two keys on the same plan are distinct accounts', () => {
   const first = qwenSessionFromKey('sk-sp-first')
   const second = qwenSessionFromKey('sk-sp-second')
@@ -242,7 +254,7 @@ test('glm(bigmodel): poll ready -> raw business token -> reuse key -> mint id.se
   assert.equal(session.refreshToken, 'bm-account-token')
   assert.equal(session.station, 'bigmodel')
   assert.equal(session.account, 'me@example.com')
-  assert.equal(accountKeyOf('glm', session), 'me@example.com')
+  assert.equal(accountKeyOf('glm', session), JSON.stringify(['bigmodel', 'me@example.com']))
 
   const initCall = calls.find(call => call.url === ZCODE_INIT)
   assert.equal((initCall?.init?.headers as Record<string, string>).authorization !== undefined, true)

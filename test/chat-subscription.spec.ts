@@ -113,6 +113,41 @@ test('chat subscription: logged out lists nothing; logged in lists the built-in 
   assert.deepEqual(models.map(model => model.id), ['kimi-for-coding', 'k3'])
 })
 
+test('chat subscription: menu reads use the cache while scheduled refreshes honor the TTL', async () => {
+  let calls = 0
+  const adapter = adapterFor(harness({ accounts: { dev: session() } }).tokens, {
+    definition: definition({
+      discover: async () => {
+        calls += 1
+        return [{ id: `model-${String(calls)}`, name: `Model ${String(calls)}` }]
+      },
+    }),
+  })
+  const ids = async (preferCached: boolean, at?: string): Promise<string[]> =>
+    (await adapter.listOwnModels('kimi', 'dev', undefined, preferCached)).map(model => model.id)
+
+  assert.deepEqual(await ids(true), ['model-1'])
+  // A menu read never refetches, even before the TTL.
+  assert.deepEqual(await ids(true), ['model-1'])
+  assert.equal(calls, 1)
+  // A scheduled refresh inside the TTL keeps the fresh cache.
+  assert.deepEqual(await ids(false), ['model-1'])
+  assert.equal(calls, 1)
+
+  const realNow = Date.now
+  Date.now = () => realNow() + 5 * 60_000 + 1
+  try {
+    // Menu reads still serve the last known catalog without touching the network.
+    assert.deepEqual(await ids(true), ['model-1'])
+    assert.equal(calls, 1)
+    // The hourly job (preferCached=false) refetches once the TTL lapses.
+    assert.deepEqual(await ids(false), ['model-2'])
+    assert.equal(calls, 2)
+  } finally {
+    Date.now = realNow
+  }
+})
+
 test('chat subscription: discovery replaces the static catalog, failure falls back to it', async () => {
   const discovered: ChatSubscriptionDiscovered[] = [{ id: 'k3.1-pro', name: 'K3.1 Pro', contextWindow: 1_048_576 }]
   const advertised = adapterFor(harness({ accounts: { dev: session() } }).tokens, {

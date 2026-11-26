@@ -893,20 +893,24 @@ export class SubscriptionsAuthController implements AuthController {
       const credentials = await attempt.wait()
       if (this.claims.get('qwen') !== claim) return
       const current = await getAccountSession('qwen', account) as QwenSession | undefined
-      if (current === undefined) throw new Error('the Qwen API key was removed; save it and log in again')
+      // The account may already be gone (logout) when the flow completes.
+      if (current === undefined) return
       let cliAccessToken: string | undefined
       try {
         cliAccessToken = await exchangeQwenCliToken(credentials.accessToken)
       } catch {
         // Usage will retry the exchange with the stored device token.
       }
-      const session: QwenSession = {
-        ...current,
-        console: { ...credentials, ...cliAccessToken === undefined ? {} : { cliAccessToken } },
-      }
-      // Claim check above covers a key replacement started during the login;
-      // the write still uses the explicit account key.
-      await saveAccountSession('qwen', account, session as never)
+      const console = { ...credentials, ...cliAccessToken === undefined ? {} : { cliAccessToken } }
+      // The exchange is a network call: logout or key replacement may have
+      // happened since the snapshot above. Apply the console fields only, and
+      // only when the account and its inference key are still the same.
+      const wrote = await updateAccountSession('qwen', account, candidate => {
+        if (this.claims.get('qwen') !== claim) return undefined
+        if (candidate.accessToken !== current.accessToken) return undefined
+        return { ...candidate, console }
+      })
+      if (!wrote) return
       this.lastError.delete('qwen')
       this.onAuthChanged('qwen', account)
     } catch (error) {
@@ -932,13 +936,16 @@ export class SubscriptionsAuthController implements AuthController {
     } catch (error) {
       throw new BadRequest(error instanceof Error ? error.message : String(error))
     }
-    // Preserve a linked console session only when the key identity is the
-    // same; a different key is a different account and must link its own.
-    const account = accountKeyOf(provider, session)
-    const existing = (await listAccounts('qwen')).find(entry => entry.key === account)?.session as QwenSession | undefined
+    // Reuse a stored row for the same credential (including a legacy row keyed
+    // by the bare plan name), so re-saving a key updates it instead of
+    // appending a duplicate; a different key is a different account.
+    const accounts = await listAccounts('qwen')
+    const same = accounts.find(entry => (entry.session as QwenSession).accessToken === session.accessToken)
+    const account = same?.key ?? accountKeyOf(provider, session)
+    const existing = same?.session as QwenSession | undefined
     if (existing?.console !== undefined) session = { ...session, console: existing.console }
     this.claim(provider)
-    await this.persist(provider, session)
+    await saveAccountSession('qwen', account, session as never)
     this.lastError.delete(provider)
     this.onAuthChanged(provider, account)
   }
@@ -949,9 +956,9 @@ export class SubscriptionsAuthController implements AuthController {
     try {
       const session = await attempt.wait()
       if (this.claims.get('glm') !== claim) return
-      await this.persist('glm', session)
+      const account = await this.persist('glm', session)
       this.lastError.delete('glm')
-      this.onAuthChanged('glm', accountKeyOf('glm', session))
+      this.onAuthChanged('glm', account)
     } catch (error) {
       if (this.claims.get('glm') !== claim) return
       if (!(error instanceof Error && error.message === 'login cancelled')) {
@@ -993,7 +1000,7 @@ export class SubscriptionsAuthController implements AuthController {
     }
   }
 
-  private async persist(provider: ProviderId, session: StoredSession): Promise<void> {
+  private async persist(provider: ProviderId, session: StoredSession): Promise<string> {
     // Keyed by the account's stable identity: re-logging the same account
     // updates in place, a different account appends.
     let account = accountKeyOf(provider, session)
@@ -1004,7 +1011,19 @@ export class SubscriptionsAuthController implements AuthController {
       const existing = await listAccounts('kimi')
       if (existing.length === 1) account = existing[0].key
     }
+    if (provider === 'glm') {
+      // Account keys now include the station (the same email can exist on
+      // bigmodel and zai). A row written before that change is still keyed by
+      // the bare email: reuse it for the same station instead of duplicating.
+      const glm = session as GlmSession
+      const existing = (await listAccounts('glm')).find(entry => {
+        const stored = entry.session as GlmSession
+        return stored.account !== undefined && stored.account === glm.account && stored.station === glm.station
+      })
+      if (existing !== undefined) account = existing.key
+    }
     await saveAccountSession(provider, account, session as never)
+    return account
   }
 
   /**
