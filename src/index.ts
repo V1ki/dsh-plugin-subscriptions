@@ -77,9 +77,11 @@ import {
 import {
   accountKeyOf,
   deleteAccountSession,
+  getAccountSession,
   listAccounts,
   saveAccountSession,
   setDefaultAccount,
+  updateAccountSession,
   PROVIDER_IDS,
 } from './auth/store.js'
 import type {
@@ -648,7 +650,12 @@ export class SubscriptionsAuthController implements AuthController {
     const detail = this.lastError.get(provider)
     const clientVersion = await this.clientVersions[provider]?.()
     return {
-      ...provider === 'qwen' ? { quotaLinked: (entries[0]?.session as QwenSession | undefined)?.console !== undefined } : {},
+      ...provider === 'qwen'
+        ? { quotaLinked: entries.some(({ session }) => {
+          const console = (session as QwenSession).console
+          return console !== undefined && console.expiresAt > Date.now()
+        }) }
+        : {},
       busy: this.flows.isBusy(provider) || this.deviceFlows.isBusy(provider)
         || this.zcodeLogins.has(provider) || this.qwenConsoleLogins.has(provider)
         || this.finalizing.has(provider)
@@ -664,6 +671,12 @@ export class SubscriptionsAuthController implements AuthController {
           ...provider === 'qwen' ? {} : { expiresAt: session.expiresAt },
           ...account === undefined ? {} : { account },
           ...plan === undefined ? {} : { plan },
+          ...provider === 'qwen'
+            ? { quotaLinked: (() => {
+              const console = (session as QwenSession).console
+              return console !== undefined && console.expiresAt > Date.now()
+            })() }
+            : {},
         }
       }),
       ...detail === undefined ? {} : { detail },
@@ -671,7 +684,7 @@ export class SubscriptionsAuthController implements AuthController {
     }
   }
 
-  async login(provider: ProviderId, method?: LoginMethod): Promise<{ authorizeUrl: string; userCode?: string }> {
+  async login(provider: ProviderId, method?: LoginMethod, account?: string): Promise<{ authorizeUrl: string; userCode?: string }> {
     if (!this.providerEnabled(provider)) {
       throw new BadRequest(`provider ${provider} is disabled; enable it manually in Settings > Subscriptions first`)
     }
@@ -725,6 +738,14 @@ export class SubscriptionsAuthController implements AuthController {
       if (accounts.length === 0) {
         throw new BadRequest('Save the Qwen API key first, then log in to read quota')
       }
+      // Link the console to the account the user clicked, never to whichever
+      // account happens to be the default.
+      const selected = account === undefined
+        ? (accounts.length === 1 ? accounts[0] : undefined)
+        : accounts.find(entry => entry.key === account)
+      if (selected === undefined) {
+        throw new BadRequest('Choose which Qwen account this quota login belongs to')
+      }
       this.qwenConsoleStarting = true
       let attempt: QwenConsoleAttempt
       try {
@@ -734,7 +755,7 @@ export class SubscriptionsAuthController implements AuthController {
       }
       this.qwenConsoleLogins.set('qwen', attempt)
       this.beginFinalizing('qwen')
-      void this.completeQwenConsole(attempt)
+      void this.completeQwenConsole(attempt, selected.key)
       return { authorizeUrl: attempt.authorizeUrl }
     }
     if (provider === 'glm') {
@@ -866,13 +887,12 @@ export class SubscriptionsAuthController implements AuthController {
   }
 
   /** Merge a finished console login into the Qwen key session (quota only). */
-  private async completeQwenConsole(attempt: QwenConsoleAttempt): Promise<void> {
+  private async completeQwenConsole(attempt: QwenConsoleAttempt, account: string): Promise<void> {
     const claim = this.claim('qwen')
     try {
       const credentials = await attempt.wait()
       if (this.claims.get('qwen') !== claim) return
-      const accounts = await listAccounts('qwen')
-      const current = accounts[0]
+      const current = await getAccountSession('qwen', account) as QwenSession | undefined
       if (current === undefined) throw new Error('the Qwen API key was removed; save it and log in again')
       let cliAccessToken: string | undefined
       try {
@@ -881,12 +901,14 @@ export class SubscriptionsAuthController implements AuthController {
         // Usage will retry the exchange with the stored device token.
       }
       const session: QwenSession = {
-        ...(current.session as QwenSession),
+        ...current,
         console: { ...credentials, ...cliAccessToken === undefined ? {} : { cliAccessToken } },
       }
-      await saveAccountSession('qwen', current.key, session as never)
+      // Claim check above covers a key replacement started during the login;
+      // the write still uses the explicit account key.
+      await saveAccountSession('qwen', account, session as never)
       this.lastError.delete('qwen')
-      this.onAuthChanged('qwen', current.key)
+      this.onAuthChanged('qwen', account)
     } catch (error) {
       if (this.claims.get('qwen') !== claim) return
       if (!(error instanceof Error && error.message === 'login cancelled')) {
@@ -910,14 +932,15 @@ export class SubscriptionsAuthController implements AuthController {
     } catch (error) {
       throw new BadRequest(error instanceof Error ? error.message : String(error))
     }
-    // Replacing the inference key must not silently disconnect the console
-    // session that provides quota.
-    const existing = (await listAccounts('qwen'))[0]?.session as QwenSession | undefined
+    // Preserve a linked console session only when the key identity is the
+    // same; a different key is a different account and must link its own.
+    const account = accountKeyOf(provider, session)
+    const existing = (await listAccounts('qwen')).find(entry => entry.key === account)?.session as QwenSession | undefined
     if (existing?.console !== undefined) session = { ...session, console: existing.console }
     this.claim(provider)
     await this.persist(provider, session)
     this.lastError.delete(provider)
-    this.onAuthChanged(provider, accountKeyOf(provider, session))
+    this.onAuthChanged(provider, account)
   }
 
   /** Drive one ZCode login through provisioning to a stored GLM session. */
@@ -1097,19 +1120,6 @@ export function apply(ctx: Context, config: Config): void {
   const overridden = new Set<ProviderId>(
     PROVIDER_IDS.filter(provider => (config.models?.[provider]?.length ?? 0) > 0),
   )
-  // 0.9.14 stored a chat.qwen.ai OAuth session for this route. Qwen 千问AI平台
-  // is a different product (API key, different gateway), so those sessions can
-  // no longer authenticate anything: drop them once instead of showing a card
-  // whose requests are guaranteed to fail.
-  void (async () => {
-    try {
-      for (const { key, session } of await listAccounts('qwen')) {
-        if ((session as QwenSession).baseURL === undefined) await deleteAccountSession('qwen', key)
-      }
-    } catch {
-      // A broken store is surfaced by the status call; cleanup is best-effort.
-    }
-  })()
   const flows = new OAuthFlowManager()
   const deviceFlows = new DeviceFlowManager()
   const onWarn = (message: string): void => {
@@ -1495,7 +1505,6 @@ export function apply(ctx: Context, config: Config): void {
         break
       }
       case 'glm': {
-        const station = config.glm?.station === 'zai' ? 'zai' : 'bigmodel'
         const tokens = new AccountTokenManager<GlmSession>({
           provider: 'glm',
           displayName: 'GLM Coding Plan',
@@ -1512,7 +1521,10 @@ export function apply(ctx: Context, config: Config): void {
             id: 'glm',
             name: 'GLM Coding Plan',
             label: 'GLM Coding Plan',
-            endpoint: station === 'zai'
+            // Follow the account's station, not the current config: a saved
+            // bigmodel account must keep talking to bigmodel after the config
+            // is switched to zai.
+            endpoint: session => (session as GlmSession).station === 'zai'
               ? 'https://api.z.ai/api/coding/paas/v4/chat/completions'
               : 'https://open.bigmodel.cn/api/coding/paas/v4/chat/completions',
             replayReasoning: true,
@@ -1572,9 +1584,20 @@ export function apply(ctx: Context, config: Config): void {
               // The console catalog reflects the account's real (including
               // preview) list; without a console login the static fallback wins.
               const console = (session as QwenSession).console
-              if (console === undefined) return []
-              return (await listQwenConsoleModels(console, fetchFn, signal))
-                .map(id => ({ id, name: id }))
+              if (console === undefined || console.expiresAt <= Date.now()) return []
+              const known = new Map(catalog.qwen.map(entry => [entry.id, entry]))
+              return (await listQwenConsoleModels(console, fetchFn, signal)).map(id => {
+                const entry = known.get(id)
+                return {
+                  id,
+                  name: entry?.name ?? id,
+                  // The platform's text models share the 1M/131k window; known
+                  // entries keep their own metadata instead of losing it.
+                  contextWindow: entry?.contextWindow ?? 1_000_000,
+                  maxTokens: entry?.maxTokens ?? 131_072,
+                  inputModalities: entry?.inputModalities ?? ['text'],
+                }
+              })
             },
           },
           tokens: tokens as unknown as AccountTokenManager<ChatSubscriptionSession>,
@@ -1589,8 +1612,14 @@ export function apply(ctx: Context, config: Config): void {
         usageFetchers.qwen = async (account, signal) => {
           const session = await tokens.session(account)
           const result = await fetchQwenUsage(session, proxiedFetch, signal)
-          if (result.updated !== undefined) {
-            await saveAccountSession('qwen', account, result.updated as never)
+          const consoleUpdate = result.updated?.console
+          if (consoleUpdate !== undefined) {
+            // A quota read holds a snapshot across an await. Apply the console
+            // fields only, and only while the account still exists with the
+            // same inference key; a late read must not undo logout/replacement.
+            await updateAccountSession('qwen', account, current => current.accessToken === session.accessToken
+              ? { ...current, console: consoleUpdate }
+              : undefined)
           }
           return result.usage
         }

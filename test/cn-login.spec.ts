@@ -68,7 +68,6 @@ test('kimi: device flow is form-encoded, carries the client device headers, and 
   const flow = await kimiDeviceFlow()
   assert.equal(flow.deviceCodeUrl, KIMI_DEVICE)
   assert.equal(flow.tokenUrl, KIMI_TOKEN)
-  assert.equal(flow.encoding, 'form')
   assert.equal(flow.preferCompleteUri, true)
   assert.equal(flow.scope, undefined)
   assert.equal(flow.headers?.['x-msh-platform'], 'kimi_code_cli')
@@ -146,13 +145,22 @@ test('qwen-platform: the key product type selects the endpoint', () => {
   assert.match(QWEN_USER_AGENT, /^QwenCode\//)
 })
 
+test('qwen-platform: two keys on the same plan are distinct accounts', () => {
+  const first = qwenSessionFromKey('sk-sp-first')
+  const second = qwenSessionFromKey('sk-sp-second')
+  assert.equal(first.plan, second.plan)
+  assert.notEqual(accountKeyOf('qwen', first), accountKeyOf('qwen', second))
+  assert.equal(accountKeyOf('qwen', qwenSessionFromKey('sk-sp-first')), accountKeyOf('qwen', first))
+})
+
 test('qwen-platform: a saved key becomes a non-expiring, plan-labelled session', async () => {
   const session = qwenSessionFromKey('sk-sp-key')
   assert.equal(session.accessToken, 'sk-sp-key')
   assert.equal(session.refreshToken, 'sk-sp-key')
   assert.equal(session.plan, 'Token Plan')
   assert.equal(session.baseURL, QWEN_TOKEN_PLAN_BASE)
-  assert.equal(accountKeyOf('qwen', session), 'Token Plan')
+  assert.match(session.account ?? '', /^Token Plan · [0-9a-f]{8}$/)
+  assert.equal(accountKeyOf('qwen', session), session.account)
   assert.ok(session.expiresAt > Date.now() + 90 * 365 * 24 * 60 * 60_000)
   assert.equal(await refreshQwen(session), session)
 })

@@ -16,6 +16,8 @@ import './keep-alive.js'
 import { fetchKimiUsage } from '../src/providers/kimi-usage.js'
 import { fetchGlmUsage } from '../src/providers/glm-usage.js'
 import { fetchGlmModels } from '../src/providers/glm-models.js'
+import { fetchQwenUsage } from '../src/providers/qwen-usage.js'
+import { qwenSessionFromKey } from '../src/auth/qwen.js'
 import type { GlmSession, KimiSession } from '../src/auth/store.js'
 
 const KIMI_USAGES = 'https://api.kimi.com/coding/v1/usages'
@@ -292,6 +294,9 @@ test('host: a pool-enabled profile reads Kimi/GLM usage instead of reporting uns
     // the platform shows appear in the picker.
     const qwenModels = await llm.listModels('qwen')
     assert.deepEqual(qwenModels.map(model => model.id), ['qwen4-max-preview', 'qwen3.8-max'])
+    // Discovery keeps the known static metadata instead of replacing it with
+    // ID/name only.
+    assert.equal((await llm.resolveModelInfo('qwen', 'qwen4-max-preview')).context?.contextWindow, 1_000_000)
     // The account's live list wins over the static fallback: GLM-5.4 and the
     // FlashX variant appear without a plugin release; glm-4.7 and legal-only
     // variants stay out.
@@ -320,4 +325,14 @@ test('glm models: the account list is filtered to the coding-plan generation', a
     }],
   })
   assert.deepEqual(await fetchGlmModels(glmSession, fetchFn), ['glm-5.4', 'glm-5.3-flashx'])
+})
+
+test('qwen usage: an expired console link asks for reauthorization', async () => {
+  const session = qwenSessionFromKey('sk-sp-x')
+  const expired = {
+    ...session,
+    console: { accessToken: 'console-at', expiresAt: Date.now() - 1_000 },
+  }
+  const { fetchFn } = stubFetch({})
+  await assert.rejects(fetchQwenUsage(expired, fetchFn), /expired/)
 })

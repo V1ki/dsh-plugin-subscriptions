@@ -94,7 +94,6 @@ export async function kimiDeviceFlow(): Promise<DeviceFlowSpec> {
     deviceCodeUrl: `${KIMI_OAUTH_HOST}/api/oauth/device_authorization`,
     tokenUrl: `${KIMI_OAUTH_HOST}/api/oauth/token`,
     headers: await kimiHeaders(),
-    encoding: 'form',
     preferCompleteUri: true,
   }
 }

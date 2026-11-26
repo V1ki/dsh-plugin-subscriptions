@@ -626,6 +626,45 @@ export async function saveAccountSession<K extends ProviderId>(
 }
 
 /**
+ * Conditionally rewrite one account's session inside the store's write lock.
+ *
+ * A background refresh (quota reads, token refresh) holds a session snapshot
+ * across an await. Writing that snapshot back unconditionally would recreate a
+ * removed account or overwrite a replacement key. The mutator runs against the
+ * CURRENT stored session under the same lock as logout and save: returning
+ * `undefined` cancels the write, which is how a stale read is discarded.
+ * @param provider - the provider route.
+ * @param account - the account key.
+ * @param mutate - builds the next session from the current one, or undefined to skip.
+ * @param path - store file path; defaults to {@link authFilePath}.
+ * @returns true when a session was written.
+ */
+export async function updateAccountSession<K extends ProviderId>(
+  provider: K,
+  account: string,
+  mutate: (current: SessionOf<K>) => SessionOf<K> | undefined,
+  path = authFilePath(),
+): Promise<boolean> {
+  return serialize(path, async () => {
+    const store = await loadStore(path)
+    const entry = store[provider] as ProviderAccounts<SessionOf<K>> | undefined
+    if (entry === undefined) return false
+    const key = resolveAccount(entry as ProviderAccounts<StoredSession>, account)
+    const current = entry.accounts[key]
+    if (current === undefined) return false
+    const next = mutate(current)
+    if (next === undefined) return false
+    assertSessionShape(provider, key, next as StoredSession)
+    ;(store as Record<string, unknown>)[provider] = {
+      ...entry,
+      accounts: { ...entry.accounts, [key]: next },
+    } satisfies ProviderAccounts<SessionOf<K>>
+    await writeStore(store, path)
+    return true
+  })
+}
+
+/**
  * Delete one account's session (logout). Deleting the default moves the badge
  * to the next remaining account.
  * @param provider - the provider route.

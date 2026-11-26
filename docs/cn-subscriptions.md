@@ -53,7 +53,9 @@ GLM 的 Coding Plan 没有对第三方开放的 OAuth 应用，但官方 ZCode �
       station: bigmodel   # 国内站（默认）；国际站填 zai
 ```
 
-**模型目录**：登录后用套餐 Key 调用 `GET {站点}/api/paas/v4/models` 读取账号当前模型；只保留 `glm-5*` 这一代（过滤掉 4.x 和 `-legal` 专用变体），所以 GLM-5.4 这类新模型不需要等插件发版。端点失败时回退到内置清单（`glm-5.4`、`glm-5.3`、`glm-5.3-flash`）。
+**模型目录**：登录后用套餐 Key 调用 `GET {站点}/api/paas/v4/models` 读取账号当前模型；只保留 `glm-5*` 这一代（过滤掉 4.x 和 `-legal` 专用变体），所以 GLM-5.4 这类新模型不需要等插件发版。端点失败时回退到内置清单（`glm-5.4`、`glm-5.3`、`glm-5.3-flash`）。目录缓存 5 分钟，然后用后台每小时刷新；菜单读取不会额外打网络。
+
+**站点归属**：推理端点按**已保存账号自己的 `station`** 解析，不跟当前配置走。这样把配置从 bigmodel 切到 zai 后，旧的 bigmodel 账号仍发往 bigmodel，不会出现“模型列表来自 bigmodel、推理却发到 zai”的错位；`glm.station` 只决定新登录写哪个站。
 
 **思考等级**：GLM-5.* 强制思考，支持 `reasoning_effort: low | high | max`（默认 max）；请求同时带 `thinking: {type:"enabled"}`，插件会把选中的等级写进 `reasoning_effort`。
 
@@ -69,11 +71,13 @@ GLM 的 Coding Plan 没有对第三方开放的 OAuth 应用，但官方 ZCode �
 `qwen` 路由接的是 **千问AI平台**（`platform.qianwenai.com`）的 API Key，不是 chat.qwen.ai 的 Qwen 账号订阅，也不是百炼 Coding Plan：
 
 - 该平台**没有对模型调用开放的 OAuth**，第三方工具只能用 API Key；插件因此把 Key 保存为不过期的凭据，登录按钮换成卡片里的 Key 输入框。
+- 每把 Key 是一个独立账号（账号名是 `Token Plan · <Key 摘要>` 这样的稳定标识），同一套餐下保存第二把 Key 不会覆盖第一把。
 - Key 产品类型决定端点：`sk-sp-` = Token Plan（月度 credits，专用端点），`sk-ws-` / `sk-` = 按量计费（通用端点）。粘贴后插件自动识别，不需要手选。
 - OpenAI 兼容端点**没有 `GET /models`**。保存 Key 后先用内置兜底清单（`qwen4-max-preview`、`qwen4-max`、`qwen3.8-max`、`qwen3.8-flash`、`qwen3.7-plus`、`deepseek-v4-pro`）；完成“登录查询额度”后，插件通过控制台的 `ListModelSeries` 读取账号真实模型列表（包括平台上能看到、但文档还没写的预览模型），并替换静态清单。也可以在配置 `models.qwen` 里手工覆盖。
 - 思考等级：Qwen3.8 系列和 DeepSeek V4 Pro 支持 `reasoning_effort: low | medium | xhigh`（默认 xhigh），插件直接写顶层 `reasoning_effort`；Qwen3.7 Plus 没有声明档位，因此不提供选择。
 - 注意 `sk-sp-` 前缀同样用于阿里云百炼/ModelStudio 的套餐 Key；本路由只按千问AI平台的端点发送，百炼 Key 在这里会鉴权失败。百炼 Coding Plan 仍只有 `sk-sp-` Key，没有 OAuth。
-- **额度需要额外一次控制台登录**：推理 Key 读不到额度，所以保存 Key 后，卡片上会出现“登录查询额度”按钮。它走官方 CLI 同款的 PKCE 设备码（`t.qianwenai.com`），把控制台凭据存进同一个 qwen 会话，只用于读额度；推理仍然只用 API Key。没有登录时卡片会明确提示，不再显示笼统的“此服务商不支持额度查询”。
+- **额度需要额外一次控制台登录**：推理 Key 读不到额度，所以每个账号行上都有“登录查询额度”按钮。它走官方 CLI 同款的 PKCE 设备码（`t.qianwenai.com`），把控制台凭据存进**该账号**的 qwen 会话，只用于读额度；推理仍然只用 API Key。控制台凭据带过期时间，过期后账号行会重新显示“登录查询额度”，额度读取也会明确提示需要重新授权。
+- 额度刷新只回写 console 字段：如果刷新期间账号被退出、或同一账号换了 Key，迟到的结果会被丢弃，不会复活账号或覆盖新 Key。
 
 ## 用量与余额
 

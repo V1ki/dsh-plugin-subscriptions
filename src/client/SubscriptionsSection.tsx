@@ -54,6 +54,8 @@ export interface AccountStatus {
   expiresAt?: number
   plan?: string
   isDefault: boolean
+  /** Qwen only: whether this account has a live console session for quota. */
+  quotaLinked?: boolean
 }
 
 /** One provider's login state as answered by the `status` endpoint. */
@@ -817,13 +819,14 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     }
   }, [rpc, antigravityToggleBusy, setProviderError, refresh])
 
-  const login = useCallback(async (provider: SubscriptionProvider, method?: 'oauth' | 'keychain'): Promise<void> => {
+  const login = useCallback(async (provider: SubscriptionProvider, method?: 'oauth' | 'keychain', account?: string): Promise<void> => {
     if (rpc === undefined) return
     setProviderError(provider, undefined)
     try {
       const response = await callSubscriptionsAuth<LoginResponse>(rpc, 'login', {
         provider,
         ...method === undefined ? {} : { method },
+        ...account === undefined ? {} : { account },
       })
       if (typeof response.authorizeUrl === 'string' && response.authorizeUrl === '') {
         // Instant login (e.g. imported from Claude Code credentials)
@@ -1106,11 +1109,6 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                   <button type="button" disabled={qwenKeyDraft.trim() === ''} onClick={() => { void saveQwenKey() }}>
                     {accounts.length > 0 ? t('qwenKeyChange') : t('qwenKeySave')}
                   </button>
-                  {accounts.length > 0 && (
-                    <button type="button" onClick={() => { void login('qwen') }}>
-                      {t('qwenQuotaLogin')}
-                    </button>
-                  )}
                 </div>
                 <p style={styles.statusLine}>
                   {status?.quotaLinked === true ? t('qwenQuotaLinked') : t('qwenKeyHint')}
@@ -1177,9 +1175,18 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                         {t('accountExpires', { date: new Date(account.expiresAt).toLocaleString() })}
                       </span>
                     )}
+                    {id === 'qwen' && !busy && (
+                      <button
+                        type="button"
+                        style={{ marginLeft: 'auto', flexShrink: 0 }}
+                        onClick={() => { void login('qwen', undefined, account.key) }}
+                      >
+                        {account.quotaLinked === true ? t('qwenQuotaRelogin') : t('qwenQuotaLogin')}
+                      </button>
+                    )}
                     <button
                       type="button"
-                      style={{ marginLeft: 'auto', flexShrink: 0 }}
+                      style={{ marginLeft: id === 'qwen' ? 8 : 'auto', flexShrink: 0 }}
                       onClick={() => { void logout(id, account.key, display, name) }}
                     >
                       {t('logout')}

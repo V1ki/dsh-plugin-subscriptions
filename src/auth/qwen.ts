@@ -14,6 +14,7 @@
  * Quota is not readable with an inference key (the platform exposes it only to
  * a logged-in console session), so usage stays unsupported here.
  */
+import { createHash } from 'node:crypto'
 import { arch, platform } from 'node:os'
 import type { QwenSession } from './store.js'
 
@@ -74,11 +75,15 @@ export function parseQwenApiKey(value: unknown): QwenApiKey {
  */
 export function qwenSessionFromKey(value: unknown): QwenSession {
   const { key, baseURL, plan } = parseQwenApiKey(value)
+  // The plan name alone is not an account identity: two keys on the same
+  // plan must coexist. A short non-reversible key digest keeps the account
+  // key stable per credential without exposing the secret.
+  const suffix = createHash('sha256').update(key).digest('hex').slice(0, 8)
   return {
     accessToken: key,
     refreshToken: key,
     expiresAt: Date.now() + 100 * 365 * 24 * 60 * 60_000,
-    account: plan,
+    account: `${plan} · ${suffix}`,
     plan,
     baseURL,
   }

@@ -140,6 +140,9 @@ export function withAssistantReasoning(
   return result
 }
 
+/** A discovered catalog is reused for this long before a scheduled refresh replaces it. */
+const CATALOG_FRESH_MS = 5 * 60_000
+
 /** Map a discovered entry onto the harness model info. */
 function toModelInfo(provider: string, entry: ChatSubscriptionDiscovered): LlmModelInfo {
   return {
@@ -151,7 +154,8 @@ function toModelInfo(provider: string, entry: ChatSubscriptionDiscovered): LlmMo
 }
 
 export class ChatSubscriptionAdapter extends LlmAdapter implements AccountAwareAdapter {
-  private readonly catalog = new Map<string, ChatSubscriptionDiscovered[]>()
+  /** Per-account discovery cache; stale entries are refetched by the hourly job. */
+  private readonly catalog = new Map<string, { models: ChatSubscriptionDiscovered[]; at: number }>()
   private readonly fetchFn: typeof fetch
 
   constructor(private readonly options: ChatSubscriptionAdapterOptions) {
@@ -192,12 +196,18 @@ export class ChatSubscriptionAdapter extends LlmAdapter implements AccountAwareA
     provider: string,
     account: string,
     signal?: AbortSignal,
+    preferCached = false,
   ): Promise<LlmModelInfo[]> {
     if (!await this.options.tokens.hasSession(account)) return []
     const discover = this.options.definition.discover
     if (discover === undefined) return this.staticModels(provider)
     const cached = this.catalog.get(account)
-    if (cached !== undefined) return cached.map(entry => toModelInfo(provider, entry))
+    if (cached !== undefined) {
+      const fresh = Date.now() - cached.at < CATALOG_FRESH_MS
+      // Menu reads never increase network frequency; the startup/hourly job
+      // calls without preferCached and gets fresh data once the TTL lapses.
+      if (fresh || preferCached) return cached.models.map(entry => toModelInfo(provider, entry))
+    }
     try {
       const session = await this.options.tokens.session(account)
       const discovered = await discover(
@@ -206,7 +216,7 @@ export class ChatSubscriptionAdapter extends LlmAdapter implements AccountAwareA
         signal ?? AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
       )
       if (discovered.length > 0) {
-        this.catalog.set(account, discovered)
+        this.catalog.set(account, { models: discovered, at: Date.now() })
         return discovered.map(entry => toModelInfo(provider, entry))
       }
     } catch (error) {
@@ -228,22 +238,22 @@ export class ChatSubscriptionAdapter extends LlmAdapter implements AccountAwareA
     provider: string,
     account?: string,
     signal?: AbortSignal,
-    _preferCached = false,
+    preferCached = false,
   ): Promise<readonly LlmModelInfo[]> {
     this.checkRoute(provider)
-    if (account !== undefined) return this.ownCatalog(provider, account, signal)
+    if (account !== undefined) return this.ownCatalog(provider, account, signal, preferCached)
     const accounts = (await this.options.tokens.list()).map(entry => entry.key)
     if (accounts.length === 0) return []
     return unionAccountCatalogs(
       accounts,
-      (key, accountSignal) => this.ownCatalog(provider, key, accountSignal),
+      (key, accountSignal) => this.ownCatalog(provider, key, accountSignal, preferCached),
       { timeoutMs: DISCOVERY_TIMEOUT_MS, ...signal === undefined ? {} : { signal } },
     )
   }
 
   lastKnownOwnModels(provider: string, account: string): Promise<readonly LlmModelInfo[] | undefined> {
     const cached = this.catalog.get(account)
-    return Promise.resolve(cached?.map(entry => toModelInfo(provider, entry)))
+    return Promise.resolve(cached?.models.map(entry => toModelInfo(provider, entry)))
   }
 
   clearAccountCatalog(account?: string): void {
@@ -265,8 +275,8 @@ export class ChatSubscriptionAdapter extends LlmAdapter implements AccountAwareA
   async resolveOwnModel(provider: string, model: string, account?: string): Promise<LlmResolvedModelInfo> {
     this.checkRoute(provider)
     const cached = account === undefined
-      ? [...this.catalog.values()].flat().find(entry => entry.id === model)
-      : this.catalog.get(account)?.find(entry => entry.id === model)
+      ? [...this.catalog.values()].flatMap(entry => entry.models).find(entry => entry.id === model)
+      : this.catalog.get(account)?.models.find(entry => entry.id === model)
     const found: ChatSubscriptionDiscovered | undefined = cached ?? this.staticEntry(model)
     if (found === undefined) {
       throw failure(`${this.options.definition.name} has no model "${model}"; configure a supported model in this route catalog`, 'MODEL_UNSUPPORTED')

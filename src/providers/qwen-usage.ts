@@ -138,6 +138,9 @@ export async function fetchQwenUsage(
     // error here would stick in the client error cache even after login.
     return { usage: { supported: false } }
   }
+  if (credentials.expiresAt <= Date.now()) {
+    throw new Error('Qwen quota login expired; log in for quota again')
+  }
   const controller = signal ?? new AbortController().signal
 
   let cliAccessToken = credentials.cliAccessToken

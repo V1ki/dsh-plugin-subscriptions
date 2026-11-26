@@ -43,12 +43,6 @@ export interface DeviceFlowSpec {
   tokenUrl: string
   /** Extra headers sent on both requests (device identity, user agent). */
   headers?: Readonly<Record<string, string>>
-  /** Wire encoding of the two requests; RFC 8628 defaults to form. */
-  encoding?: 'form' | 'json'
-  /** Extra fields merged into the device-code request body. */
-  deviceParams?: Readonly<Record<string, string>>
-  /** Extra fields merged into every token-poll request body. */
-  tokenParams?: Readonly<Record<string, string>>
   /** Open `verification_uri_complete` when the provider returns it. */
   preferCompleteUri?: boolean
   /** Fetch implementation (injectable for tests). */
@@ -135,18 +129,11 @@ function wait(ms: number): Promise<void> {
   })
 }
 
-/** Encode one request body in the flow's wire format. */
-function encodeBody(fields: Record<string, string>, encoding: 'form' | 'json'): string {
-  return encoding === 'json' ? JSON.stringify(fields) : new URLSearchParams(fields).toString()
-}
-
-/** Content type matching the flow's wire format. */
+/** Headers for both RFC 8628 form requests, plus the provider's device headers. */
 function requestHeaders(spec: DeviceFlowSpec): Record<string, string> {
   return {
     'accept': 'application/json',
-    'content-type': (spec.encoding ?? 'form') === 'json'
-      ? 'application/json'
-      : 'application/x-www-form-urlencoded',
+    'content-type': 'application/x-www-form-urlencoded',
     ...spec.headers,
   }
 }
@@ -163,17 +150,15 @@ function requestHeaders(spec: DeviceFlowSpec): Record<string, string> {
  * @returns the device-code response, once one arrives.
  */
 async function requestDeviceCode(fetchFn: typeof fetch, spec: DeviceFlowSpec): Promise<Response> {
-  const encoding = spec.encoding ?? 'form'
   for (let attempt = 1; ; attempt += 1) {
     try {
       return await fetchFn(spec.deviceCodeUrl, {
         method: 'POST',
         headers: requestHeaders(spec),
-        body: encodeBody({
+        body: new URLSearchParams({
           client_id: spec.clientId,
           ...spec.scope === undefined || spec.scope.length === 0 ? {} : { scope: spec.scope },
-          ...spec.deviceParams,
-        }, encoding),
+        }).toString(),
       })
     } catch (error) {
       if (attempt >= DEVICE_CODE_ATTEMPTS) throw error
@@ -220,7 +205,6 @@ export class DeviceFlowManager {
       throw new Error(`a ${provider} login attempt is already in progress`)
     }
     const fetchFn = spec.fetchFn ?? proxiedFetch
-    const encoding = spec.encoding ?? 'form'
     const headers = requestHeaders(spec)
     const response = await requestDeviceCode(fetchFn, spec)
     if (!response.ok) {
@@ -276,12 +260,11 @@ export class DeviceFlowManager {
           pollResponse = await fetchFn(spec.tokenUrl, {
             method: 'POST',
             headers,
-            body: encodeBody({
+            body: new URLSearchParams({
               client_id: spec.clientId,
               device_code: wire.device_code as string,
               grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
-              ...spec.tokenParams,
-            }, encoding),
+            }).toString(),
             signal: controller.signal,
           })
           result = await pollResponse.json() as DeviceTokenWire
