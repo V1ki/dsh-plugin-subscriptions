@@ -1,37 +1,32 @@
-# 账号与模型管理 / Account and model management
+# Account and model management
 
-在 **设置 → 订阅 → 对应服务商 → 管理** 中配置账号。保存前的修改只属于本地草稿；取消不会写入配置。
+[中文](./account-management.zh.md) · [Documentation](./README.md)
 
-## 配置含义
+Configure accounts and provider preferences in **Settings → Subscriptions → provider → Manage**. Edits stay in a local draft until saved; canceling discards them without writing to disk.
 
-- **别名**：例如“个人”“工作”。独立模型条目显示别名，内部绑定使用稳定账号 key；改别名不会改变绑定。
-- **加入自动 Pool**：允许这个账号参与普通对话模型入口的自动调度。默认开启。
-- **Pool 模型列表**：限制该账号允许参与 Pool 的模型。“跟随全部模型”包含将来发现的新模型；显式全选只选择当前列表；全不选不允许任何模型参与。
-- **独立模型入口**：为账号增加单独的模型选择条目。默认关闭，开启后直接绑定该账号，不随 Pool 切换。
+## Configuration options
 
-Antigravity 的账号池白名单按模型分组管理，推理档位由模型选择器单独控制。旧版保存的 `-low`、`-medium`、`-high`、`-xhigh` 条目，只有在该账号的当前目录已用对应分组替代具体条目时才按分组匹配；仍存在的手动具体模型和未知 ID 保持原样，`-tiered` 不作猜测映射。读取不会改写配置，编辑器会显示对应分组，取消勾选并保存后不会被旧条目重新启用。该兼容处理不保留旧条目的推理档位限制，也不会修改默认推理档位。
+- **Subscription display name / Model display name**: Customize the provider display name (used in the status-bar quota badge and subscription headings) and individual model names; leave blank to restore defaults. Display names are presentation-only and never act as routing or binding keys.
+- **Alias**: Optional label such as "Personal" or "Work". Independent model entries display the alias while binding internally to the account's stable key; renaming an alias never breaks the binding.
+- **Include in the LLM account pool**: Allows the account to participate in automatic pool scheduling for standard chat model entries. Enabled by default.
+- **Pool model allowlist**: Restricts which models this account may serve in the pool. "Allow all models, including future models" (absent allowlist) follows all discovered models including future additions; an explicit selection restricts to the chosen list; an empty selection permits none.
+- **Independent model entry**: Adds separate single-account entries to the model picker. Disabled by default; when enabled, those entries stay bound directly to that account without pool failover.
+- **Prompt cache lifetime (Claude only)**: Overrides the conversation prompt cache TTL to `5 minutes`, `1 hour`, or `Follow config`. Cache reads cost the same under either TTL, while 1-hour cache writes cost 2× base input (versus 1.25× for 5 minutes). Changes apply from the next turn after saving.
+- **Google Antigravity disabled by default**: Due to upstream ToS suspension risk and request blocking, Antigravity starts disabled and must be enabled manually in **Settings → Subscriptions → Google Antigravity** after acknowledging the risk notice. Saved accounts remain preserved locally while disabled without issuing requests; even when manually enabled, usage is currently limited to inspecting account quotas rather than chatting with models.
 
-## 工作与个人账号示例
+Antigravity pool allowlists select model families; reasoning effort is controlled separately in the model picker. Legacy `-low`, `-medium`, `-high`, and `-xhigh` selections match their family only when that account's current catalog replaces the concrete entry with the family. Still-listed manual concrete models and unknown IDs stay exact; `-tiered` aliases are not guessed. Reads do not rewrite saved settings. The editor shows the corresponding family, and unchecking it removes the legacy selections on save. This compatibility mapping does not preserve an old effort restriction or change the default reasoning effort.
 
-| 账号 | 别名 | 加入自动 Pool | 独立模型入口 |
+## Work and personal account example
+
+| Account | Alias | Include in automatic pool | Independent model entry |
 |---|---|---|---|
-| 个人账号 | 个人 | 开启 | 可选 |
-| 工作账号 | 工作 | 关闭 | 开启 |
+| Personal account | Personal | On | Optional |
+| Work account | Work | Off | On |
 
-普通模型条目只使用允许参与 Pool 的账号。选择带“工作”别名的独立模型条目后，该模型调用只使用工作账号；账号被删除、独立入口被关闭、凭据失效或额度不足时，不会静默改用个人账号。
+Standard model entries only use accounts enabled for automatic pooling. Selecting an independent model entry labeled "Work" routes exclusively to the work account; if the account is removed, its independent entry is turned off, credentials fail, or quota is exhausted, it will not silently fall back to the personal account.
 
-## 范围与限制
+## Scope and limitations
 
-这些配置约束插件的 **LLM 对话模型路由**，不是整个会话的隐私隔离开关。图片生成、视频生成和 X 搜索等工具仍使用各自的账号策略；指定其他模型的子代理也不因此自动绑定账号。需要严格的工作/个人数据隔离时，不能只依赖此设置。
+These controls govern the plugin's **LLM chat model routing** only and are not a session-wide privacy-isolation switch. Tools such as image generation, video generation, and X search retain their own account policies, and subagents explicitly selecting other models are not automatically bound to the same account. Do not rely solely on this setting when strict work/personal data isolation is required.
 
-服务商级“编辑模型列表”继续管理模型显示、上下文和工具偏好；账号管理不重置这些设置。默认账号星标与 Pool 参与开关是两个不同配置。
-
----
-
-Open **Settings → Subscriptions → provider → Manage** to edit account aliases, automatic-pool participation, per-account pool model allowlists, and independent model entries.
-
-Existing accounts default to participating in the pool, with independent entries disabled. An absent model allowlist follows all discovered models, including future additions; an empty allowlist permits none. Independent entries bind a stable account key, not its editable alias, and do not fall back to another account when unavailable.
-
-Antigravity allowlists select model families; reasoning effort is controlled separately in the model picker. Legacy `-low`, `-medium`, `-high`, and `-xhigh` selections match their family only when that account's current catalog replaces the concrete entry with the family. Still-listed manual concrete models and unknown IDs stay exact; `-tiered` aliases are not guessed. Reads do not rewrite saved settings. The editor shows the corresponding family, and unchecking it removes the legacy selections on save. This compatibility mapping does not preserve an old effort restriction or change the default reasoning effort.
-
-These controls govern LLM model routing only. Image/video generation, X search, and agents explicitly selecting other models retain their own routing policies. This feature is not a session-wide privacy-isolation guarantee.
+Provider-level **Edit model list** continues to manage model visibility, context windows, and tool toggles; account settings do not reset those preferences. The default-account star and the automatic-pool toggle are independent settings.

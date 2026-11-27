@@ -2,165 +2,118 @@
 
 English | [中文](README.zh.md)
 
-Use your **ChatGPT (Codex)**, **Claude**, **Grok (X Premium)**, **GitHub Copilot**, and **Google Antigravity** subscriptions as LLM providers in [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) — no API keys. Codex, Grok, and Antigravity log in via OAuth in the dsh web UI (Settings → Subscriptions), while Copilot uses the GitHub OAuth device flow; Claude imports credentials from an existing Claude Code session when there is one (macOS Keychain or `~/.claude/.credentials.json`) and otherwise falls back to the same browser OAuth flow, so the Claude Code CLI is not required. Tokens live at `~/.dsh/plugins/subscriptions/auth.json` (mode 0600) and refresh automatically.
+Use your **ChatGPT (Codex)**, **Claude**, **Grok (X Premium)**, **GitHub Copilot**, and **Google Antigravity** subscriptions as LLM providers in [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) — no API keys required. Codex, Grok, and Antigravity log in via browser OAuth in the DSH web UI (**Settings → Subscriptions**), Copilot uses the GitHub OAuth device flow, and Claude imports credentials automatically from an existing Claude Code session (macOS Keychain or `~/.claude/.credentials.json`) or falls back to the same browser OAuth flow — no Claude Code CLI required. Tokens are stored at `~/.dsh/plugins/subscriptions/auth.json` (mode `0600`) and refresh automatically.
 
-## Subscription and model display names
+### Highlights
 
-Open **Settings → Subscriptions → Manage** to set a subscription display name, or edit a model's display name under **Edit model list**. Both share the existing Save/Cancel actions; clearing a name or choosing Reset to default and saving restores the original name. Names are single-line text of up to 80 characters, stored per provider and model ID in `provider-settings.json`, and survive restarts and catalog refreshes. They only change presentation: provider IDs, model IDs, reasoning settings, and account routing remain unchanged. Existing account aliases continue to work independently.
-
-Subscription display names also label provider groups in the native model picker. Saving a cleared name restores the provider's default group title.
-
-## Antigravity model and effort selection
-
-Antigravity now advertises one picker entry per effort group, using the same native model/effort controls as Codex. When supplied, `agentModelSorts` alone determines the selectable roster/order; only explicit Low/Medium/High variants present there are grouped. `tieredModelIds` category keys such as `pro` and `flashLite` are not model identities and do not expand the picker. Catalog `thinkingLevel` and `thinkingBudget` settings are preserved on the wire. Explicit Low/Medium/High suffixes in known model families provide a compatibility fallback for older catalogs; unrelated models are not merged by display name.
-
-Group defaults prefer High, then Medium, then Low when no valid saved preference exists. Existing concrete model IDs remain callable. Account pools retain their existing conservative intersection of members' efforts. Refresh the model list after installing so older caches acquire roster metadata. Without roster metadata, legacy/internal filtering is best effort; exact parity with the official client requires checking the live account. See [verification notes](docs/issue180-testing.md).
-
-Antigravity usage keeps explicitly reported shared limits from `retrieveUserQuotaSummary`. The Gemini group includes Argon; native two-group summaries report weekly and five-hour windows for Gemini and Claude/GPT. Account-wide shared quotas remain visible independently of model picker visibility. Settings and the composer dialog show remaining percentages with horizontal bars, without duplicating effort variants. Missing shared groups can supplement uncovered model quotas from `fetchAvailableModels`; a reset timestamp alone never establishes a cadence. Supplemental failures retain valid summaries; cancellation propagates.
+- **Five subscription providers, zero API keys** — live model catalogs, vision inputs, native reasoning-effort selectors, and Codex Fast mode (`/fast`).
+- **Multi-account pools & rate-limit resilience** — automatic per-provider failover (`quota_aware`, `quota_normalized`, or `priority`), Codex purchased-credits fallback, and 429 window waiting with [`@deepseek-ai/dsh-llm-retry`](https://www.npmjs.com/package/@deepseek-ai/dsh-llm-retry).
+- **Built-in subscription tools** — Codex `web_search`, Grok `x_search`, GPT/Grok `image_generate` (generation & editing), and Grok `video_generate`.
+- **Live quota pill & Usage Dashboard** — composer status-bar quota display plus a sidebar **Subscriptions → Usage** dashboard with a 26-week heatmap, token trends, and quota-cycle charts.
+- **Fine-grained customization** — per-provider and per-model display names, visible model filtering, context budgets, default reasoning efforts, Codex subagent default speed, and live Claude prompt-cache TTL switching (`5m` / `1h`).
 
 ## Demo
 
-Settings → **Subscriptions**: per-provider login/logout, no API keys. Claude imports credentials from Claude Code when available and otherwise uses OAuth, as Codex and Grok always do (settings screenshots use demo accounts and catalog data):
+**Settings → Subscriptions** manages per-provider login/logout, live quota windows, and client version visibility with no API keys (settings screenshots use demo accounts and catalog data):
 
 ![Subscriptions settings page](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/subscriptions.png)
 
-Configure visibility, default reasoning effort, and context together in **Edit model list**, with shared Save and Cancel actions:
+Configure model visibility, custom display names, default reasoning effort, context budget, and Codex subagent default speed together in **Edit model list**, with unified Save and Cancel actions:
 
 ![Model settings](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/model-settings.png)
 
-Configure image generation, video generation, and X search per provider. Tool switches apply only to sessions created after saving:
+Enable or disable Codex web search and image generation, plus Grok image generation, video generation, and X search per provider (changes apply to sessions created after saving):
 
 ![Provider tools](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/provider-tools.png)
 
-Logged-in providers join the session model picker with their live model catalogs:
+Logged-in providers join the native session model picker with their live model catalogs:
 
 ![Model picker with subscription models](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/model-picker.png)
 
-Models that advertise reasoning levels get an **Effort** selector in the same menu — Codex models, Grok 4.6 / 4.5, and Copilot's reasoning models (levels and defaults come from each provider's live catalog, not a hardcoded list; Copilot's `capabilities.supports.reasoning_effort` array is sent as `reasoning_effort` on chat completions and `reasoning.effort` on the Responses wire). Models listing both Copilot endpoints (gpt-5.4, gpt-5-mini) normally speak chat completions but reroute to `/responses` when a request combines function tools with an effort — Copilot rejects that combination on the chat wire:
+Models advertising reasoning levels get a native **Effort** selector in the same menu — Codex, Grok, Copilot (auto-rerouting dual-endpoint models to `/responses` when combining tools with effort), and grouped Antigravity models:
 
 ![Reasoning effort selector](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/model-effort.png)
 
-Codex models whose catalog advertises the fast tier (the codex CLI's fast mode) get a **Speed** toggle in the composer's tool row, next to the model selector — Standard or Fast (`service_tier: priority`), per session. The `/fast` slash command offers the same choice as a popup; it errors with an explanation when the current model has no fast tier.
-
-Subagents have a separate per-model default: **Settings → Subscriptions → ChatGPT (Codex) → Manage → Edit model list → Subagent default speed**. Save changes to apply it to subsequent requests, including running subagents. This setting persists across restarts and works regardless of the parent model; main-session Speed choices do not propagate to children. A speed explicitly selected in a child session overrides its model default, including Standard. Explicit session choices reset on restart. Fast still requires catalog support for the actual Codex model. Hosts without live agent origin metadata keep Standard unless the session has an explicit speed choice.
+Codex models advertising the fast tier get a composer **Speed** toggle (Standard / Fast, `service_tier: priority`) and the `/fast` slash command. Choices are remembered per model across switches and restarts, while subagents follow their own per-model **Subagent default speed** setting unless overridden in that child session:
 
 ![Speed toggle with the Standard/Fast menu open](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
 
-The composer's stats row gains a **subscription usage** pill showing quota information for the provider of the session's current model (Codex for a Codex model, Grok for a Grok model, and so on). It shows at most one provider, and only while a subscription model is selected: switching to an official or bring-your-own-key model hides the pill instead of leaving the previous subscription on screen. A model the shell cannot read yet keeps the current selection, so the pill does not flicker between polls. Nothing about this survives a page reload. Click the pill to expand every logged-in provider and account — the default account is starred, and the current provider is listed first. Antigravity previews only the current model's windows (at most two per account); the other model windows remain available in a closed disclosure.
-
-**Settings → Subscriptions → Status-bar quota display** selects **Current subscription only** (default) or **Hidden**. The display preference is saved in the current browser, applies immediately, survives reloads, and synchronizes between tabs of the same origin. It does not hide usage details in Settings, change model selection, or change account routing.
-
-**Quota percentages** independently selects **Used (default)** or **Remaining** for Settings, the composer/status-bar pill, and its expanded account rows. Both preferences are browser-local and synchronize across tabs. Bars fill in the selected direction, while warning colors still indicate high **used** quota (80% warning, 95% critical). Unknown or invalid telemetry stays unknown, never 100% remaining; passed reset times retain the last reported value until a refresh.
-
-The compact pill is deliberately narrow: a single account reads as the provider name and up to two percentages, e.g. “Codex · 13% used / 25% used”, with the 5-hour limit first and the weekly limit second. Window names, the stale note, remaining windows and Codex credits all live in the dialog the pill opens, whose account rows still star the configured default. For multiple accounts the pill says e.g. “Codex · 2 signed-in accounts”; expand it for each account's windows, model scopes and reset times. Percentages are never added or averaged. Signed-in accounts need not be members of the selected model's pool, and neither a default star nor session affinity proves which account successfully served a request.
-
-Expanded details and Settings show the last successful fetch time, stale status and the next permitted retry after a failed refresh, when known. Unsupported quota queries, empty results, and failed queries without a previous snapshot have distinct messages. If an older backend omits quota timestamps, the UI shows when it received the response and explicitly says the quota update time was not provided; receipt time never proves that upstream quota was refreshed. Clicking the account Refresh button requests `force: true`, but endpoint failure cooldowns still apply. Opening the badge rereads normally, not forcibly. Existing snapshots survive failures without being relabeled fresh; the endpoint cooldown remains intact. Open Settings and badges share successful usage reads in connection-local memory and reread that memory on focus, without additional upstream requests. This does not poll the server cache on focus; normal badge polling and manual refresh retain their existing behavior. The preference never changes internal `usedPercent`, account selection, exhaustion protection or cooldowns. Pool membership and successful-serving-account telemetry remain separate follow-ups to [#202](https://github.com/V1ki/dsh-plugin-subscriptions/issues/202). Antigravity summary endpoints/grouping in #182, #184 and #187 are not incorporated here.
+The composer's stats row shows a compact **subscription usage** pill for the active subscription model's provider (hidden when using non-subscription models). Click it to expand all logged-in providers, accounts (default account starred), reset times, stale status, and Codex credit balances. Both **Status-bar quota display** (`Current subscription only` / `Hidden`) and **Quota percentages** (`Used` / `Remaining`) are configurable in **Settings → Subscriptions**, saved per browser, synced across tabs, and share connection-local usage reads without extra upstream polling — see [Usage Tracking & Dashboard](docs/usage-tracking.md) for cache and refresh semantics.
 
 ![Subscription usage pill expanded to show every provider and account](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/usage-badge.png)
 
-The `image_generate` tool renders its result inline in the conversation:
+Open **Subscriptions** from the DSH sidebar for the unified **Usage** (default) and **Settings** tabs (older hosts without sidebar panels keep **Settings → Subscriptions**). The **Usage Dashboard** aggregates input, output (including reasoning without double-counting), cache-read, and cache-write tokens across **Codex**, **Claude**, **Grok**, and **Antigravity** (Copilot is not tracked), filterable by provider, account (including signed-out historical accounts), and time range (`7D`, `30D`, `90D`, `All`):
 
-![image_generate renders the image inline](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/image-generate-inline.png)
-
-Its `provider` parameter picks the image backend — the same prompt through GPT (`gpt-image-2`, top) and Grok (`grok-imagine-image-2.0`, bottom):
-
-![image_generate with provider gpt vs grok](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/image-generate-providers.png)
-
-The `video_generate` tool plays the generated clip inline:
-
-![video_generate plays the clip inline](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/video-generate-inline.png)
-
-## Usage Dashboard & token history
-
-Open **Subscriptions** from the DSH sidebar to view the unified page with **Usage** (default) and **Settings** tabs (older hosts without sidebar panels keep **Settings → Subscriptions** unchanged). The Usage Dashboard aggregates tracked input, output, cache-read, and cache-write tokens across **Codex**, **Claude**, **Grok**, and **Antigravity** — filterable by provider, account (including signed-out historical accounts), and time range (`7D`, `30D`, `90D`, `All`). Reasoning tokens, when reported, are part of output and never double-counted; overlapping 5-hour and weekly quota windows are deduplicated in daily and KPI totals. Copilot is not tracked.
-
-- **Overview & trends**: KPI summary cards, a **26-week UTC calendar heatmap** (click any day cell to inspect its per-model and per-provider breakdown), a daily stacked token trend chart, and a ranked **By Model / By Provider** distribution view.
-- **Quota cycles**: a dual-axis combo chart comparing each 5-hour or weekly cycle's token consumption (bars) against its observed quota utilization percentage (line, with peak markers and gap breaks when quota `%` was not observed), plus quick pills for active cycles and an inline cycle inspector.
+- **Overview & trends** — KPI cards, a **26-week UTC calendar heatmap** (click any day for per-model/provider details), a daily stacked token trend chart, and a ranked **By Model / By Provider** breakdown.
+- **Quota cycles** — a dual-axis combo chart comparing each 5-hour or weekly cycle's token consumption against observed quota utilization `%`, with active-cycle pills and an inline inspector.
 
 ![Sidebar Subscriptions Usage Dashboard with KPIs, 26-week heatmap, daily trend, and model distribution](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/usage-dashboard.png)
 
 ![Quota Cycles dual-axis combo chart comparing cycle tokens and quota utilization percentage](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/usage-quota-cycles.png)
 
-Usage from DSH sessions before tracking began is read once from the session history and saved as per-provider UTC daily totals; it appears in the **All accounts** view only. The plugin saves aggregate counts, cycle quota percentages, and window metadata locally under `~/.dsh/plugins/subscriptions/usage/` (mode `0600`); it does not store prompts, credentials, or per-request logs there. **Clear history** removes this plugin's local usage history for a selected provider or all providers without affecting DSH sessions, accounts, or live quota. Opening the dashboard makes no extra quota requests and does not estimate cost.
+Usage from DSH sessions before tracking began is read once from the session history and saved as per-provider UTC daily totals; it appears in the **All accounts** view only. Aggregate counts and cycle metadata are stored locally under `~/.dsh/plugins/subscriptions/usage/` (mode `0600`) — never prompts, credentials, or per-request logs. **Clear history** clears this plugin's local history for one or all providers without affecting sessions, accounts, or live quota. See [Usage Tracking & Dashboard](docs/usage-tracking.md).
+
+The `image_generate` tool renders generated and edited images inline in the conversation:
+
+![image_generate renders the image inline](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/image-generate-inline.png)
+
+Its `provider` argument picks the backend — the same prompt via GPT (`gpt-image-2`, top) and Grok (`grok-imagine-image-2.0`, bottom):
+
+![image_generate with provider gpt vs grok](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/image-generate-providers.png)
+
+The `video_generate` tool plays generated MP4 clips inline:
+
+![video_generate plays the clip inline](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/video-generate-inline.png)
 
 ## Providers
 
-| Route    | Subscription      | Models |
-|----------|-------------------|--------|
-| `codex`  | ChatGPT Plus/Pro  | live catalog from `chatgpt.com/backend-api/codex/models` |
-| `claude` | Claude Pro/Max    | all models available in your subscription (Opus, Sonnet, Haiku, Fable — static catalog, updated with the plugin) |
-| `grok`   | X Premium (xAI)   | live catalog from `api.x.ai/v1/models` (chat models only); reasoning efforts from the Grok CLI catalog (`cli-chat-proxy.grok.com/v1/models`) |
-| `copilot` | GitHub Copilot   | live catalog from `api.githubcopilot.com/models` (chat models on both wires, with per-model vision flags and reasoning efforts); login uses the OAuth device flow (enter the shown code at `github.com/login/device`) |
-| `antigravity` | Google Antigravity | live catalog from Antigravity `v1internal:fetchAvailableModels`; requests use `generateContent` / `streamGenerateContent` with text, image, streaming reasoning, and tool-call conversion |
+| Route | Subscription | Models & Auth | Usage Telemetry |
+|-------|--------------|---------------|-----------------|
+| `codex` | ChatGPT Plus / Pro | Live catalog from `chatgpt.com/backend-api/codex/models`; browser OAuth | 5-hour, weekly, per-model weekly windows, plan & credits (`wham/usage`) |
+| `claude` | Claude Pro / Max | Live catalog from `api.anthropic.com/v1/models`; Claude Code credential import or browser OAuth | 5-hour, weekly & per-model weekly windows (`api.anthropic.com/api/oauth/usage`) |
+| `grok` | X Premium (xAI) | Live chat catalog from `api.x.ai/v1/models` + Grok CLI reasoning efforts & context tiers; browser OAuth | Shared weekly pool & tier (`cli-chat-proxy.grok.com/v1/billing`) |
+| `copilot` | GitHub Copilot | Live catalog from `api.githubcopilot.com/models` (`/chat/completions` & `/responses`); GitHub OAuth device flow | Not exposed by Copilot |
+| `antigravity` | Google Antigravity | Live catalog from `v1internal:fetchAvailableModels` (`generateContent` / `streamGenerateContent`); browser OAuth | Shared Gemini / Claude+GPT / Argon quota groups (`retrieveUserQuotaSummary`) + plan/credits (`loadCodeAssist`) |
 
-Only logged-in providers appear in the session model picker; the lists above refresh on login/logout. Vision-capable models declare `['text', 'image']` input modalities, and image content is translated to each provider's wire format.
+> **Note on Google Antigravity:** Google Antigravity is **disabled by default** (including after upgrading, while preserving existing local credentials and settings) due to high account-suspension (ToS) risk and upstream HTTP 429 rejections on native DSH chat requests. Even if enabled manually via the confirmation prompt in **Settings → Subscriptions**, chat models currently cannot be used — it is effectively limited to checking account usage while waiting for an official approach.
 
-Logged-in cards also show **subscription usage** — per rate-limit window (5-hour session, weekly, and per-model weekly where the plan has one) with the used percentage, a progress bar, and the reset time, plus a Refresh button. Codex usage comes from `chatgpt.com/backend-api/wham/usage` (also reports the plan), Claude usage from `api.anthropic.com/api/oauth/usage`, and Grok usage from the Grok Build CLI proxy's `cli-chat-proxy.grok.com/v1/billing` (the source of the CLI's `/usage` panel; reports the shared weekly pool and the subscription tier). Antigravity reads shared quota groups from `retrieveUserQuotaSummary`: Gemini Models, Claude and GPT models, and Gemini 4 Argon when available. Its Settings card shows remaining allowance, weekly/5h windows, and reset countdowns. `loadCodeAssist` supplies plan/credits; if the summary is unavailable, `fetchAvailableModels` supplies only selectable-model quotas without inventing shared windows. Copilot exposes no usage endpoint, so its card shows no usage section.
+Only logged-in providers appear in the model picker; catalogs refresh on login/logout, on startup (skipping snapshots newer than 5 minutes), every 60 minutes, or on demand via **Edit model list → Refresh**. Vision-capable models declare `['text', 'image']` input modalities and translate image attachments to each provider's wire format.
 
-Also included, registered when the matching provider is enabled:
+### Built-in tools
 
-- **`web_search`** provider (Codex) — uses Codex's hosted web search through DSH's native tool and citation UI. It follows the default Codex account and the plugin's proxy configuration. It registers as one candidate behind the host's `web` seam and does not claim it: with no other search provider mounted DSH auto-selects it, and alongside another one you pick the winner with the host's own `web.searchProvider` setting. Turning **Web search** off under Codex's **Provider tools** withdraws this provider, leaving the host's `web_search` tool to whatever else is registered.
-- **`x_search`** tool (Grok) — xAI's hosted X search, returning `{ answer, citations }`.
-- **`image_generate`** tool (ChatGPT or Grok) — `gpt-image-2` via the Codex backend, or `grok-imagine-image-2.0` via `api.x.ai/v1/images/generations`. The `provider` argument picks the preferred provider (`gpt`, the default, or `grok`); when the preferred one is logged out the other serves as fallback. Images are saved under `~/.dsh/plugins/subscriptions/images/` and the paths returned. The `size`/`quality` arguments map onto Grok's `aspect_ratio`/`quality` on the Grok path.
-- **`video_generate`** tool (Grok) — `grok-imagine-video-1.5` via `api.x.ai/v1/videos` (async submit + poll); MP4s are saved under `~/.dsh/plugins/subscriptions/videos/`, the path returned, and the clip plays inline in the conversation. Supports duration (1–15 s), aspect ratio, resolution, and image-to-video via `image_url`.
+Registered automatically when the corresponding provider is enabled (configurable per provider in **Edit model list → Provider tools**, applying to new sessions):
 
-`image_generate` also supports editing: the model passes optional `referenceImages` (1–5 complete DSH attachment references) to edit or use existing images as sources; omitting it keeps text-to-image generation. References can come from uploads, `read_image`, or previous generated images. Read local files with `read_image` first; paths are not attachment references. Copy references from the image reference text or structured tool results. Their order matches the prompt's image order. Edits save new files and return reusable references, including for subsequent edits with another provider.
+- **`web_search` provider (Codex)** — uses Codex's hosted web search through DSH's native `web_search` tool and citation UI, following the default Codex account and plugin proxy. It registers as a candidate behind the host's `web` seam (auto-selected when alone, or chosen via `web.searchProvider` alongside others); turning **Web search** off withdraws only this candidate.
+- **`x_search` (Grok)** — xAI's hosted X search returning `{ answer, citations }`.
+- **`image_generate` (ChatGPT or Grok)** — `gpt-image-2` via Codex or `grok-imagine-image-2.0` via xAI. `provider` selects `gpt` (default) or `grok`, falling back if the preferred provider is logged out. Pass `referenceImages` (1–5 complete DSH attachment references from uploads, `read_image`, or previous generations; local paths are not references) to edit existing images via Codex `/backend-api/codex/images/edits` or Grok `/v1/images/edits`. Outputs save to `~/.dsh/plugins/subscriptions/images/`. Generation and editing share same-provider multi-account failover (see [Image Account Scheduling](docs/image-account-pool.md)).
+- **`video_generate` (Grok)** — `grok-imagine-video-1.5` via `api.x.ai/v1/videos` (async submit + poll), supporting duration (1–15 s), aspect ratio, resolution, and image-to-video (`image_url`). MP4s save to `~/.dsh/plugins/subscriptions/videos/` and play inline.
 
-Codex edits use `/backend-api/codex/images/edits`; Grok edits use `/v1/images/edits`. Existing provider preference, logged-out fallback, and session tool policy still apply. Empty arrays, duplicate or invalid references, and attachment-limit violations fail explicitly instead of generating a new image. Editing requires the DSH attachment service.
-
-
-Image generation and editing share same-provider account scheduling: try the default account first, then prefer the successful account in that session. Explicit quota, authentication, or image-entitlement rejection tries the remaining accounts; a 401 gets at most one credential refresh and retry first. Image-only cooldowns honor provider reset times and clear on login/logout. Transport failures, timeouts, 5xx responses, and invalid requests do not automatically resend, avoiding duplicate images. Set `pool.enabled: false` or `pool.autoAccounts: false` (legacy `autoFamilies` is accepted) to use only the default account. Image scheduling does not use chat catalogs, chat quota scoring, `families`, or `tiers`.
+For provider-specific wire details, Codex/Claude client-version discovery, Claude extended thinking replay & prompt-cache TTL, Copilot dual-wire routing, and Antigravity schema/endpoint handling, see [Provider Guide](docs/providers.md) and [Antigravity Output Images](docs/antigravity-output-images.md).
 
 ## Install
 
-### DSH compatibility
+> **DSH compatibility:** Requires DSH `>=0.2.0-rc.2` (DSH `0.1.x` is no longer supported). See [Development & DSH compatibility](docs/development.md) for peer-range policy.
 
-DSH peers use two short ranges with no upper bound: `>=0.2.0-rc.2 || >=0.2.1-0`. The first retains the minimum supported version; the second admits all `0.2.1` alpha/RC builds under npm/pnpm's default peer matching, avoiding version-mismatch warnings from these five DSH peers for that release line. Maintain one prerelease anchor per supported release line, not an entry for every RC. Development dependencies remain pinned to `0.2.1-rc.2`.
-
-Harness uses `includePrerelease: true` and admits all versions at or above the minimum, including future prereleases. npm/pnpm default matching admits later stable versions but requires an explicit prerelease anchor for each new release line (for example, `>=0.2.2-0` for `0.2.2` prereleases). There is no upper bound: future incompatible releases are not blocked, and admission does not guarantee runtime compatibility.
-
-In DSH `0.2.1-rc.2`, the load-time check uses `engines.dsh` when declared; otherwise, every `@deepseek-ai/dsh` and `@deepseek-ai/dsh-*` peer must match the running DSH version. Prereleases participate in this check. This plugin does not declare `engines.dsh`, so its DSH peer ranges determine whether it can load. The `@deepseek-ai/cordis` and `@deepseek-ai/schemastery` peers affect package-manager dependency resolution, not this load-time check. They keep their `^4.0.1` / `^3.18.1` floors and also list the `4.0.5-alpha` / `3.18.5-alpha` builds bundled with DSH `0.2.1-alpha.2` and `0.2.1-alpha.3`, because those caret ranges exclude these prereleases under npm's default semver rules.
-
-DSH `0.1.x` is no longer supported. Users on that line must upgrade to a supported DSH version or retain an older compatible plugin release.
-
-### Managing accounts and pool models
-
-Open **Settings → Subscriptions → provider → Manage** to edit account aliases, automatic-pool participation and model allowlists, and independent account model entries. Existing accounts continue using automatic pooling by default. Independent entries stay bound to one account and never fall back to another account when unavailable. These settings govern LLM routing, not image/video/search tool account policies. See [Account and model management](docs/account-management.md).
-
-### Refreshing model lists
-
-The model picker uses saved catalogs immediately, including catalogs for non-default accounts, without waiting for network discovery or starting a refresh on each open or selection. The plugin checks catalogs at startup, skips snapshots fetched within the last five minutes, then checks again 60 minutes after the previous check finishes. Failed checks retain saved models and wait for the next scheduled check. An account without any saved catalog still waits for its first discovery.
-
-In **Settings → Subscriptions → provider → Edit model list**, use **Refresh** to fetch the current catalog immediately and update the conversation model picker. Successful background updates also invalidate the picker cache. This is separate from subscription-usage and credential refresh, whose behavior is unchanged. If `models.<provider>` is explicitly configured with a non-empty list, that list still overrides discovery.
-
-Codex catalog visibility depends on the `client_version` request parameter. By default the plugin reads the stable version from the official npm `@openai/codex` package's public metadata (no CLI installation or subscription credentials sent to npm). Successful lookups are cached in memory for six hours; failures retry after five minutes and retain the last successful version, or the verified `0.153.4` fallback on first use. The lookup has a 5-second deadline, shares in-flight work across accounts, and ignores prerelease or regressed versions. On load the plugin also raises Node's Happy Eyeballs per-address connect attempt timeout to at least 1.5 seconds (never lowering a larger host value), because the 250ms default drops every connection on links where one TCP handshake takes longer than that. Manual model-list refresh also rechecks the version. An explicit plugin configuration field, `codexClientVersion: '0.153.4'`, takes precedence and disables automatic lookup; restart DSH after changing it. Model availability remains account-dependent; see [verification notes](docs/codex-catalog-refresh.md).
-
-Claude requests present themselves as Claude Code, and the endpoint gates newer models on the Claude Code version (for example, Opus 5.5 requires 2.1.280 or newer). The plugin therefore reads the `latest` version from the official npm `@anthropic-ai/claude-code` package's public metadata, with the same caching, deadline, and retry rules as the Codex lookup, and no subscription credentials sent to npm. It never presents a version older than the locally installed `claude` CLI or the bundled fallback, which is also what it uses while npm is unreachable. Manual model-list refresh also rechecks the version. **Settings → Subscriptions** shows the version Codex and Claude currently present next to each name, along with its source: the latest on npm, the local CLI, the built-in fallback, or your configured value. A fallback there means the npm lookup is not getting through.
-
-### Installation commands
-
-With the `dsh` CLI available, install from npm (prebuilt artifacts, no build permission needed):
+Install from npm (prebuilt artifacts, no build script permission needed):
 
 ```sh
 dsh plugin --profile web add dsh-plugin-subscriptions
 ```
 
-Or install the sources from GitHub:
+Or install from GitHub sources:
 
 ```sh
 dsh plugin --profile web add github:V1ki/dsh-plugin-subscriptions
 ```
 
-pnpm will ask you to allow this package's build script on first install (git installs fetch sources, not built artifacts); add the printed key to the profile's `pnpm-workspace.yaml`:
+Git installs compile on install, so pnpm prompts you to allow this package's build script in the profile's `pnpm-workspace.yaml` (only grant this to packages you trust), then re-run `add`:
 
 ```yaml
 allowBuilds:
   dsh-plugin-subscriptions: true
 ```
 
-and re-run the `add`. Only grant this to packages you trust — it runs the package's code at install time.
-
-From a local checkout instead:
+From a local checkout:
 
 ```sh
 git clone https://github.com/V1ki/dsh-plugin-subscriptions.git
@@ -168,10 +121,10 @@ cd dsh-plugin-subscriptions && pnpm install && pnpm build
 dsh plugin --profile web add ./dsh-plugin-subscriptions
 ```
 
-Headless-only usage without installing into a profile (log in via the web UI first — the token file is shared):
+Headless usage without installing into a profile (log in via the web UI first — the token file is shared):
 
 ```sh
-cp overlay.example.yml overlay.yml   # then edit the name: to this checkout's absolute lib/index.js path
+cp overlay.example.yml overlay.yml   # set name: to this checkout's absolute lib/index.js path
 dsh --profile headless --patch <checkout>/overlay.yml "your task"
 ```
 
@@ -183,243 +136,123 @@ Installed from npm:
 dsh plugin --profile web update --latest dsh-plugin-subscriptions
 ```
 
-Installed from GitHub: re-run the same `add github:V1ki/dsh-plugin-subscriptions` command — it re-fetches the sources and rebuilds. A linked local checkout just needs `git pull && pnpm build` in the checkout.
+Installed from GitHub: re-run `dsh plugin --profile web add github:V1ki/dsh-plugin-subscriptions` to re-fetch and rebuild. From a linked local checkout, run `git pull && pnpm build`.
 
-Either way, restart `dsh web` afterwards so the new version loads.
+Restart `dsh web` after updating so the new version loads.
 
 ## Use
 
-1. `dsh web`, open the printed URL.
-2. Settings → **Subscriptions**: click **Connect** on a provider. For Claude, credentials are imported instantly if you have run `claude` and logged in at least once; without them, Claude authorizes in the browser like the others. For Codex, Grok, and Antigravity, authorize in the opened browser tab; Copilot shows a GitHub device code to enter at `github.com/login/device`; if a browser flow can't complete (headless host), expand the manual fallback and paste the callback URL or code.
-3. In any session, open the model picker (`/model`) and choose a model under **ChatGPT (Codex)** / **Claude (Subscription)** / **Grok (Subscription)** / **GitHub Copilot** / **Google Antigravity**.
+1. Start `dsh web` and open the printed URL.
+2. Open **Settings → Subscriptions** and click **Connect** on a provider:
+   - **Claude** imports credentials immediately if you have logged into Claude Code before; otherwise it uses browser OAuth.
+   - **Codex**, **Grok**, and **Antigravity** authorize in a browser tab (expand the manual fallback to paste the callback URL or code on headless hosts).
+   - **Copilot** displays a GitHub device code to enter at `github.com/login/device`.
+3. In any session, open the model picker (`/model`) and select a model under your connected subscription. Logged-out providers stay out of the picker and direct requests fail cleanly with `MISSING_CREDENTIAL`.
 
-> **Note on Google Antigravity:** Google Antigravity is disabled by default due to high account-suspension (ToS) risk and upstream HTTP 429 rejections on native DSH chat requests. Even if enabled manually in **Settings → Subscriptions**, models currently cannot be used — it is effectively limited to checking account usage while waiting for an official approach.
+### Multiple accounts & model pools
 
-Not logged in? The provider stays out of the picker, and requests fail with `MISSING_CREDENTIAL` pointing at the Settings page; nothing else breaks.
+Every provider supports multiple accounts via **Add account** (Claude offers **Browser authorization** and **Import Claude Code** separately so OAuth accounts refresh independently without colliding on the CLI Keychain). Accounts are keyed by identity (email / login, or workspace+user for Codex); the ★ default account serves direct routes.
 
-### Multiple accounts
+When a provider has **two or more accounts**, the picker shows the deduplicated union of their catalogs: shared models automatically fail over across accounts (sticky per session to preserve prompt caches), while account-only models route directly to the account that offers them. All pool strategies skip members whose applicable window is at `≥100%` unless a Codex account still reports remaining purchased credits — credit-funded Codex accounts remain available as a last resort after accounts with included quota.
 
-Every provider accepts several accounts: once one is connected, the card grows an **Add account** button (Claude offers **Browser authorization** and **Import Claude Code** separately). Accounts are keyed by their identity (email / login) — re-logging the same account updates it in place, a different account appends. Browser authorization signs in whichever account the browser currently uses, so switch accounts there first (or use an incognito window with the manual code) to add a different one. The ★ default account serves the direct provider routes; pool routes use every account. A Claude account imported from Claude Code stays synced with the CLI's credential store; OAuth-added Claude accounts refresh standalone so several accounts never fight over the Keychain entry.
+Open **Settings → Subscriptions → provider → Manage** to set account aliases, pool participation, model allowlists, and independent single-account model entries (which stay bound to one account without failover). See [Account & Model Management](docs/account-management.md) and [Model Pools & Rate Limits](docs/pool-and-rate-limits.md).
 
-### Edit visible models, context windows, and tools
+### Display names, visible models, effort & speed
 
-Open **Settings → Subscriptions → provider → Edit model list**, search and select models, then **Save changes**. All discovered models are shown automatically by default. Selecting individual models, selecting all, or clearing the selection saves an explicit list; newly discovered models then stay hidden until selected. Enable automatic display again to restore discovery-driven visibility. Hidden models remain usable by existing sessions, and the editor retains the full catalog so they can be restored. Refreshing discovery preserves preferences. The dialog has one **Save changes** / **Cancel** pair: Save submits the model list together with the account settings above it, and Cancel discards both and closes the dialog.
+- **Subscription & model display names** — edit the provider display name at the top of **Manage** and per-model names in **Edit model list** (single-line, up to 80 characters, saved in `provider-settings.json`). Subscription names also update provider group headers in the native model picker. Clear a name or choose **Reset to default** to restore defaults; provider/model IDs and routing are unaffected.
+- **Edit model list** — filter visible models (automatic discovery by default, or save an explicit selection; hidden models remain usable by existing sessions), configure default reasoning effort (**Follow provider** or override, intersected across pool members), set Codex token context budgets or Grok `context_windows` tiers (local DSH compaction budget only), set Codex **Subagent default speed**, toggle provider tools (Codex `web_search` and `image_generate`; Grok `image_generate`, `video_generate`, and `x_search`), or click **Refresh** to reload the live catalog immediately. All edits share one **Save changes / Cancel** pair.
+- **Remembered Codex speed** — the composer **Speed** toggle and `/fast` remember your last successful choice per underlying model across switches and restarts (`model-speeds.json`), independently of subagent defaults.
+- **Antigravity effort grouping** — Antigravity groups `Low` / `Medium` / `High` catalog variants into one picker entry with native effort controls (preferring `High → Medium → Low` by default; concrete model IDs remain callable).
 
-Codex models also accept a context budget in tokens; leave it blank to follow the provider. The plugin reads each account's `context_window` and `max_context_window`, caps the requested budget at that account's maximum, and uses the advertised default as the conservative ceiling when no maximum is provided. Account pools resolve each member separately and use the smallest window. This changes DSH's local history budget and compaction timing, without sending an API capacity override. Longer contexts can increase response latency.
+### Usage badge & dashboard
 
-Grok models whose catalog publishes a `context_windows` tier list offer a window picker instead: keep **Follow provider** for the advertised default (currently 256K) or pick a tier such as **500K**. The plugin reads the tiers from the Grok CLI catalog, caps the choice at the largest advertised tier, keeps the advertised default when the catalog offers no list, and shows a still-saved tier as unavailable instead of silently dropping it after a refresh stops offering it. Like the Codex field above, this only changes DSH's local history budget and compaction timing; it does not raise the API's own capacity, and the provider decides how a larger window is billed. New sessions pick up the updated window immediately; existing sessions apply it on the next message.
+- **Composer pill** — shows up to two percentages for a single-account provider (5-hour first, weekly second) or an account count for multi-account providers; click to inspect every provider, account, reset time, and Codex credit balance.
+- **Display preferences** — **Settings → Subscriptions → Status-bar quota display** (`Current subscription only` / `Hidden`) and **Quota percentages** (`Used` / `Remaining`) save locally in the browser and sync across tabs without affecting routing or exhaustion guards.
+- **Usage Dashboard** — open **Subscriptions** in the sidebar to view KPIs, the 26-week heatmap, daily token trends, and 5-hour/weekly quota cycles across Codex, Claude, Grok, and Antigravity, or clear local plugin usage history. See [Usage Tracking & Dashboard](docs/usage-tracking.md).
 
-The same editor controls Codex Web Search and image generation, plus Grok image generation, video generation, and X search. Changes apply only to sessions created after saving; existing sessions retain their creation-time policy, including after restart. Image generation is shared: it disappears only when neither configured provider enables it, and execution never falls back to a provider disabled for that session. Claude and Copilot currently have no standalone subscription tools to configure.
+## Configure
 
-Preferences and tool-policy history live in `~/.dsh/plugins/subscriptions/provider-settings.json` (mode 0600), independently of model-catalog refresh. Existing non-empty `models.<provider>` configuration still defines the base catalog; visibility selections filter that catalog.
-
-### Remembered composer speed
-
-The Codex **Speed** control and `/fast` remember the last successful choice per underlying model (shared with its independent-account entries), across model switches and host restarts. These preferences live in `~/.dsh/plugins/subscriptions/model-speeds.json` (mode 0600), independently of the model editor's subagent speed defaults. Subagents still use their configured defaults unless explicitly overridden in that session. Fast routing always requires the current catalog to advertise it; a save failure leaves the previous confirmed choice unchanged. Legacy RPC callers without a model keep session-only behavior.
-
-### Reasoning defaults in the model editor
-
-Default reasoning effort now lives in **Edit model list**, beside each model's visibility and context settings. Apply edits with the dialog's **Save changes**, or discard unsaved edits with Cancel. Hidden models remain editable. Models without reasoning levels have no selector; **Follow provider** clears an override. Choices come from live capabilities, intersected across account-pool members. Custom pool aliases do not offer ineffective effort overrides.
-
-Existing defaults continue to load from and save to `~/.dsh/plugins/subscriptions/model-defaults.json` (mode 0600). If a save fails partway through, unfinished edits remain in the draft; the UI reports any defaults already saved and lets you retry.
-
-## Config
+Core plugin configuration in your DSH profile:
 
 ```yaml
 - id: llm-subscriptions
   name: dsh-plugin-subscriptions
   config:
-    providers: [codex, claude]        # subset; default all five
+    providers: [codex, claude]        # subset; default all five (antigravity disabled by default in UI)
     streamIdleTimeoutMs: 300000
-    claudePromptCacheTtl: 5m           # Claude prompt-cache lifetime: 5m (default) or 1h
-    claudeDeferTools: []               # Claude: tool-name patterns sent deferred (see below); empty = unchanged request
+    claudePromptCacheTtl: 5m          # Claude prompt-cache TTL: 5m (default) or 1h (also live-toggleable in Manage)
+    claudeDeferTools: []              # Claude: literal tool names or prefix* patterns sent with defer_loading
     rateLimit:
-      wait: true                       # wait out a closed rate-limit window (default)
-      maxWaitMs: 21600000              # ceiling on one wait; 6 h, covers a 5-hour session window
-    models:                            # override the discovered/built-in catalogs
+      wait: true                      # wait out disclosed 429 reset windows (default)
+      maxWaitMs: 21600000             # 6 h ceiling (covers a 5-hour session window)
+    models:                           # optional catalog overrides
       codex:
         - { id: gpt-5.6-sol, name: GPT-5.6 Sol, contextWindow: 272000, inputModalities: [text, image] }
-      copilot:                         # manual entries disable Copilot catalog discovery
-        - { id: gpt-5.6-sol, wire: responses }   # copilot only: force the upstream protocol
-```
-
-`claudeDeferTools` lists tool names (or prefixes ending in `*`, for example `mcp__*`) whose definitions the Claude route sends with
-`defer_loading: true`. When at least one tool is deferred, the route also adds Anthropic's server-side tool search tool
-(`tool_search_tool_regex_20251119`), so the model loads a deferred definition only when it needs it. This shrinks the tool
-definitions every request carries: in the verification in [`docs/claude-deferred-tools-verification.md`](docs/claude-deferred-tools-verification.md)
-30 tools of about 600 tokens each went from 18,658 to 713 input tokens. The default is empty and then the request is
-byte-identical to earlier releases. The first turn in which the set of deferred tools becomes non-empty (or empty again) changes `tools`, which
-Anthropic documents as invalidating the cache once; later turns keep the cache. A pattern is a literal name or a prefix with one trailing `*`; it is never a regular
-expression. If DSH core ever passes a tool marked `deferLoading` to this route, that tool is deferred too; today core removes the marker before the request reaches this plugin (the route does not declare `toolUpdate`), so the pattern list is what defers tools. Limits of the API: only models that support tool search accept it (Opus 4.1 and earlier do not; a model that rejects it answers 400, so enable the option only with
-supported models); at least one tool must stay
-loaded (the search tool counts), and a deferred tool cannot carry `cache_control` (this route never puts one on a tool; the
-tools+system mark sits on `system`). When the model runs a search inside a turn, usage is the cumulative total the endpoint reports in `message_delta`. A request with deferred tools was served from the prompt cache in the end-to-end check, and Anthropic documents that deferred tools
-leave the cached prefix untouched ([prompt caching with tools](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-use-with-prompt-caching));
-a hit rate across a long session was not measured.
-
-`claudePromptCacheTtl` sets how long Anthropic keeps the Claude conversation cache after its last use.
-It can also be changed without a restart from Settings → Subscriptions → Claude → Manage ("Prompt cache
-lifetime"); that choice is stored in `provider-settings.json`, overrides the config value, and applies
-from the next turn. The default, `5m`, sends exactly the request earlier releases sent. `1h` marks every cache breakpoint
-(the tools+system prefix and the three conversation marks) with `ttl: "1h"`. The same TTL is used for
-all of them on purpose: Anthropic rejects a one-hour breakpoint that follows a five-minute one.
-Cache reads have the same price for either TTL, but a one-hour *write* is priced at 2×
-the base input price instead of 1.25×. One hour may pay off when you often pause for 5–60 minutes
-between messages and can reuse the prefix; the benefit depends on the workload and does not establish
-subscription quota savings. With frequent reuse inside five minutes, the higher write price may not pay off.
-Claude Code itself requests the one-hour TTL for the main conversation on a subscription; see
-[Claude Code's prompt-caching notes](https://code.claude.com/docs/en/prompt-caching#which-ttl-each-request-gets).
-Changing the setting on an already-cached conversation may cause one prefix rewrite: with a conversation-tail
-breakpoint, the first one-hour request after five-minute writes rewrote the prefix in testing, while a
-system-only breakpoint could hit. A five-minute request can read a one-hour entry, but a one-hour-marked
-read does not upgrade a five-minute entry's lifetime. Compaction and session-title requests stay on five
-minutes to preserve their existing auxiliary-request behavior. Requests from subagents carry no marker the plugin can see, so they follow the setting
-along with the main conversation. It takes effect after restarting DSH and affects Claude only; Codex, Grok,
-Copilot and Antigravity use their own caching.
-
-Claude's extended thinking is replayed the way Claude Code replays it: each `thinking` block's signature (and each
-`redacted_thinking` payload) is kept with the assistant message, together with the received thinking text, and both
-are sent back unchanged, in their original position, on later requests. In a tool loop that lets the model continue
-from its earlier reasoning instead of re-deriving it after every tool result.
-
-This plugin conservatively replays thinking only to the same concrete provider, account, and model that produced
-it. Some models support cross-model thinking replay; this plugin does not enable it. History from another model,
-provider or pool member is sent without its thinking, as before, and so is reasoning stored by earlier releases.
-
-Anthropic binds each thinking block to everything before it (the `system` prompt, the set of `tools`, and earlier
-messages) and to the thinking block that preceded it; see
-[preserved thinking](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking#prefix-check). The
-plugin records that binding with each response and sends a block back only while it still holds, so when DSH changes
-an earlier part of the request (a rewritten system prompt or tool list, a pruned tool result, a compaction summary)
-the thinking that depended on it is left out and the rest of the history is sent as usual. As a backstop, requests to
-Claude 5.1 and later models also ask the API to drop, rather than reject, a block it finds invalid
-(`block_binding: { prefix_mismatch_behavior: "drop_block" }` with the `thinking-binding-controls-2026-08-01` beta),
-and if the API still refuses a replayed block the turn is retried once without replayed thinking. Cache breakpoints
-never land on a thinking block, which Anthropic rejects.
-
-`wire` (copilot entries only) pins a model to `chat-completions` or `responses`. Manual
-entries keep working without it — the field exists because a configured model the live
-catalog does not know would otherwise default to `/chat/completions`, which
-responses-only families (gpt-5.5/5.6, …) reject. Pinning `chat-completions` also opts
-out of the tools+effort auto-reroute described above.
-
-Antigravity includes the public desktop OAuth client identity used by [pi-antigravity](https://github.com/Rahularya01/pi-antigravity/blob/697858cafcf1faddf2ae898d2f053b2ff26c05e6/SECURITY.md#oauth-client-credentials), so **Log in** opens Google authorization without additional client configuration. To use your own client, configure `antigravity.clientId` and its optional `antigravity.clientSecret`, or set `ANTIGRAVITY_CLIENT_ID` and its optional `ANTIGRAVITY_CLIENT_SECRET`. Priority is plugin configuration, environment, then the bundled default. Each source supplies its own client pair; a custom client ID never inherits the default secret, and a secret without a matching ID is rejected. Optional `antigravity.baseURL`, `antigravity.userAgent`, and `antigravity.onboard` configure its endpoint, client identity, and account initialization. This route uses Antigravity OAuth and the v1internal project envelope, independently of Gemini CLI.
-
-Antigravity converts Gemini tools to `parametersJsonSchema` and Claude/GPT-OSS tools to the supported `parameters` subset, resolving local schema references without modifying the DSH tool registry. Unresolved/cyclic references and custom-tool unions that cannot be represented fail before the request. Known runtime families expose their reasoning efforts in model settings and use model-specific thinking budgets; signed text, reasoning, and tool calls are replayed only to the same provider/model. Compatibility mapping is based on [pi-antigravity](https://github.com/Rahularya01/pi-antigravity/tree/697858cafcf1faddf2ae898d2f053b2ff26c05e6); offline tests do not verify account eligibility or live API acceptance.
-
-Without `antigravity.baseURL`, generation and catalog/project reads try the daily endpoint, then production on a transport failure or HTTP 404/502/503/504, before returning any stream content. Explicit origins stay pinned. HTTP 400/401/403/429 and cancelled requests do not trigger endpoint fallback; onboarding is never repeated across endpoints.
-
-## Model pools
-
-When a provider has **two or more logged-in accounts**, the picker shows the **union** of every account's catalog (duplicates dropped). Pick `claude-sonnet-5` under Claude (or `gpt-5.4` under ChatGPT) as usual — there is no extra pool group and no new model id.
-
-- **Shared models.** A model listed by ≥2 accounts failovers between them (sticky, quota-aware). Each account is discovered separately, so a Plus login is not asked to serve a Pro-only model.
-- **Account-only models.** A model listed by only one account is sent to that account. It still appears in the picker even if that account is not the default.
-- **Explicit account lists (`families`).** Replace the auto member list for one catalog model (same provider only; cross-provider members are ignored). Pin `account` or omit it for the default.
-  `account` is the stable account key shown by the `status` endpoint — an email for Claude, a login for Grok / Copilot / Antigravity. Codex keys are per workspace **and** user (`["<workspace-id>","user","<user-id>"]`), so for Codex you may instead pin the login email, or the bare workspace ID when only one user of that workspace is logged in; an ambiguous reference resolves to nothing rather than to the wrong user.
-- **Tier extras (`tiers`, optional).** Extra picker rows with heterogeneous fallbacks, listed under the first member's provider. Not created automatically.
-
-Selection is sticky per session (prompt caches survive) with two existing strategies: `priority` (first healthy member wins) and `quota_aware` (the default — each member is scored by its required burn rate, `remaining quota / time until window reset`, so a window about to reset with plenty left gets spent instead of wasted; the sticky member holds until a challenger out-scores it by `switchMargin`). Under `quota_aware`, members at 95–<100% on an applicable usage window are near-full fallbacks, still ordered by urgency. **All strategies skip members with a known applicable window at ≥100% unless that Codex account still reports remaining purchased credits.** Credit-funded accounts stay available, but only after every account that still has included quota. When every currently usable candidate is exhausted and none has remaining credits, the request stops with a quota error. The expanded usage badge shows the credit balance and warns when all displayed Codex accounts report exhaustion. After an external reset, use the account's **Settings → Subscriptions → Refresh** button (a live usage-endpoint failure cooldown still applies). This is best-effort protection based on cached telemetry, not a billing cap: unknown usage remains usable, snapshots can lag, and independent/direct-account or image/video routes are outside this model-pool guard. Before any content is delivered, an empty completion or transport failure switches to the next eligible member without starting a cooldown. Other sessions can still use the member that returned an empty completion. Quota and rate-limit failures retain their cooldown (using the provider’s retry hint or reset when available): it applies to the whole account, except for Claude’s model-scoped limits. Transient server failures cool only the failing member. Copilot exposes no usage telemetry, so it scores zero and naturally serves as the fallback of last resort.
-
-Set `pool.strategy: quota_normalized` to opt into relative pacing. It divides the remaining quota fraction by the fraction of the reported window duration left until reset (bounded between 0.001 and 1). If the duration or reset is unknown, the remaining quota fraction alone is the score; the plugin never guesses a duration from time left. The same 95% fallback, 100% exclusion (unless remaining Codex credits are reported) and session stickiness apply. Set it back to `quota_aware` or remove the setting to restore the default ranking.
-
-```yaml
-- id: llm-subscriptions
-  name: dsh-plugin-subscriptions
-  config:
+      copilot:                        # manual entries disable Copilot catalog discovery
+        - { id: gpt-5.6-sol, wire: responses }   # copilot only: pin chat-completions or responses
     pool:
-      enabled: true                   # default; needs ≥2 accounts of one provider
-      strategy: quota_aware           # or priority / quota_normalized
-      switchMargin: 2                 # hysteresis factor for quota_aware
-      autoAccounts: true              # pool each catalog model across that provider's accounts
-      families:                       # explicit account list for one catalog model (same provider)
+      enabled: true                   # default; active when a provider has ≥2 accounts
+      strategy: quota_aware           # priority | quota_aware | quota_normalized
+      switchMargin: 2                 # hysteresis factor for quota_aware / quota_normalized
+      autoAccounts: true              # automatically pool shared catalog models across accounts
+      families:                       # optional explicit same-provider account list for a model
         claude-sonnet-5:
-          - { provider: claude, model: claude-sonnet-5 }                   # default account
+          - { provider: claude, model: claude-sonnet-5 }
           - { provider: claude, account: bob@example.com, model: claude-sonnet-5 }
-      tiers:                          # optional extra picker rows
+      tiers:                          # optional extra cross-model fallback rows in the picker
         smart:
           - { provider: claude, model: claude-sonnet-5 }
           - { provider: codex, model: gpt-5.6-sol }
           - { provider: grok, model: grok-4.6 }
 ```
 
-### Waiting out a rate-limit window
-
-A subscription plan is rate-limit shaped by design — a 5-hour session window, a weekly one, and on some plans a per-model weekly one — so a 429 is not a dead end: the window reopens at a time the provider discloses. Each route reads that reset off its own 429 and turns it into that account's pool cooldown (see Model pools above) instead of a fixed 5-minute guess.
-
-Only a signal that names the window which actually rejected the request is read: Anthropic's `anthropic-ratelimit-unified-reset`, the seconds Codex puts on a `usage_limit_reached` rejection, the delay xAI names in the error body, or a plain `retry-after`. The per-bucket rollover snapshots (`anthropic-ratelimit-{requests,tokens,…}-reset`, `x-codex-*-reset-after-seconds`, `x-ratelimit-reset-*`) ride every response and cannot say which bucket refused — the earliest is usually one that still had room — so a 429 carrying nothing else is logged through the plugin's warning sink, naming the headers and the head of the body, rather than parking the turn (or the pool cooldown) on a guess.
-
-Reading is confined to a 429. Every other failure keeps its short local backoff: those same headers ride a transient 500 too, and honouring them there would hold a turn for the rest of the window over an overload that clears in a second.
-
-With a pool, this is what actually does the waiting: a 429'd account is parked until its own disclosed reset and the request fails over to another account of the same provider immediately — no wait, no lost turn. Only once **every** account (the whole pool) is cooling down does the adapter report a `RATE_LIMIT` carrying the pool's *earliest* reset as the wait to take. With a single account (no pool, or a provider with only one login), that same disclosed reset is reported directly.
-
-Waiting on that reported delay is executed by [`@deepseek-ai/dsh-llm-retry`](https://www.npmjs.com/package/@deepseek-ai/dsh-llm-retry), which every route's retry policy is written for: add it to the composition, or nothing waits and a closed window fails the turn as before (falling back to whichever other pool accounts are healthy, if any).
+To automatically wait out a disclosed 429 rate-limit window when a single account or an entire pool is cooling down (up to `rateLimit.maxWaitMs`), include [`@deepseek-ai/dsh-llm-retry`](https://www.npmjs.com/package/@deepseek-ai/dsh-llm-retry) in your profile composition:
 
 ```yaml
 - name: '@deepseek-ai/dsh-llm-retry'
 ```
 
-```yaml
-- name: dsh-plugin-subscriptions
-  config:
-    rateLimit:
-      wait: true            # default; false keeps the previous seconds-scale behaviour
-      maxWaitMs: 21600000   # 6 h — covers a 5-hour session window with slack
-```
+Where to find detailed configuration and tuning references:
 
-A reset further out than `maxWaitMs` — a weekly window days away, or a whole pool cooling down past it — fails the turn immediately with the reset time attached, rather than parking the session for days. `wait: false` drops back to local backoff alone.
+- **Full YAML schema, environment variables & `~/.dsh/plugins/subscriptions/` storage layout** → [Configuration & Storage](docs/configuration-and-storage.md)
+- **Pool strategies (`priority`, `quota_aware`, `quota_normalized`), Codex credits fallback, cooldowns, 429 waiting & Codex reset cards** → [Model Pools & Rate Limits](docs/pool-and-rate-limits.md)
+- **Provider-specific options & protocol quirks** (`claudePromptCacheTtl` — also adjustable without restart under **Settings → Subscriptions → Claude → Manage → Prompt cache lifetime**, `claudeDeferTools`, Claude extended thinking replay, Copilot `wire`, `codexClientVersion`, Antigravity OAuth & endpoint fallback) → [Provider Guide](docs/providers.md)
 
-All five routes share Claude Code's own retry shape: ten retries after the first attempt, backing off from 1 s with 20% jitter under a 60 s cap. These are consumer subscription endpoints that shed load in bursts, and the dsh-llm defaults (five retries from 500 ms to 10 s) give up after about fifteen seconds, which is short for that. A 429 that discloses no reset is now retried locally for roughly 17 minutes before the turn fails — about 5 minutes with `wait: false`, where the 60 s cap actually binds. Copilot currently uses the generic `retry-after` signal; unrecognized GitHub rate-limit headers are surfaced through the plugin warning sink for a future provider-specific reader.
+### Proxy
 
-One trade-off worth knowing: the delay ceiling is shared with that local backoff, so raising `maxWaitMs` also raises how long an unrelated transient failure (`TRANSPORT`, `SERVER`, `TIMEOUT`) can back off for before the finite retry budget runs out — up to 512 s on the last of the ten retries instead of the 60 s cap.
+Prefer DSH's host-managed proxy (`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` and `NO_PROXY` in your launch environment or `$DSH_HOME/.env`; see the [DSH network proxy guide](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.1.3-alpha.1/docs/user/guide/network-proxy.md)), then restart DSH and **disable the plugin proxy**. Note that environment proxy credentials are inherited by child commands, unlike the plugin's private config.
 
-## Proxy
+An optional per-plugin override remains available in **Settings → Subscriptions → Proxy → Configure…** for subscription-only routing (covering token exchanges, model streams, usage lookups, catalog discovery, and `web_search` / `x_search` / `image_generate` / `video_generate`). Configure the HTTP(S) proxy URL (`http://127.0.0.1:7890`), optional username/password (saved in `~/.dsh/plugins/subscriptions/proxy.json`, mode `0600`, never returned to the browser), and optional comma-separated bypass hosts, then verify with **Test**. Changes apply immediately without restarting; disabled/bypassed requests fall back to DSH's global fetch routing (use host `NO_PROXY` for guaranteed direct connections). Browser OAuth tabs follow your browser/system proxy, and SOCKS proxies are not supported.
 
-DSH `v0.1.3-alpha.1` introduces host-managed proxy routing. Prefer configuring `HTTP_PROXY` / `HTTPS_PROXY` (or `ALL_PROXY`) and `NO_PROXY` in the launch environment or `$DSH_HOME/.env`, then restart DSH and **disable the plugin proxy**. See the [DSH network proxy guide](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.1.3-alpha.1/docs/user/guide/network-proxy.md). Proxy credentials in environment variables are inherited by child commands; this differs from keeping them in the plugin's private config. Existing settings are not deleted or migrated automatically.
+## Documentation
 
-The optional plugin override remains available for supported older DSH hosts and subscription-only routing. Every subscription request — token exchanges, model-API streams, usage lookups, model discovery, and the `web_search` / `x_search` / `image_generate` / `video_generate` tools — can use it. Configure it in **Settings → Subscriptions → Proxy → Configure…**: enable the flag, enter the proxy URL (`http://127.0.0.1:7890`), optional username/password, and an optional comma-separated bypass list (`127.0.0.1`, `localhost`, `*.example.com`). Disabled or bypassed requests use DSH's global fetch routing, **not necessarily a direct connection**; use the host's `NO_PROXY` when direct routing is required. The password is stored in `~/.dsh/plugins/subscriptions/proxy.json` (mode 0600) and is never returned to the browser. A "Test" button probes one endpoint through the current configuration and shows the HTTP status/latency.
-
-Changes apply immediately to subsequent requests — no restart needed. The OAuth authorization page opens in your browser and follows the browser/system proxy, not this setting. SOCKS proxies are not supported.
-
-## Related plugins
-
-This plugin only supplies model routes. Approval policy lives elsewhere:
-
-- [`dsh-plugin-auto-review`](https://github.com/delef/dsh-plugin-auto-review) — provider-native automatic review for DSH tool approvals. It reproduces Codex Guardian and Grok escalation logic on top of the `codex` / `grok` routes registered here (or compatible routes from other DSH LLM adapters) via `ctx.llm.stream()`, and does not touch accounts or credentials. Install with `dsh plugin --profile web add dsh-plugin-auto-review`.
-- [`dsh-sidebar-session-provider-icon`](https://github.com/prgrmrwy/dsh-sidebar-session-provider-icon) — tells the routes registered here apart in the session list: it draws the brand logo of the model selected in the composer in front of each sidebar session title, so a `codex`, `claude`, `grok` or `copilot` session (or an aggregator route) is recognisable without opening it. Reads DSH's own model-selection state, with a last-request fallback for history sessions. It reuses the host’s model catalog and does not call model providers directly. Install with `dsh plugin --profile web add dsh-sidebar-session-provider-icon`.
+- [Documentation Index](docs/README.md) — overview of all guides
+- [Account & Model Management](docs/account-management.md) — multi-account Manage panel, aliases, pool allowlists, independent entries, display names & Claude cache TTL toggle
+- [Configuration & Storage](docs/configuration-and-storage.md) — complete YAML schema, environment variables & `~/.dsh/plugins/subscriptions/` local file layout
+- [Provider Guide](docs/providers.md) — protocol details, catalog/version discovery, quirks & advanced options for Codex, Claude, Grok, Copilot & Antigravity
+- [Model Pools & Rate Limits](docs/pool-and-rate-limits.md) — scheduling strategies (`priority`, `quota_aware`, `quota_normalized`), credits fallback, cooldowns, 429 window waiting & Codex reset cards
+- [Usage Tracking & Dashboard](docs/usage-tracking.md) — Usage Dashboard storage, quota-cycle tracking, status-bar badge caching & multi-process durability
+- [Image Account Scheduling](docs/image-account-pool.md) — multi-account failover for `image_generate` (generation & editing)
+- [Antigravity Output Images](docs/antigravity-output-images.md) — inline image attachment contract for Antigravity
+- [Development Guide](docs/development.md) — DSH compatibility policy, build/test/Playwright regression scripts, repository layout & release workflow
 
 ## Develop
 
 ```sh
-pnpm install   # development baseline: published DSH 0.2.1-rc.2 packages
+pnpm install
 pnpm build     # tsc (lib/) + tsdown (lib/client.js browser bundle)
 pnpm test      # node --test over compiled unit specs
 ```
 
-For the optional offline quota UI check, point `PLAYWRIGHT_PATH` at an installed Playwright package and run `node test/subscription-usage-browser.mjs`. It uses synthetic accounts and intercepted browser routes, without a DSH server or credentials.
+Restart `dsh web` after building to load changes. See [Development Guide](docs/development.md) for DSH compatibility policy, offline Playwright UI checks, repository layout, and the GitHub Actions release workflow.
 
-The pnpm package extension supplies the published UI primitives' browser dependencies for Node component tests. DSH supplies those libraries to the browser at runtime.
+## Related Plugins
 
-`prepare` (used by git installs) runs `tsdown.prepare.config.ts`: a self-contained bundle build of both faces with all `@deepseek-ai/*` specifiers external — they resolve from the dsh installation at runtime, so this package never carries a second cordis copy.
+This plugin supplies model routes and subscription tools; approval policies and sidebar branding live in separate plugins:
 
-After `pnpm build`, restart `dsh web` to pick up changes.
+- [`dsh-plugin-auto-review`](https://github.com/delef/dsh-plugin-auto-review) — provider-native automatic review for DSH tool approvals. Reproduces Codex Guardian and Grok escalation logic on top of the `codex` / `grok` routes registered here (or compatible routes) via `ctx.llm.stream()`, without touching accounts or credentials. Install with `dsh plugin --profile web add dsh-plugin-auto-review`.
+- [`dsh-sidebar-session-provider-icon`](https://github.com/prgrmrwy/dsh-sidebar-session-provider-icon) — draws the brand logo of the selected composer model beside each sidebar session title so `codex`, `claude`, `grok`, `copilot`, or aggregator sessions are recognizable at a glance. Reads DSH's model-selection state (with last-request fallback for historical sessions) without calling providers directly. Install with `dsh plugin --profile web add dsh-sidebar-session-provider-icon`.
 
-### Release
+## License
 
-Releases are published by GitHub Actions ([`release.yml`](.github/workflows/release.yml)), not from a maintainer machine. Bump `version` in `package.json`, commit, then push a matching tag:
-
-```sh
-git tag v0.9.8 && git push origin main v0.9.8
-```
-
-The workflow checks that the tag matches `package.json`, installs with the frozen lockfile, runs `pnpm build` and `pnpm test`, publishes through [npm Trusted Publishing](https://docs.npmjs.com/trusted-publishers) with a [provenance attestation](https://docs.npmjs.com/generating-provenance-statements), and creates the GitHub release with generated notes. Prerelease versions (`0.10.0-rc.1`) go to the `next` dist-tag. No npm token is stored in the repository: npm authenticates the workflow via OIDC, and the provenance on the npm package page links each published tarball to the exact commit and workflow run that built it.
-
-## Layout
-
-- `src/index.ts` — plugin entry: config schema, adapter registration, auth-change re-announce, RPC wiring
-- `src/auth/` — PKCE/JWT helpers, token store, OAuth flow engine (temp loopback callback server), Claude Code credential reader (Keychain/file), `/subscriptions-auth` RPC channel
-- `src/providers/` — per-provider OAuth constants/exchange/refresh + `LlmAdapter`s, multi-account token plumbing (`accounts.ts`), the pool (`pool.ts` + `pool-health.ts` / `pool-usage.ts` / `pool-family.ts`), and `rate-limit.ts` (reset-instant parsing + retry policy)
-- `src/translate/` — dsh `Message[]` ⟷ OpenAI Responses / Anthropic Messages / Antigravity wire formats, SSE → `StreamChunk`
-- `src/providers/codex-search.ts` — Codex provider for DSH's native `web_search` capability
-- `src/tools/` — `x_search`, `image_generate`, and `video_generate`
-- `src/client/` — the Settings → Subscriptions page (browser half, zh/en, theme-token aware)
+[MIT](LICENSE)
