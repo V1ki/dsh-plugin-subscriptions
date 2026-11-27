@@ -145,28 +145,46 @@ export function requiredImageOffloadCount(messages: readonly TranslatableMessage
   return count
 }
 
+/** Request-image target carrying every host generation's fields. */
+export interface ImageRequestProjection {
+  width: number
+  height: number
+  /** DSH 0.1.x pixel budget. */
+  maxPixels: number
+  /** DSH 0.1.7–0.2.2 byte target. */
+  maxBytes: number
+  /** DSH 0.2.3+ hard encoded-byte cap: the route's own limit. */
+  maxImageBytes: number
+  /** DSH 0.2.3+ preferred encoded-byte target, never above `maxImageBytes`. */
+  imageTargetBytes: number
+}
+
 /**
  * The request projection for one oversized image, or undefined when it fits.
  * An image is oversized when its long edge exceeds `maxEdge`, or when its
  * stored bytes exceed `softBytes`; the latter keeps its dimensions and is only
  * re-encoded. Hosts before DSH 0.1.7 read a pixel budget (`maxPixels`), later
- * ones the target edges (`width`/`height`); each validates only its own
- * fields, so one projection carries both.
+ * ones the target edges (`width`/`height`). DSH 0.2.3 split the byte budget
+ * into a hard cap (`maxImageBytes`) and a preferred target
+ * (`imageTargetBytes`) and rejects a target that lacks them; hosts before it
+ * read the single `maxBytes`. Each host validates only its own fields, so one
+ * projection carries all of them.
  */
 export function imageRequestTarget(
   ref: { width: number; height: number; bytes?: number },
   limit: ImageRequestLimit,
-): { width: number; height: number; maxPixels: number; maxBytes: number } | undefined {
+): ImageRequestProjection | undefined {
   const maxBytes = limit.softBytes === undefined ? limit.maxBytes : Math.min(limit.maxBytes, limit.softBytes)
+  const budget = { maxBytes, maxImageBytes: limit.maxBytes, imageTargetBytes: maxBytes }
   const longEdge = Math.max(ref.width, ref.height)
   if (!(longEdge > limit.maxEdge)) {
     if (limit.softBytes === undefined || !(ref.bytes !== undefined && ref.bytes > maxBytes)) return undefined
-    return { width: ref.width, height: ref.height, maxPixels: ref.width * ref.height, maxBytes }
+    return { width: ref.width, height: ref.height, maxPixels: ref.width * ref.height, ...budget }
   }
   const short = (edge: number): number => Math.max(1, Math.floor(edge * limit.maxEdge / longEdge))
   const width = ref.width >= ref.height ? limit.maxEdge : short(ref.width)
   const height = ref.width >= ref.height ? short(ref.height) : limit.maxEdge
-  return { width, height, maxPixels: width * height, maxBytes }
+  return { width, height, maxPixels: width * height, ...budget }
 }
 
 /**

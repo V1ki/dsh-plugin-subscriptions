@@ -82,9 +82,10 @@ function store(options: { projection?: 'unsupported'; hostPath?: string } = {}) 
 }
 
 test('image request targets fit the long edge and carry both host projection shapes', () => {
-  // Pre-0.1.7 hosts read maxPixels, 0.1.7+ hosts read width/height.
-  assert.deepEqual(imageRequestTarget(WIDE, LIMIT), { width: 2000, height: 949, maxPixels: 1_898_000, maxBytes: 3_750_000 })
-  assert.deepEqual(imageRequestTarget(TALL, LIMIT), { width: 1545, height: 2000, maxPixels: 3_090_000, maxBytes: 3_750_000 })
+  // Pre-0.1.7 hosts read maxPixels, 0.1.7+ hosts read width/height, and
+  // 0.2.3+ hosts additionally require maxImageBytes/imageTargetBytes.
+  assert.deepEqual(imageRequestTarget(WIDE, LIMIT), { width: 2000, height: 949, maxPixels: 1_898_000, maxBytes: 3_750_000, maxImageBytes: 3_750_000, imageTargetBytes: 3_750_000 })
+  assert.deepEqual(imageRequestTarget(TALL, LIMIT), { width: 1545, height: 2000, maxPixels: 3_090_000, maxBytes: 3_750_000, maxImageBytes: 3_750_000, imageTargetBytes: 3_750_000 })
   assert.equal(imageRequestTarget({ width: 2000, height: 2000 }, LIMIT), undefined)
   assert.equal(imageRequestTarget(SMALL, LIMIT), undefined)
 })
@@ -92,14 +93,18 @@ test('image request targets fit the long edge and carry both host projection sha
 test('a soft byte target re-encodes heavy images at their own size and caps every target', () => {
   const soft = { ...LIMIT, softBytes: 1_000_000 }
   const heavy = { ...SMALL, bytes: 3_000_000 }
-  assert.deepEqual(imageRequestTarget(heavy, soft), { width: 800, height: 600, maxPixels: 480_000, maxBytes: 1_000_000 })
+  assert.deepEqual(imageRequestTarget(heavy, soft), { width: 800, height: 600, maxPixels: 480_000, maxBytes: 1_000_000, maxImageBytes: 3_750_000, imageTargetBytes: 1_000_000 })
   assert.equal(imageRequestTarget({ ...SMALL, bytes: 1_000_000 }, soft), undefined)
   assert.equal(imageRequestTarget({ width: 800, height: 600 }, soft), undefined, 'unknown size is sent as stored')
   assert.equal(imageRequestTarget(heavy, LIMIT), undefined, 'no soft target keeps the edge-only rule')
   assert.equal(imageRequestTarget(WIDE, soft)?.maxBytes, 1_000_000)
   assert.equal(imageRequestTarget(heavy, { ...LIMIT, softBytes: 5_000_000 }), undefined, 'the soft target never exceeds maxBytes')
-  assert.equal(imageRequestTarget({ ...SMALL, bytes: 4_000_000 }, { ...LIMIT, softBytes: 5_000_000 })?.maxBytes, 3_750_000)
-  assert.equal(imageRequestTarget(WIDE, { ...LIMIT, softBytes: 5_000_000 })?.maxBytes, 3_750_000)
+  for (const image of [{ ...SMALL, bytes: 4_000_000 }, WIDE]) {
+    const target = imageRequestTarget(image, { ...LIMIT, softBytes: 5_000_000 })
+    assert.equal(target?.maxBytes, LIMIT.maxBytes)
+    assert.equal(target?.maxImageBytes, LIMIT.maxBytes)
+    assert.equal(target?.imageTargetBytes, LIMIT.maxBytes)
+  }
 })
 
 test('Claude re-encodes lossless screenshots over 1MB within the edge limit', async () => {
@@ -108,7 +113,7 @@ test('Claude re-encodes lossless screenshots over 1MB within the edge limit', as
   const heavy = { ...SMALL, attachmentId: 'heavy', bytes: 3_000_000 }
   await resolveImages(withImages(heavy, SMALL), attachments, undefined, CLAUDE_IMAGE_LIMIT)
   assert.deepEqual(calls, ['request:heavy', 'stored:small'])
-  assert.deepEqual(targets, [{ width: 800, height: 600, maxPixels: 480_000, maxBytes: 1_000_000 }])
+  assert.deepEqual(targets, [{ width: 800, height: 600, maxPixels: 480_000, maxBytes: 1_000_000, maxImageBytes: CLAUDE_IMAGE_LIMIT.maxBytes, imageTargetBytes: 1_000_000 }])
 })
 
 test('offloaded images name a read-only copy when the filesystem maps the host path', async () => {
