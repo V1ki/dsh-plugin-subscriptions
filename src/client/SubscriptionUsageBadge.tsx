@@ -324,7 +324,7 @@ function usageWindowLabel(t: Translate, window: UsageWindow): string {
  * for the current model's provider, opening a dialog with every provider's
  * accounts and their windows, including unavailable telemetry.
  */
-export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsageBadgeProps) {
+export function SubscriptionUsageBadge({ rpc, currentModel, t, headerPlacement = false }: Pick<SubscriptionUsageBadgeProps, 'rpc' | 'currentModel' | 't'> & { headerPlacement?: boolean }) {
   const translate: Translate = t ?? fallbackTranslate
   const [displays, setDisplays] = useState<ProviderUsageDisplay[]>([])
   const [selection, setSelection] = useState<ModelSelection | undefined>(undefined)
@@ -333,7 +333,7 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
   const quotaMode = useQuotaDisplayMode()
   useQuotaClock()
   const current = selection?.provider
-  const badgeSelection = retainSubscriptionSelection(lastSubscription, selection)
+  const badgeSelection = headerPlacement ? selection : retainSubscriptionSelection(lastSubscription, selection)
   const [open, setOpen] = useState(false)
   const [hover, setHover] = useState(false)
   const inflightRef = useRef(false)
@@ -539,7 +539,7 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
   const [statsRow, setStatsRow] = useState<HTMLElement | null>(null)
   useEffect(() => {
     const seat = seatRef.current
-    if (seat === null) return
+    if (seat === null || headerPlacement) return
     const scope = statsScopeOf(seat)
     if (scope === null) return
     const find = (): HTMLElement | null => scope.querySelector<HTMLElement>('[data-composer-stats]')
@@ -547,7 +547,7 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
     const observer = new MutationObserver(() => { setStatsRow(find()) })
     observer.observe(scope, { childList: true, subtree: true })
     return () => { observer.disconnect() }
-  }, [])
+  }, [headerPlacement])
 
   const seat = <span ref={seatRef} style={styles.seat} aria-hidden />
   const collapsed = collapsedDisplays(displays, badgeSelection?.provider)
