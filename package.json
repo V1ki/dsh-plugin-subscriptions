@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-subscriptions",
   "version": "0.9.15",
-  "description": "Use ChatGPT (Codex), Claude, Grok (X Premium), GitHub Copilot, and Google Antigravity subscriptions as DeepSeek Harness LLM providers, with OAuth login from the web Settings page",
+  "description": "Use ChatGPT (Codex), Claude, Grok (X Premium), GitHub Copilot, Google Antigravity, Kimi Code, GLM Coding Plan, and Qwen 千问AI平台 subscriptions as DeepSeek Harness LLM providers, with browser login where the provider supports it",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -17,7 +17,11 @@
     "claude",
     "grok",
     "github-copilot",
-    "google-antigravity"
+    "google-antigravity",
+    "kimi",
+    "glm",
+    "qwen",
+    "zhipu"
   ],
   "type": "module",
   "packageManager": "pnpm@10.26.2",

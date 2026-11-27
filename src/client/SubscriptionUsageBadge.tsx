@@ -155,6 +155,9 @@ const PROVIDER_NAMES: Record<SubscriptionProvider, string> = {
   grok: 'Grok',
   copilot: 'Copilot',
   antigravity: 'Antigravity',
+  kimi: 'Kimi',
+  glm: 'GLM',
+  qwen: 'Qwen',
 }
 
 /**
@@ -246,7 +249,7 @@ export function compactSegment(d: ProviderUsageDisplay, model?: string, t: Trans
   const account = pillAccountOf(d)
   if (!account) return `${d.name} · ${t('quotaUnknown')}`
   const windows = account.windows
-  if (windows.length === 0) return `${d.name} · ${quotaUnavailableText(account.usage, account.loadFailed === true, t) ?? t('usageNoVisibleModels')}`
+  if (windows.length === 0) return `${d.name} · ${quotaUnavailableText(account.usage, account.loadFailed === true, t, d.provider) ?? t('usageNoVisibleModels')}`
   if (d.provider === 'antigravity') {
     const matching = model === undefined ? [] : windows.filter(w => antigravityQuotaApplies(w.scope, model))
     if (matching.length === 0) {

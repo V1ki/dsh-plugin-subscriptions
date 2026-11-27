@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-把你的 **ChatGPT(Codex)**、**Claude**、**Grok(X Premium)**、**GitHub Copilot** 和 **Google Antigravity** 订阅当作 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的 LLM provider 使用 —— 不需要 API key。Codex、Grok 和 Antigravity 通过 dsh web 界面 OAuth 登录(设置 → 订阅);Copilot 使用 GitHub OAuth 设备码流程;Claude 在存在 Claude Code 会话时直接导入凭据(macOS Keychain 或 `~/.claude/.credentials.json`),否则回退到同样的浏览器 OAuth 流程,因此不要求安装 Claude Code CLI。Token 保存在 `~/.dsh/plugins/subscriptions/auth.json`(权限 0600),过期自动刷新。
+把你的 **ChatGPT(Codex)**、**Claude**、**Grok(X Premium)**、**GitHub Copilot**、**Google Antigravity**、**Kimi Code**、**GLM Coding Plan** 和 **Qwen 千问AI平台** 订阅当作 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的 LLM provider 使用 —— 只要服务商支持，就用浏览器登录而不是粘贴 Key(Qwen 千问AI平台是例外:平台 Key 只需填一次)。Codex、Grok 和 Antigravity 通过 dsh web 界面 OAuth 登录(设置 → 订阅);Copilot 使用 GitHub OAuth 设备码流程;Claude 在存在 Claude Code 会话时直接导入凭据(macOS Keychain 或 `~/.claude/.credentials.json`),否则回退到同样的浏览器 OAuth 流程,因此不要求安装 Claude Code CLI。Token 保存在 `~/.dsh/plugins/subscriptions/auth.json`(权限 0600),过期自动刷新。
 
 ## 订阅与模型显示名
 
@@ -92,10 +92,15 @@ Antigravity 用量优先读取 `retrieveUserQuotaSummary`，只展示服务端�
 | `grok`   | X Premium (xAI)  | 从 `api.x.ai/v1/models` 实时获取(仅对话模型);推理等级来自 Grok CLI 目录(`cli-chat-proxy.grok.com/v1/models`) |
 | `copilot` | GitHub Copilot  | 从 `api.githubcopilot.com/models` 实时获取(两种 wire 的对话模型,含按模型的视觉标记与推理等级);登录使用 OAuth 设备码流程(在 `github.com/login/device` 输入页面显示的验证码) |
 | `antigravity` | Google Antigravity | 从 Antigravity `v1internal:fetchAvailableModels` 实时获取;请求使用 `generateContent` / `streamGenerateContent`,支持文本、图片、流式推理与工具调用转换 |
+| `kimi` | Kimi Code(Moonshot) | 从 `api.kimi.com/coding/v1/models` 实时获取;登录走 `auth.kimi.com` 的 OAuth 设备码 |
+| `glm` | 智谱 GLM Coding Plan | 从 `{站点}/api/paas/v4/models` 实时获取(GLM-5.4、GLM-5.3-FlashX 等),失败时用内置清单兜底;用 ZCode 浏览器授权自动签发套餐 Key。`glm.station` 选 `bigmodel`(国内,默认)或 `zai`(国际) |
+| `qwen` | Qwen 千问AI平台(Token Plan / 按量计费) | 内置文档模型清单(平台没有 `GET /models`);在 `platform.qianwenai.com/home/api-keys` 生成 Key 后粘贴,`sk-sp-` 走 Token Plan 端点,`sk-ws-`/`sk-` 走按量计费。**不是**阿里云百炼 Coding Plan |
+
+Kimi 和 GLM 用浏览器登录,不需要粘贴 Key:Kimi 使用官方 CLI 的公开 OAuth 设备码(界面显示验证码),GLM 走官方 ZCode 授权链路并自动签发账号的 `zcode-api-key`。Qwen 千问AI平台的模型调用没有 OAuth,卡片里粘贴一次平台 API Key(不写入插件配置),插件按 Key 产品类型自动选择端点;卡片上再点一次“登录查询额度”即可开启额度显示。凭据与其它路由共用同一份存储、刷新与多账号逻辑。每条路由也会声明官方文档给出的思考档位(Kimi `reasoning_effort` low/high/max,GLM 强制思考的 low/high/max,Qwen3.8 的 low/medium/xhigh),请求时应用选中档位或设置页里的默认档位。GLM 的授权链路和 Kimi 的客户端身份不属于官方文档承诺的第三方接入方式,可能随服务端调整而变化;端点、拒绝语义、用量来源和 bigmodel 计费注意项见[国内订阅说明](docs/cn-subscriptions.md)。
 
 只有已登录的 provider 才会出现在会话模型选择器里;登录/退出后列表自动刷新。支持视觉的模型会声明 `['text', 'image']` 输入模态,图片内容会被翻译成各 provider 的 wire 格式。
 
-已登录的卡片还会显示**订阅用量**——按限额窗口(5 小时会话窗、每周窗,以及计划包含的按模型每周窗)展示已用百分比、进度条和重置时间,并带刷新按钮。Codex 用量来自 `chatgpt.com/backend-api/wham/usage`(同时报告计划类型),Claude 用量来自 `api.anthropic.com/api/oauth/usage`,Grok 用量来自 Grok Build CLI 代理的 `cli-chat-proxy.grok.com/v1/billing`(即 CLI `/usage` 面板的数据源,报告共享每周额度和订阅档位)。Antigravity 从 `retrieveUserQuotaSummary` 显示共享限额，按 Gemini、Claude/GPT 与 Gemini 4 Argon 展示剩余百分比和重置时间；`loadCodeAssist` 提供订阅档位与积分。摘要不可用时仅回退到可选模型的原始限额。Copilot 没有用量接口,其卡片不显示用量区块。
+已登录的卡片还会显示**订阅用量**——按限额窗口(5 小时会话窗、每周窗,以及计划包含的按模型每周窗)展示已用百分比、进度条和重置时间,并带刷新按钮。Codex 用量来自 `chatgpt.com/backend-api/wham/usage`(同时报告计划类型),Claude 用量来自 `api.anthropic.com/api/oauth/usage`,Grok 用量来自 Grok Build CLI 代理的 `cli-chat-proxy.grok.com/v1/billing`(即 CLI `/usage` 面板的数据源,报告共享每周额度和订阅档位)。Antigravity 从 `retrieveUserQuotaSummary` 显示共享限额，按 Gemini、Claude/GPT 与 Gemini 4 Argon 展示剩余百分比和重置时间；`loadCodeAssist` 提供订阅档位与积分。摘要不可用时仅回退到可选模型的原始限额。Copilot 没有用量接口,其卡片不显示用量区块。Kimi Code 的用量来自 `api.kimi.com/coding/v1/usages`(5 小时窗口、旧套餐的每周窗口、共享月度池和 Extra Usage 钱包);GLM 读取 `{站点}/api/monitor/usage/quota/limit` 和重置卡列表,因此卡片会像 Codex 一样显示窗口条、重置时间和可用重置次数。Qwen 千问AI平台的推理 Key 读不到额度,需要在卡片上再点一次“登录查询额度”(官方 CLI 同款 PKCE 设备码);之后会显示月度 credits 的已用/剩余和重置时间,按量计费账号显示现金余额,模型列表也会切换成控制台的真实清单(包括 `qwen4-max-preview` 这类预览模型)。
 
 随 provider 启用自动注册的工具:
 
@@ -228,7 +233,9 @@ Codex 的 **速度** 控件与 `/fast` 按底层模型（与其独立账号入�
 - id: llm-subscriptions
   name: dsh-plugin-subscriptions
   config:
-    providers: [codex, claude]        # 子集;默认五个全启用
+    providers: [codex, claude]        # 子集;默认八个全启用
+    glm:
+      station: bigmodel                # GLM Coding Plan 站点:bigmodel(默认)或 zai
     streamIdleTimeoutMs: 300000
     claudePromptCacheTtl: 5m           # Claude 提示缓存时长:5m(默认)或 1h
     claudeDeferTools: []               # Claude:按名称延迟加载的工具(见下文);为空则请求不变

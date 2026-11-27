@@ -21,10 +21,12 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { parseJsonText } from '../json-text.js'
 
 /** Provider routes this plugin can serve. */
-export type ProviderId = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity'
+export type ProviderId = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity' | 'kimi' | 'glm' | 'qwen'
 
 /** Every provider route, in display order. */
-export const PROVIDER_IDS: readonly ProviderId[] = ['codex', 'claude', 'grok', 'copilot', 'antigravity']
+export const PROVIDER_IDS: readonly ProviderId[] = [
+  'codex', 'claude', 'grok', 'copilot', 'antigravity', 'kimi', 'glm', 'qwen',
+]
 
 /** Stored ChatGPT/Codex subscription session. */
 export interface CodexSession {
@@ -89,6 +91,70 @@ export interface CopilotSession {
   account?: string
 }
 
+/**
+ * Stored Kimi Code session. The device-code grant returns both tokens in one
+ * step; the access token is the Bearer credential for `api.kimi.com/coding/v1`
+ * and the refresh token rotates on every refresh.
+ */
+export interface KimiSession {
+  accessToken: string
+  refreshToken: string
+  /** Epoch milliseconds at which the access token expires. */
+  expiresAt: number
+  /** Kimi account identity, when the token response carried a claim. */
+  account?: string
+}
+
+/**
+ * Stored Qwen 千问AI平台 credential. The platform has no OAuth for model
+ * calls, so `accessToken` is the paste-once API key and `refreshToken` mirrors
+ * it to satisfy the shared session shape; `expiresAt` is far in the future and
+ * the Settings card hides it.
+ */
+export interface QwenSession {
+  accessToken: string
+  refreshToken: string
+  /** Epoch milliseconds; a static key has no real expiry. */
+  expiresAt: number
+  /** Product label ("Token Plan" / "按量计费"). */
+  account?: string
+  /** Product label, shown as the plan. */
+  plan?: string
+  /** OpenAI-compatible base URL the key belongs to. */
+  baseURL?: string
+  /**
+   * Optional console login used ONLY to read quota. The platform exposes
+   * account quota to a signed-in console session, never to an inference key.
+   */
+  console?: {
+    accessToken: string
+    refreshToken?: string
+    expiresAt: number
+    /** Cached gateway token exchanged from `accessToken`. */
+    cliAccessToken?: string
+    user?: string
+  }
+}
+
+/**
+ * Stored GLM Coding Plan session. Login mints a long-lived coding-plan key
+ * (`<id>.<secret>`) through the official ZCode authorization chain; the
+ * business token that minted it is kept so a refresh can re-mint the key
+ * without another browser round trip.
+ */
+export interface GlmSession {
+  /** The minted `<apiKey>.<secretKey>` plan credential. */
+  accessToken: string
+  /** Business token (zai) or account access token (bigmodel) used to re-mint. */
+  refreshToken: string
+  /** Epoch milliseconds at which the stored key is re-minted or re-login is required. */
+  expiresAt: number
+  /** Which ZCode station minted the key. */
+  station: 'bigmodel' | 'zai'
+  /** Account email / display name, when the login response carried it. */
+  account?: string
+}
+
 /** Stored Google OAuth session for the Antigravity v1internal API. */
 export interface AntigravitySession {
   accessToken: string
@@ -121,10 +187,14 @@ export interface SessionMap {
   grok?: ProviderAccounts<GrokSession>
   copilot?: ProviderAccounts<CopilotSession>
   antigravity?: ProviderAccounts<AntigravitySession>
+  kimi?: ProviderAccounts<KimiSession>
+  glm?: ProviderAccounts<GlmSession>
+  qwen?: ProviderAccounts<QwenSession>
 }
 
 /** Any stored session, for provider-agnostic plumbing. */
 export type StoredSession = CodexSession | ClaudeSession | GrokSession | CopilotSession | AntigravitySession
+  | KimiSession | GlmSession | QwenSession
 
 /** The session type one provider stores. */
 export type SessionOf<K extends ProviderId> = NonNullable<SessionMap[K]>['accounts'][string]
@@ -170,6 +240,17 @@ export function accountKeyOf(provider: ProviderId, session: StoredSession): stri
       return (session as AntigravitySession).account ?? tokenHash(session.refreshToken)
     case 'copilot':
       return (session as CopilotSession).account ?? tokenHash(session.refreshToken)
+    case 'kimi':
+      return (session as KimiSession).account ?? tokenHash(session.refreshToken)
+    case 'qwen':
+      return (session as QwenSession).account ?? tokenHash(session.refreshToken)
+    case 'glm': {
+      // The same email can exist on both stations; the key must distinguish them.
+      const glm = session as GlmSession
+      return glm.account === undefined
+        ? tokenHash(session.refreshToken)
+        : JSON.stringify([glm.station, glm.account])
+    }
   }
 }
 
@@ -546,6 +627,45 @@ export async function saveAccountSession<K extends ProviderId>(
       accounts: { ...entry?.accounts, [account]: session },
     } satisfies ProviderAccounts<SessionOf<K>>
     await writeStore(store, path)
+  })
+}
+
+/**
+ * Conditionally rewrite one account's session inside the store's write lock.
+ *
+ * A background refresh (quota reads, token refresh) holds a session snapshot
+ * across an await. Writing that snapshot back unconditionally would recreate a
+ * removed account or overwrite a replacement key. The mutator runs against the
+ * CURRENT stored session under the same lock as logout and save: returning
+ * `undefined` cancels the write, which is how a stale read is discarded.
+ * @param provider - the provider route.
+ * @param account - the account key.
+ * @param mutate - builds the next session from the current one, or undefined to skip.
+ * @param path - store file path; defaults to {@link authFilePath}.
+ * @returns true when a session was written.
+ */
+export async function updateAccountSession<K extends ProviderId>(
+  provider: K,
+  account: string,
+  mutate: (current: SessionOf<K>) => SessionOf<K> | undefined,
+  path = authFilePath(),
+): Promise<boolean> {
+  return serialize(path, async () => {
+    const store = await loadStore(path)
+    const entry = store[provider] as ProviderAccounts<SessionOf<K>> | undefined
+    if (entry === undefined) return false
+    const key = resolveAccount(entry as ProviderAccounts<StoredSession>, account)
+    const current = entry.accounts[key]
+    if (current === undefined) return false
+    const next = mutate(current)
+    if (next === undefined) return false
+    assertSessionShape(provider, key, next as StoredSession)
+    ;(store as Record<string, unknown>)[provider] = {
+      ...entry,
+      accounts: { ...entry.accounts, [key]: next },
+    } satisfies ProviderAccounts<SessionOf<K>>
+    await writeStore(store, path)
+    return true
   })
 }
 

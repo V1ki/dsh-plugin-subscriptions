@@ -366,6 +366,7 @@ test('end-to-end UsageService + UsageHistoryController + RPC usageDashboard & cl
     {
       status: async () => ({ busy: false, accounts: [] }),
       login: async () => ({ authorizeUrl: 'https://example.invalid' }),
+      saveKey: async () => {},
       manual: async () => {},
       cancel: async () => {},
       logout: async () => {},

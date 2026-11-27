@@ -1,18 +1,25 @@
 /**
- * GitHub OAuth device-authorization flow (RFC 8628) for providers that cannot
- * use the loopback redirect engine: no redirect URI, no PKCE, no client
- * secret. The user opens a verification URL and types a short code while the
- * plugin polls the token endpoint until GitHub releases the access token.
- * The management model (one attempt per provider, `isBusy`/`pending`/`cancel`)
- * mirrors {@link OAuthFlowManager} so the auth controller can treat both
- * engines uniformly.
+ * OAuth device-authorization flow (RFC 8628) for providers that cannot use
+ * the loopback redirect engine: no redirect URI, no PKCE, no client secret.
+ * The user opens a verification URL and types a short code while the plugin
+ * polls the token endpoint until the provider releases the tokens.
+ *
+ * The request shape is configurable per provider: GitHub speaks form-encoded
+ * fields with no extra headers, while Kimi/Qwen send JSON bodies with device
+ * headers. The management model (one attempt per provider,
+ * `isBusy`/`pending`/`cancel`) mirrors {@link OAuthFlowManager} so the auth
+ * controller can treat both engines uniformly.
+ *
+ * Transport failures are retried without minting new codes: a dropped poll
+ * connection is not an answer, and re-requesting a device code would orphan
+ * the user's current authorization window.
  */
 import { proxiedFetch } from '../http.js'
 
 /** Default poll interval when the device-code response omits one. */
 const DEFAULT_INTERVAL_SEC = 5
 
-/** Default device-code lifetime when the response omits one (GitHub: 15 minutes). */
+/** Default device-code lifetime when the device-code response omits one. */
 const DEFAULT_EXPIRES_IN_SEC = 900
 
 /** Transport attempts for one device-code request. */
@@ -26,16 +33,31 @@ const POLL_TRANSPORT_ATTEMPTS = 5
 
 /** Static per-provider device-flow facts. */
 export interface DeviceFlowSpec {
-  /** OAuth App / GitHub App client id the device code is requested for. */
+  /** Public client id the device code is requested for. */
   clientId: string
-  /** Scope string requested at device-code time. */
-  scope: string
+  /** Scope string requested at device-code time (omitted when empty). */
+  scope?: string
   /** Device-code endpoint (e.g. `https://github.com/login/device/code`). */
   deviceCodeUrl: string
   /** Token polling endpoint (e.g. `https://github.com/login/oauth/access_token`). */
   tokenUrl: string
+  /** Extra headers sent on both requests (device identity, user agent). */
+  headers?: Readonly<Record<string, string>>
+  /** Open `verification_uri_complete` when the provider returns it. */
+  preferCompleteUri?: boolean
   /** Fetch implementation (injectable for tests). */
   fetchFn?: typeof fetch
+}
+
+/** The tokens a successful device grant released. */
+export interface DeviceTokenSet {
+  accessToken: string
+  /** Present when the grant issued a refresh token (Kimi, Qwen). */
+  refreshToken?: string
+  /** Access-token lifetime in seconds, when reported. */
+  expiresIn?: number
+  scope?: string
+  tokenType?: string
 }
 
 /** One in-flight device-flow login attempt. */
@@ -45,10 +67,16 @@ export interface DeviceAttempt {
   /** Short code the user types at the verification URL. */
   readonly userCode: string
   /**
-   * Poll until GitHub releases the access token.
-   * @returns the GitHub OAuth access token; rejects on timeout, denial, or cancel.
+   * Poll until the provider releases the access token.
+   * @returns the OAuth access token; rejects on timeout, denial, or cancel.
    */
   waitToken(): Promise<string>
+  /**
+   * Poll until the provider releases the full token set (refresh token
+   * included). Providers whose login mints a session from more than the
+   * access token use this instead of {@link waitToken}.
+   */
+  waitTokens(): Promise<DeviceTokenSet>
   /** Abort the attempt; `waitToken` rejects with a cancellation error. */
   cancel(): void
 }
@@ -58,6 +86,7 @@ interface DeviceCodeWire {
   device_code?: string
   user_code?: string
   verification_uri?: string
+  verification_uri_complete?: string
   interval?: number
   expires_in?: number
 }
@@ -65,6 +94,10 @@ interface DeviceCodeWire {
 /** Raw token-poll response shape (subset): success or an RFC 8628 error code. */
 interface DeviceTokenWire {
   access_token?: string
+  refresh_token?: string
+  expires_in?: number
+  scope?: string
+  token_type?: string
   error?: string
   error_description?: string
 }
@@ -96,6 +129,15 @@ function wait(ms: number): Promise<void> {
   })
 }
 
+/** Headers for both RFC 8628 form requests, plus the provider's device headers. */
+function requestHeaders(spec: DeviceFlowSpec): Record<string, string> {
+  return {
+    'accept': 'application/json',
+    'content-type': 'application/x-www-form-urlencoded',
+    ...spec.headers,
+  }
+}
+
 /**
  * Request a device code, retrying transport failures.
  *
@@ -112,11 +154,11 @@ async function requestDeviceCode(fetchFn: typeof fetch, spec: DeviceFlowSpec): P
     try {
       return await fetchFn(spec.deviceCodeUrl, {
         method: 'POST',
-        headers: {
-          'accept': 'application/json',
-          'content-type': 'application/x-www-form-urlencoded',
-        },
-        body: new URLSearchParams({ client_id: spec.clientId, scope: spec.scope }).toString(),
+        headers: requestHeaders(spec),
+        body: new URLSearchParams({
+          client_id: spec.clientId,
+          ...spec.scope === undefined || spec.scope.length === 0 ? {} : { scope: spec.scope },
+        }).toString(),
       })
     } catch (error) {
       if (attempt >= DEVICE_CODE_ATTEMPTS) throw error
@@ -163,6 +205,7 @@ export class DeviceFlowManager {
       throw new Error(`a ${provider} login attempt is already in progress`)
     }
     const fetchFn = spec.fetchFn ?? proxiedFetch
+    const headers = requestHeaders(spec)
     const response = await requestDeviceCode(fetchFn, spec)
     if (!response.ok) {
       throw new Error(`${provider} device-code request failed (HTTP ${String(response.status)})`)
@@ -181,24 +224,24 @@ export class DeviceFlowManager {
       : DEFAULT_EXPIRES_IN_SEC
 
     const controller = new AbortController()
-    let resolveToken!: (token: string) => void
-    let rejectToken!: (error: Error) => void
-    const tokenPromise = new Promise<string>((resolve, reject) => {
-      resolveToken = resolve
-      rejectToken = reject
+    let resolveTokens!: (tokens: DeviceTokenSet) => void
+    let rejectTokens!: (error: Error) => void
+    const tokensPromise = new Promise<DeviceTokenSet>((resolve, reject) => {
+      resolveTokens = resolve
+      rejectTokens = reject
     })
     // The promise settles exactly once, from the poll loop below; an unhandled
     // rejection must not surface if nobody awaited waitToken after a cancel.
-    tokenPromise.catch(() => undefined)
+    tokensPromise.catch(() => undefined)
 
-    const settle = (error?: Error, token?: string): void => {
+    const settle = (error?: Error, tokens?: DeviceTokenSet): void => {
       // Identity check: a late settle from a stale attempt (its poll loop or a
       // cancel arriving after it already settled) must not kill a NEW attempt
       // the user started for the same provider.
       if (this.attempts.get(provider) !== attempt) return
       this.attempts.delete(provider)
-      if (error !== undefined) rejectToken(error)
-      else if (token !== undefined) resolveToken(token)
+      if (error !== undefined) rejectTokens(error)
+      else if (tokens !== undefined) resolveTokens(tokens)
     }
 
     const poll = async (): Promise<void> => {
@@ -216,10 +259,7 @@ export class DeviceFlowManager {
         try {
           pollResponse = await fetchFn(spec.tokenUrl, {
             method: 'POST',
-            headers: {
-              'accept': 'application/json',
-              'content-type': 'application/x-www-form-urlencoded',
-            },
+            headers,
             body: new URLSearchParams({
               client_id: spec.clientId,
               device_code: wire.device_code as string,
@@ -231,15 +271,23 @@ export class DeviceFlowManager {
         } catch (error) {
           // A cancel rejects through this same path and must surface, never retry.
           if (controller.signal.aborted) throw error
-          // A dropped connection is not an answer from GitHub: keep the login
-          // alive instead of burning the user's remaining authorization window.
+          // A dropped connection is not an answer from the provider: keep the
+          // login alive instead of burning the user's remaining window.
           transportFailures += 1
           if (transportFailures >= POLL_TRANSPORT_ATTEMPTS) throw error
           continue
         }
         transportFailures = 0
         if (typeof result.access_token === 'string' && result.access_token.length > 0) {
-          settle(undefined, result.access_token)
+          settle(undefined, {
+            accessToken: result.access_token,
+            ...typeof result.refresh_token === 'string' && result.refresh_token.length > 0
+              ? { refreshToken: result.refresh_token } : {},
+            ...typeof result.expires_in === 'number' && result.expires_in > 0
+              ? { expiresIn: result.expires_in } : {},
+            ...typeof result.scope === 'string' ? { scope: result.scope } : {},
+            ...typeof result.token_type === 'string' ? { tokenType: result.token_type } : {},
+          })
           return
         }
         switch (result.error) {
@@ -250,7 +298,7 @@ export class DeviceFlowManager {
             intervalMs += 5000
             break
           case 'access_denied':
-            settle(new Error('login declined on the GitHub authorization page'))
+            settle(new Error(`login declined on the ${provider} authorization page`))
             return
           case 'expired_token':
             settle(new Error('the device code expired before authorization completed'))
@@ -265,9 +313,13 @@ export class DeviceFlowManager {
     }
 
     const attempt: DeviceAttempt = {
-      verificationUrl: wire.verification_uri,
+      verificationUrl: spec.preferCompleteUri === true && typeof wire.verification_uri_complete === 'string'
+        && wire.verification_uri_complete.length > 0
+        ? wire.verification_uri_complete
+        : wire.verification_uri,
       userCode: wire.user_code,
-      waitToken: () => tokenPromise,
+      waitToken: async () => (await tokensPromise).accessToken,
+      waitTokens: () => tokensPromise,
       cancel: () => {
         controller.abort(new Error('login cancelled'))
         settle(new Error('login cancelled'))

@@ -44,7 +44,7 @@ const POLL_INTERVAL_MS = 2000
 const MODEL_FILTER_THRESHOLD = 8
 
 /** Subscription provider ids, fixed by the node half's OAuth adapters. */
-export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity'
+export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity' | 'kimi' | 'glm' | 'qwen'
 export type UsageProvider = Exclude<SubscriptionProvider, 'copilot'>
 
 /** One logged-in account as answered by the `status` endpoint. */
@@ -54,6 +54,8 @@ export interface AccountStatus {
   expiresAt?: number
   plan?: string
   isDefault: boolean
+  /** Qwen only: whether this account has a live console session for quota. */
+  quotaLinked?: boolean
 }
 
 /** One provider's login state as answered by the `status` endpoint. */
@@ -66,6 +68,8 @@ export interface ProviderStatus {
   busy: boolean
   accounts: AccountStatus[]
   detail?: string
+  /** Qwen only: whether a console session for quota reads is linked. */
+  quotaLinked?: boolean
   /** The CLI version the route presents (Codex, Claude), and where it came from. */
   clientVersion?: { version: string; source: ClientVersionSource }
 }
@@ -90,6 +94,9 @@ export interface CreditBalance {
   unlimited: boolean
   balance?: string
   overageLimitReached?: boolean
+  /** 'currency' renders a money balance (Kimi Extra Usage); absent means credits. */
+  unit?: 'credit' | 'currency'
+  currency?: string
 }
 
 /** One rate-limit window as answered by the `usage` endpoint. */
@@ -188,7 +195,19 @@ const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [
   { id: 'grok', name: 'Grok (X Premium)' },
   { id: 'copilot', name: 'GitHub Copilot' },
   { id: 'antigravity', name: 'Google Antigravity' },
+  { id: 'kimi', name: 'Kimi Code' },
+  { id: 'glm', name: 'GLM Coding Plan' },
+  { id: 'qwen', name: 'Qwen 千问AI平台' },
 ]
+
+/**
+ * Providers that finish through a loopback callback can accept a pasted
+ * callback URL/code; device-code and server-mediated flows have nothing to
+ * paste, so they never render the manual fallback.
+ */
+const MANUAL_CALLBACK_PROVIDERS: ReadonlySet<SubscriptionProvider> = new Set([
+  'codex', 'claude', 'grok', 'antigravity',
+])
 
 /** Whether a provider is currently disabled via the opt-in gate (Antigravity defaults to false). */
 export function isProviderDisabled(status: ProviderStatus | undefined): boolean {
@@ -557,8 +576,10 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const activeProvider = selectedProvider ?? sortedProviders[0].id
   const [errors, setErrors] = useState<Partial<Record<SubscriptionProvider, string>>>({})
   const [manualDrafts, setManualDrafts] = useState<Record<SubscriptionProvider, string>>({
-    codex: '', claude: '', grok: '', copilot: '', antigravity: '',
+    codex: '', claude: '', grok: '', copilot: '', antigravity: '', kimi: '', glm: '', qwen: '',
   })
+  /** Qwen 千问AI平台 inference key draft; saved through the saveKey endpoint. */
+  const [qwenKeyDraft, setQwenKeyDraft] = useState('')
   /** Pending device-flow codes (copilot), shown while the attempt polls. */
   const [deviceCodes, setDeviceCodes] = useState<Partial<Record<SubscriptionProvider, { userCode: string; verificationUrl: string }>>>({})
   const [copiedCode, setCopiedCode] = useState<SubscriptionProvider | undefined>(undefined)
@@ -772,7 +793,11 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       for (const account of statuses[id]?.accounts ?? []) {
         const key = `${id}:${account.key}`
         live.add(key)
-        if (usages[key] === undefined && usageErrors[key] === undefined) void loadUsage(id, account.key)
+        const stale = usages[key]
+        if (stale === undefined && usageErrors[key] === undefined) void loadUsage(id, account.key)
+        // A Qwen snapshot taken before the console login says "unsupported";
+        // reconnect the usage read once that login appears.
+        else if (stale?.supported === false && statuses[id]?.quotaLinked === true) void loadUsage(id, account.key)
       }
     }
     setUsages(prev => dropStale(prev, live))
@@ -794,13 +819,14 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     }
   }, [rpc, antigravityToggleBusy, setProviderError, refresh])
 
-  const login = useCallback(async (provider: SubscriptionProvider, method?: 'oauth' | 'keychain'): Promise<void> => {
+  const login = useCallback(async (provider: SubscriptionProvider, method?: 'oauth' | 'keychain', account?: string): Promise<void> => {
     if (rpc === undefined) return
     setProviderError(provider, undefined)
     try {
       const response = await callSubscriptionsAuth<LoginResponse>(rpc, 'login', {
         provider,
         ...method === undefined ? {} : { method },
+        ...account === undefined ? {} : { account },
       })
       if (typeof response.authorizeUrl === 'string' && response.authorizeUrl === '') {
         // Instant login (e.g. imported from Claude Code credentials)
@@ -853,6 +879,20 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     }
     await refresh()
   }, [rpc, manualDrafts, setProviderError, refresh])
+
+  const saveQwenKey = useCallback(async (): Promise<void> => {
+    if (rpc === undefined) return
+    const key = qwenKeyDraft.trim()
+    if (key === '') return
+    setProviderError('qwen', undefined)
+    try {
+      await callSubscriptionsAuth<{ ok: true }>(rpc, 'saveKey', { provider: 'qwen', key })
+      if (mountedRef.current) setQwenKeyDraft('')
+      await refresh()
+    } catch (error) {
+      setProviderError('qwen', messageOf(error))
+    }
+  }, [rpc, qwenKeyDraft, setProviderError, refresh])
 
   const logout = useCallback(async (provider: SubscriptionProvider, account: string, display: string, name: string): Promise<void> => {
     if (rpc === undefined) return
@@ -1007,7 +1047,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                     {t('antigravityEnable')}
                   </button>
                 ) : <>
-                  {!busy && accounts.length === 0 && (
+                  {!busy && id !== 'qwen' && accounts.length === 0 && (
                     <button type="button" onClick={() => { void login(id) }}>
                       {t('login')}
                     </button>
@@ -1025,7 +1065,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                       </button>
                     </>
                   )}
-                  {!busy && accounts.length > 0 && id !== 'claude' && (
+                  {!busy && accounts.length > 0 && id !== 'claude' && id !== 'qwen' && (
                     <div className="dsh-subscription-add-account">
                       <SettingHelp title={t('addAccount')} hint={t('addAccountHint')} t={t} />
                       <button type="button" onClick={() => { void login(id) }}>
@@ -1055,6 +1095,26 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 </>}
               </div>
             </div>
+            {!busy && id === 'qwen' && (
+              <>
+                <div style={styles.manualRow}>
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    style={styles.manualInput}
+                    value={qwenKeyDraft}
+                    placeholder={t('qwenKeyPlaceholder')}
+                    onChange={event => setQwenKeyDraft(event.target.value)}
+                  />
+                  <button type="button" disabled={qwenKeyDraft.trim() === ''} onClick={() => { void saveQwenKey() }}>
+                    {accounts.length > 0 ? t('qwenKeyChange') : t('qwenKeySave')}
+                  </button>
+                </div>
+                <p style={styles.statusLine}>
+                  {status?.quotaLinked === true ? t('qwenQuotaLinked') : t('qwenKeyHint')}
+                </p>
+              </>
+            )}
             {id === 'antigravity' && <AntigravityRiskNotice t={t} />}
             {!providerDisabled && status?.detail !== undefined && status.detail !== '' && (
               <p style={styles.statusLine}>{status.detail}</p>
@@ -1087,7 +1147,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
               const usageError = usageErrors[usageKey]
               const display = account.account ?? account.key
               const sortedCredits = [...(usage?.resetCredits ?? [])].sort((a, b) => (a.expiresAt ?? Infinity) - (b.expiresAt ?? Infinity))
-              const balance = id === 'codex' ? creditBalanceText(usage?.credits, t) : undefined
+              const balance = creditBalanceText(usage?.credits, t)
               const resetCount = sortedCredits.length === 1 ? t('resetCreditAvailable') : t('resetCreditsAvailable', { count: sortedCredits.length })
               const nextReset = sortedCredits.find(c => c.expiresAt === undefined || c.expiresAt > Date.now())
               const resetBlock = usage ? resetActionBlock(usage) : 'resetUseRefresh'
@@ -1115,9 +1175,18 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                         {t('accountExpires', { date: new Date(account.expiresAt).toLocaleString() })}
                       </span>
                     )}
+                    {id === 'qwen' && !busy && (
+                      <button
+                        type="button"
+                        style={{ marginLeft: 'auto', flexShrink: 0 }}
+                        onClick={() => { void login('qwen', undefined, account.key) }}
+                      >
+                        {account.quotaLinked === true ? t('qwenQuotaRelogin') : t('qwenQuotaLogin')}
+                      </button>
+                    )}
                     <button
                       type="button"
-                      style={{ marginLeft: 'auto', flexShrink: 0 }}
+                      style={{ marginLeft: id === 'qwen' ? 8 : 'auto', flexShrink: 0 }}
                       onClick={() => { void logout(id, account.key, display, name) }}
                     >
                       {t('logout')}
@@ -1133,7 +1202,12 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                         {usage?.supported !== false && <ProviderRefreshButton label={t('usageRefresh')}
                           disabled={usageLoading[usageKey] === true} onClick={() => { void loadUsage(id, account.key, true) }} />}
                       </div>
-                      {usage && <UsageFreshness usage={usage} t={t} />}
+                      {usage && usage.supported !== false && <UsageFreshness usage={usage} t={t} />}
+                      {usage?.supported === false && (
+                        <p style={styles.statusLine}>
+                          {t(id === 'qwen' ? 'qwenUsageNote' : 'quotaUnsupported')}
+                        </p>
+                      )}
                       {usage === undefined && usageError === undefined && (
                         <p style={styles.statusLine}>{t('usageLoading')}</p>
                       )}
@@ -1163,7 +1237,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                           </div>
                         )
                       })}
-                      {id === 'codex' && (balance !== undefined || usage?.resetCredits !== undefined || (resetAccount === account.key && !!resetMessage)) && (
+                      {(balance !== undefined || usage?.resetCredits !== undefined || (resetAccount === account.key && !!resetMessage)) && (
                         <div className="subscriptions-credit-summary" style={styles.statusLine}>
                           {sortedCredits.length > 0 ? (
                             <details className="subscriptions-reset-credits">
@@ -1184,7 +1258,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                                 {sortedCredits.map((credit, index) => (
                                   <div key={credit.id ?? index} className="subscriptions-reset-row">
                                     <span>{credit.expiresAt === undefined ? t('resetCreditExpiryUnknown') : t('resetCreditExpires', { date: new Date(credit.expiresAt).toLocaleString() })}</span>
-                                    {credit === nextReset && (
+                                    {id === 'codex' && credit === nextReset && (
                                       <button type="button" aria-disabled={resetDisabled}
                                         title={t(resetBusy ? 'resetUseChecking' : resetBlock ?? 'resetUseReady')}
                                         style={{ height: 22, minHeight: 22, padding: '0 7px',
@@ -1204,7 +1278,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                           {resetAccount === account.key && resetMessage && <p role="status" style={styles.statusLine}>{resetMessage}</p>}
                         </div>
                       )}
-                      {id === 'codex' && usage?.resetCreditsError !== undefined && (
+                      {usage?.resetCreditsError !== undefined && (
                         <p style={styles.errorLine}>{t('resetCreditsError', { message: usage.resetCreditsError })}</p>
                       )}
                     </div>
@@ -1229,7 +1303,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 </div>
               </div>
             )}
-            {busy && deviceCode === undefined && (
+            {busy && deviceCode === undefined && MANUAL_CALLBACK_PROVIDERS.has(id) && (
               <details style={styles.manual}>
                 <summary>{t('manualSummary')}</summary>
                 <div style={styles.manualRow}>

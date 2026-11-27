@@ -15,18 +15,18 @@ const ids = (statuses: Parameters<typeof sortedSubscriptionProviders>[0]) =>
   sortedSubscriptionProviders(statuses).map(provider => provider.id)
 
 test('tabs are alphabetic when no account is connected', () => {
-  assert.deepEqual(ids({}), ['claude', 'codex', 'copilot', 'antigravity', 'grok'])
+  assert.deepEqual(ids({}), ['claude', 'codex', 'copilot', 'glm', 'antigravity', 'grok', 'kimi', 'qwen'])
 })
 
 test('connected tabs precede disconnected tabs and sort by displayed name', () => {
   assert.deepEqual(ids({
     grok: connected(), copilot: connected('Alpha'), claude: disconnected('Zulu'), codex: disconnected(),
-  }), ['copilot', 'grok', 'codex', 'antigravity', 'claude'])
+  }), ['copilot', 'grok', 'codex', 'glm', 'antigravity', 'kimi', 'qwen', 'claude'])
 })
 
 test('busy without an account remains disconnected; an empty alias uses the brand name', () => {
   assert.deepEqual(ids({ grok: { ...disconnected(''), busy: true }, antigravity: connected() }),
-    ['antigravity', 'claude', 'codex', 'copilot', 'grok'])
+    ['antigravity', 'claude', 'codex', 'copilot', 'glm', 'grok', 'kimi', 'qwen'])
 })
 
 test('tab list has localized accessible labels', () => {
@@ -39,7 +39,7 @@ test('disabled Antigravity sorts after enabled providers even with saved account
     antigravity: { ...connected(), enabled: false },
     grok: connected(),
     codex: disconnected(),
-  }), ['grok', 'claude', 'codex', 'copilot', 'antigravity'])
+  }), ['grok', 'claude', 'codex', 'copilot', 'glm', 'kimi', 'qwen', 'antigravity'])
   for (const dictionary of [en, zh]) {
     const html = renderToStaticMarkup(createElement(AntigravityRiskNotice, { t: key => dictionary[key] }))
     assert.ok(html.includes(dictionary.antigravityNoticeTitle))

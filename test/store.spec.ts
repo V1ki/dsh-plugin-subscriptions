@@ -24,6 +24,7 @@ import {
   resolveAccountKey,
   saveAccountSession,
   setDefaultAccount,
+  updateAccountSession,
 } from '../src/auth/store.js'
 import type { ClaudeSession, CodexSession } from '../src/auth/store.js'
 import { LlmError } from '@deepseek-ai/dsh-llm'
@@ -77,6 +78,25 @@ test('Codex keys distinguish workspace users, remain stable and tolerate legacy 
   assert.notEqual(accountKeyOf('codex', alice), accountKeyOf('codex', { ...alice, accountId: 'other-workspace' }))
   assert.equal(accountKeyOf('codex', { ...CODEX, idToken: 'malformed' }), CODEX.accountId)
   assert.equal(accountKeyOf('codex', { ...CODEX, emailAddress: ' ALICE@example.com ' }), accountKeyOf('codex', { ...CODEX, emailAddress: 'alice@example.com' }))
+})
+
+test('updateAccountSession only writes while the account still matches', async () => {
+  const path = storePath()
+  await saveAccountSession('codex', CODEX.accountId, CODEX, path)
+  const stale = CODEX
+  assert.equal(await updateAccountSession('codex', CODEX.accountId, current =>
+    current.accessToken === stale.accessToken ? { ...current, refreshToken: 'rotated' } : undefined, path), true)
+  assert.equal((await getAccountSession('codex', CODEX.accountId, path))?.refreshToken, 'rotated')
+  // A stale snapshot no longer matches the stored credentials: skipped.
+  assert.equal(await updateAccountSession('codex', CODEX.accountId, current =>
+    current.accessToken === stale.accessToken && current.refreshToken === stale.refreshToken
+      ? current
+      : undefined, path), false)
+  assert.equal((await getAccountSession('codex', CODEX.accountId, path))?.refreshToken, 'rotated')
+  // A removed account is not recreated by a late writer.
+  await deleteAccountSession('codex', CODEX.accountId, path)
+  assert.equal(await updateAccountSession('codex', CODEX.accountId, current => current, path), false)
+  assert.equal(await getAccountSession('codex', CODEX.accountId, path), undefined)
 })
 
 test('Codex legacy migration preserves default, references, refresh and workspace siblings', async () => {

@@ -49,7 +49,7 @@ export const SUBSCRIPTIONS_AUTH_PREFIX = 'subscriptions-auth.'
  */
 export const SUBSCRIPTIONS_AUTH_ENDPOINTS = [
   'providerSettings', 'setProviderSettings', 'setProviderEnabled',
-  'status', 'login', 'manual', 'cancel', 'logout', 'setDefault', 'usage',
+  'status', 'login', 'saveKey', 'manual', 'cancel', 'logout', 'setDefault', 'usage',
   'image', 'video', 'prepareReset', 'consumeReset',
   'speed', 'setSpeed',
   'proxyGet', 'proxySet', 'proxyTest',
@@ -106,6 +106,8 @@ export interface AccountStatus {
   plan?: string
   /** Whether direct (non-pool) routes serve this account. */
   isDefault: boolean
+  /** Qwen only: whether a live console session for quota reads is linked. */
+  quotaLinked?: boolean
 }
 
 /** Login state of one provider, as rendered by the Settings page. */
@@ -121,6 +123,8 @@ export interface ProviderStatus {
   accounts: AccountStatus[]
   /** The last login error, shown until the next success. */
   detail?: string
+  /** Qwen only: whether a console session for quota reads is linked. */
+  quotaLinked?: boolean
   /** The CLI version this route presents (Codex, Claude), and where it came from. */
   clientVersion?: CliVersion
 }
@@ -204,7 +208,13 @@ export interface AuthController {
    *   (copilot) also return the `userCode` the user types at that URL.
    * @throws when an attempt is already running for this provider.
    */
-  login(provider: ProviderId, method?: LoginMethod): Promise<{ authorizeUrl: string; userCode?: string }>
+  login(provider: ProviderId, method?: LoginMethod, account?: string): Promise<{ authorizeUrl: string; userCode?: string }>
+  /**
+   * Store one provider API key (Qwen 千问AI平台 has no OAuth). Other providers
+   * reject the call: their credentials come from the browser flow.
+   * @throws when the provider or key is not accepted.
+   */
+  saveKey(provider: ProviderId, key: string): Promise<void>
   /**
    * Feed a pasted callback URL or bare code into the pending attempt.
    * @throws when no attempt is pending or the input is unusable.
@@ -420,6 +430,15 @@ function readClearUsage(payload: unknown): TrackedProvider | 'all' {
   const provider = record.provider === 'all' ? 'all' : readUsageProvider(payload)
   if (record.confirm !== true) throw new BadRequest('payload.confirm must be true')
   return provider
+}
+
+function readOptionalString(payload: unknown, field: string): string | undefined {
+  const value = (payload as Record<string, unknown>)[field]
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new BadRequest(`payload.${field} must be a non-empty string when present`)
+  }
+  return value
 }
 
 function readString(payload: unknown, field: string): string {
@@ -674,7 +693,12 @@ async function dispatch(
     }
     case 'login': {
       const provider = readProvider(payload)
-      return ok(await controller.login(provider, readLoginMethod(payload, provider)))
+      return ok(await controller.login(provider, readLoginMethod(payload, provider), readOptionalString(payload, 'account')))
+    }
+    case 'saveKey': {
+      const provider = readProvider(payload)
+      await controller.saveKey(provider, readString(payload, 'key'))
+      return ok({ ok: true })
     }
     case 'manual': {
       const provider = readProvider(payload)

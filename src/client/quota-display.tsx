@@ -30,9 +30,11 @@ export function creditBalanceText(credits: CreditBalance | undefined, t: Transla
   if (credits.unlimited) return t('creditsUnlimited')
   if (credits.balance !== undefined) {
     const amount = Number(credits.balance)
-    return Number.isFinite(amount) && amount > 0
-      ? t('creditsBalance', { balance: formatCreditBalance(credits.balance) })
-      : undefined
+    if (!Number.isFinite(amount) || amount <= 0) return undefined
+    const balance = formatCreditBalance(credits.balance)
+    return credits.unit === 'currency'
+      ? t('balanceCurrency', { currency: credits.currency ?? '', balance })
+      : t('creditsBalance', { balance })
   }
   return credits.hasCredits ? t('creditsAvailableUnknown') : undefined
 }
@@ -58,8 +60,13 @@ export function useQuotaClock(): number {
 }
 
 /** Availability is separate from the age of an existing quota snapshot. */
-export function quotaUnavailableText(usage: ProviderUsage | undefined, failed: boolean, t: Translate): string | undefined {
-  if (usage?.supported === false) return t('quotaUnsupported')
+export function quotaUnavailableText(
+  usage: ProviderUsage | undefined,
+  failed: boolean,
+  t: Translate,
+  provider?: string,
+): string | undefined {
+  if (usage?.supported === false) return provider === 'qwen' ? t('qwenQuotaShort') : t('quotaUnsupported')
   if (usage?.windows?.length) return undefined
   if (failed || usage?.refreshFailed) return t('quotaFailedNoData')
   return t('usageEmpty')
