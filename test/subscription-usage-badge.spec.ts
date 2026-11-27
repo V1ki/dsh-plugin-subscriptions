@@ -325,7 +325,7 @@ test('the compact readout keeps the percentage mode and unknown values, and leav
   assert.doesNotMatch(compactSegment(d), /%/)
 })
 
-test('Codex-style compact rows show only the default account shared windows as remaining quotas', () => {
+test('Compact rows show only the default account shared windows as remaining quotas', () => {
   const d = display('claude', [
     { kind: 'weekly', usedPercent: 57, resetsAt: 1_900_000_000_000 },
     { kind: 'session', usedPercent: 25, resetsAt: 1_800_000_000_000 },

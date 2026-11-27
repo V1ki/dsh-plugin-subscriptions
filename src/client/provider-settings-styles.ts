@@ -278,7 +278,7 @@ ${formScope} label:has(> input[type="checkbox"]:disabled) {
   cursor: default;
   opacity: 0.5;
 }
-${formScope} button {
+${formScope} button:not(.dsh-subscription-native-control) {
   box-sizing: border-box;
   display: inline-flex;
   align-items: center;
@@ -295,13 +295,13 @@ ${formScope} button {
   line-height: 18px;
   cursor: pointer;
 }
-${formScope} button:hover:not(:disabled) {
+${formScope} button:not(.dsh-subscription-native-control):hover:not(:disabled) {
   background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-3));
 }
-${formScope} button:active:not(:disabled) {
+${formScope} button:not(.dsh-subscription-native-control):active:not(:disabled) {
   background: var(--dsw-alias-interactive-bg-active, var(--dsw-alias-bg-layer-3));
 }
-${formScope} button:disabled {
+${formScope} button:not(.dsh-subscription-native-control):disabled {
   opacity: 0.4;
   cursor: default;
 }

@@ -1,5 +1,8 @@
 import { useId, useState } from 'react'
 import type { CSSProperties } from 'react'
+import { Button, Menu, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
+import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
+import { hostIcon } from './host-icons.js'
 import { SettingHelp } from './SettingHelp.js'
 import type { SubscriptionsKey } from './locales.js'
 import { setUsageBadgeMode, useUsageBadgeMode, setQuotaDisplayMode, useQuotaDisplayMode, setUsageBadgeStyle, useUsageBadgeStyle, setBudgetTargetLine, useBudgetTargetLine } from './usage-badge-preferences.js'
@@ -35,6 +38,13 @@ export function UsageBadgeDisplaySetting({ t }: { t: Translate }) {
   const badgeId = useId()
   const quotaId = useId()
   const styleId = useId()
+  const [styleOpen, setStyleOpen] = useState(false)
+  const Chevron = hostIcon(primitives, "ChevronDownOutline")
+  const styleAnchor = (<Button id={styleId} variant="outline" style={{ width: '100%', justifyContent: 'space-between' }}
+            className="dsh-subscription-native-control" aria-label={t('usageBadgeStyle')}
+            aria-haspopup="menu" aria-expanded={styleOpen} onClick={() => setStyleOpen(value => !value)}>
+            {t(styleMode === 'compact' ? 'usageBadgeStyleCompact' : 'usageBadgeStyleText')}<Chevron />
+          </Button>)
   return (
     <div className="dsh-subscription-settings-card" style={styles.card}>
       <div style={styles.field}>
@@ -72,54 +82,40 @@ export function UsageBadgeDisplaySetting({ t }: { t: Translate }) {
           <label htmlFor={styleId}>{t('usageBadgeStyle')}</label>
           <SettingHelp title={t('usageBadgeStyle')} hint={t('usageBadgeStyleHint')} t={t} />
         </div>
-        <div className="dsh-subscription-select-wrap">
-          <select
-            id={styleId}
-            className="dsh-subscription-select"
-            style={styles.select}
-            aria-label={t('usageBadgeStyle')}
-            value={styleMode}
-            onChange={event => {
-              const value = event.currentTarget.value
-              if (value !== 'compact' && value !== 'text') return
-              try {
-                setUsageBadgeStyle(value)
-                setFailed(false)
-              } catch (error) {
-                if (!(error instanceof DOMException) || !['SecurityError', 'QuotaExceededError'].includes(error.name)) throw error
-                setFailed(true)
-              }
-            }}
-          >
-            <option value="compact">{t('usageBadgeStyleCompact')}</option>
-            <option value="text">{t('usageBadgeStyleText')}</option>
-          </select>
-          <SelectChevron />
-        </div>
-      </div>
-      <div style={styles.switchRow}>
-        <div style={styles.labelRow}><span style={styles.switchLabel}>{t('budgetTargetTitle')}</span><SettingHelp title={t('budgetTargetTitle')} hint={t('budgetTargetHint')} t={t} /></div>
-        <button
-          type="button"
-          role="switch"
-          className="dsh-subscription-budget-switch"
-          data-subscription-budget-switch="true"
-          aria-label={t('budgetTargetTitle')}
-          aria-checked={budgetTargetEnabled}
-          title={t(budgetTargetEnabled ? 'budgetTargetOn' : 'budgetTargetOff')}
-          style={{ ...styles.switchTrack, ...(budgetTargetEnabled ? styles.switchTrackOn : {}) }}
-          onClick={() => {
+        {typeof document === 'undefined' ? styleAnchor : <Menu open={styleOpen} onClose={() => setStyleOpen(false)}
+          items={[
+            { id: 'compact', label: t('usageBadgeStyleCompact') },
+            { id: 'text', label: t('usageBadgeStyleText') },
+          ]}
+          selectedId={styleMode} portal minWidthFromAnchor
+          onSelect={value => {
+            setStyleOpen(false)
+            if (value !== 'compact' && value !== 'text') return
             try {
-              setBudgetTargetLine(!budgetTargetEnabled)
+              setUsageBadgeStyle(value)
               setFailed(false)
             } catch (error) {
               if (!(error instanceof DOMException) || !['SecurityError', 'QuotaExceededError'].includes(error.name)) throw error
               setFailed(true)
             }
           }}
-        >
-          <span aria-hidden="true" style={{ ...styles.switchThumb, ...(budgetTargetEnabled ? styles.switchThumbOn : {}) }} />
-        </button>
+          anchor={styleAnchor}
+        />}
+      </div>
+      <div style={styles.switchRow}>
+        <div style={styles.labelRow}><span style={styles.switchLabel}>{t('budgetTargetTitle')}</span><SettingHelp title={t('budgetTargetTitle')} hint={t('budgetTargetHint')} t={t} /></div>
+        <Switch checked={budgetTargetEnabled} label={t('budgetTargetTitle')}
+          className="dsh-subscription-native-control" title={t(budgetTargetEnabled ? 'budgetTargetOn' : 'budgetTargetOff')}
+          onChange={next => {
+            try {
+              setBudgetTargetLine(next)
+              setFailed(false)
+            } catch (error) {
+              if (!(error instanceof DOMException) || !['SecurityError', 'QuotaExceededError'].includes(error.name)) throw error
+              setFailed(true)
+            }
+          }}
+        />
       </div>
       <div style={styles.field}>
         <div style={styles.labelRow}>
@@ -167,19 +163,5 @@ const styles: Record<string, CSSProperties> = {
   select: { width: '100%' },
   switchRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, minHeight: 30 },
   switchLabel: { fontSize: 13, fontWeight: 500, lineHeight: '20px' },
-  switchTrack: {
-    display: 'inline-flex', alignItems: 'center', flexShrink: 0,
-    boxSizing: 'border-box', width: 42, height: 24, padding: 3, border: 'none',
-    borderRadius: 999, background: 'var(--dsw-alias-border-l2, #777)',
-    cursor: 'pointer', transition: 'background-color 150ms ease',
-  },
-  switchTrackOn: { background: 'var(--dsw-alias-state-success-primary, #22c55e)' },
-  switchThumb: {
-    display: 'block', width: 18, height: 18, borderRadius: '50%',
-    background: '#fff', boxShadow: '0 1px 3px rgba(0,0,0,.25)',
-    transform: 'translateX(0px)', transition: 'transform 150ms ease',
-    pointerEvents: 'none',
-  },
-  switchThumbOn: { transform: 'translateX(18px)' },
   hint: { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
 }
