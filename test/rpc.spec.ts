@@ -146,7 +146,7 @@ test('speed endpoints: per-session tier round trip and payload validation', asyn
   })
   assert.deepEqual(await handler('speed', { sessionId: 's1' }, signal), {
     ok: true,
-    value: { tier: 'fast', fastModels: [] },
+    value: { tier: 'fast', sessionTier: 'fast', fastModels: [] },
   })
   // Another session is unaffected; Standard is an explicit session choice.
   assert.deepEqual(await handler('speed', { sessionId: 's2' }, signal), {
@@ -156,7 +156,7 @@ test('speed endpoints: per-session tier round trip and payload validation', asyn
   await handler('setSpeed', { sessionId: 's1', tier: 'standard' }, signal)
   assert.deepEqual(await handler('speed', { sessionId: 's1' }, signal), {
     ok: true,
-    value: { tier: 'standard', fastModels: [] },
+    value: { tier: 'standard', sessionTier: 'standard', fastModels: [] },
   })
 
   const bad = [

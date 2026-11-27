@@ -149,7 +149,6 @@ import { createImageGenerateTool } from './tools/image-generate.js'
 import { createVideoGenerateTool, videosDirectory } from './tools/video-generate.js'
 import { ensureConnectAttemptTimeout, proxiedFetch, proxyGetConfig, proxySetConfig, proxyTestConnection, restoreConnectAttemptTimeout } from './http.js'
 import { ProviderSettingsStore, PROVIDER_TOOLS, validatePreferences } from './provider-settings.js'
-import { ModelSpeeds } from './model-speeds.js'
 
 export type { ModelEntry, ProviderUsage, UsageWindow } from './providers/common.js'
 export type { RateLimitConfig, RateLimitWait } from './providers/rate-limit.js'
@@ -832,23 +831,16 @@ export function apply(ctx: Context, config: Config): void {
   // Usage lookups resolve the session through the refresh-aware path, so an
   // expired access token renews instead of failing the lookup.
   const usageFetchers: UsageFetchers = {}
-  // Model-bound composer choices persist independently of subagent defaults.
-  // Legacy callers without a model retain the session-only override.
-  const modelSpeeds = new ModelSpeeds()
+  // Fast is opt-in for each main session, never restored from a model preference.
+  // Only identified subagents may use the separate Settings-page defaults.
   const speedBySession = new Map<string, SpeedTier>()
-  const speedBySessionModel = new Map<string, Map<string, SpeedTier>>()
-  const selectedSpeed = (sessionId: string, model?: string): SpeedTier => {
-    if (model !== undefined) model = parseAccountModelId(model)?.model ?? model
-    const explicit = (model === undefined ? undefined : speedBySessionModel.get(sessionId)?.get(model))
-      ?? speedBySession.get(sessionId)
-    if (explicit !== undefined) return explicit
+  const defaultSpeed = (sessionId: string, model?: string): SpeedTier => {
+    if (model === undefined) return 'standard'
     // The request itself carries no subagent flag. The live registry exposes
     // durable origin metadata for spawn, fork, and resumed subagents alike.
     const agent = ctx.get('agents')?.get(sessionId as NonNullable<GenerateOptions['sessionId']>)
-    if (model !== undefined && agent?.session.header.origin === 'subagent') {
-      return preferences.subagentSpeed(parseAccountModelId(model)?.model ?? model)
-    }
-    return model === undefined ? 'standard' : modelSpeeds.get(model) ?? 'standard'
+    if (agent?.session.header.origin !== 'subagent') return 'standard'
+    return preferences.subagentSpeed(parseAccountModelId(model)?.model ?? model)
   }
   let codexAdapter: CodexAdapter | undefined
   let grokAdapter: GrokAdapter | undefined
@@ -948,7 +940,7 @@ export function apply(ctx: Context, config: Config): void {
           pool: () => poolAdapter,
           speedFor: (sessionId: string | undefined, model: string): boolean | Promise<boolean> =>
             sessionId !== undefined
-            && selectedSpeed(sessionId, model) === 'fast'
+            && (speedBySession.get(sessionId) ?? defaultSpeed(sessionId, model)) === 'fast'
             && adapter.supportsFastTier(model),
         })
         codexAdapter = adapter
@@ -1245,21 +1237,15 @@ export function apply(ctx: Context, config: Config): void {
           if (await codexAdapter?.supportsFastTier(model, key)) fastModels.push(accountModelId(key, model))
         }
       }
+      const sessionTier = speedBySession.get(sessionId)
       return {
-        tier: model !== undefined && !fastModels.includes(model) ? 'standard' : selectedSpeed(sessionId, model),
+        tier: model !== undefined && !fastModels.includes(model) ? 'standard' : sessionTier ?? defaultSpeed(sessionId, model),
+        ...(sessionTier === undefined ? {} : { sessionTier }),
         fastModels,
       }
     },
-    async setSpeed(sessionId, tier, model) {
-      if (model === undefined) {
-        speedBySession.set(sessionId, tier)
-        return
-      }
-      model = parseAccountModelId(model)?.model ?? model
-      await modelSpeeds.set(model, tier)
-      const choices = speedBySessionModel.get(sessionId) ?? new Map<string, SpeedTier>()
-      choices.set(model, tier)
-      speedBySessionModel.set(sessionId, choices)
+    async setSpeed(sessionId, tier) {
+      speedBySession.set(sessionId, tier)
     },
   }
   // Per-model default effort overrides (the Settings page's model pickers).

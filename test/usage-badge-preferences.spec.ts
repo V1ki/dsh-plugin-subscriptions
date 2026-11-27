@@ -34,7 +34,9 @@ test('display preference defaults safely without a browser and renders bilingual
     assert.ok(html.includes(dictionary.usageBadgeDisplay))
     assert.ok(html.includes(dictionary.usageBadgeDisplayHidden))
     assert.ok(html.includes(dictionary.usageBadgeDisplayRecent))
-    assert.equal((html.match(/<option /g) ?? []).length, 4)
+    assert.ok(html.includes(dictionary.composerSliderDisplay))
+    assert.ok(html.includes(dictionary.composerPickerDisplay))
+    assert.equal((html.match(/<option /g) ?? []).length, 8)
     assert.ok(html.includes('<label'))
   }
 })

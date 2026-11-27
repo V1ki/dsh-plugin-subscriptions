@@ -28,8 +28,12 @@ import { ImageGenerateToolview, createImageLoader } from './ImageGenerateToolvie
 import type { ImageGenerateToolviewInjected } from './ImageGenerateToolview.js'
 import { VideoGenerateToolview, createVideoLoader } from './VideoGenerateToolview.js'
 import type { VideoGenerateToolviewInjected } from './VideoGenerateToolview.js'
-import { SpeedSelect, createSpeedLoader, createSpeedSetter } from './SpeedSelect.js'
-import type { ModelDirectoriesLike, SpeedSelectInjected } from './SpeedSelect.js'
+import { createSpeedLoader, createSpeedSetter } from './speed.js'
+import type { ModelDirectoriesLike } from './speed.js'
+import { ModelSlider, resolveSliderDirectory } from './ModelSlider.js'
+import { callSubscriptionsAuth } from './subscriptions-rpc.js'
+import type { ProviderStatus } from './SubscriptionsSection.js'
+import { installComposerPickerVisibility } from './composer-picker-visibility.js'
 import { SubscriptionUsageBadge, createCurrentModelReader } from './SubscriptionUsageBadge.js'
 import type { SubscriptionUsageBadgeInjected } from './SubscriptionUsageBadge.js'
 import { en, zh } from './locales.js'
@@ -46,7 +50,7 @@ export type { UsageDashboardInjected, UsageDashboardProps } from './UsageDashboa
 export { UsageDashboard, UsageDashboardView } from './UsageDashboard.js'
 export type { ImageGenerateToolviewInjected, ImageGenerateToolviewProps } from './ImageGenerateToolview.js'
 export type { VideoGenerateToolviewInjected, VideoGenerateToolviewProps } from './VideoGenerateToolview.js'
-export type { SpeedSelectInjected, SpeedSelectProps, SpeedState, SpeedTier } from './SpeedSelect.js'
+export type { SpeedState, SpeedTier } from './speed.js'
 export type { SubscriptionUsageBadgeInjected, SubscriptionUsageBadgeProps } from './SubscriptionUsageBadge.js'
 export type { SubscriptionsKey } from './locales.js'
 
@@ -83,6 +87,7 @@ export const inject = ['slots', 'connection', 'locale']
  * @param ctx - client root context.
  */
 export function apply(ctx: ClientContext): void {
+  ctx.effect(installComposerPickerVisibility, 'subscriptions-composer-picker-visibility')
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-plugin-subscriptions: copy dictionaries')
   // Settings-shell nudge: the panel (nav title + header row + section body)
   // sits flush against the panel's top edge; push it down a little to leave
@@ -149,29 +154,38 @@ export function apply(ctx: ClientContext): void {
     inject: videoToolviewInjected,
   }, VideoGenerateToolview))
 
-  // The composer Speed toggle (codex fast tier) sits in the right tool row,
-  // just left of the model selector; the framework synthesizes its `t` seat
-  // from `locale: NS`, and the inject face binds each session's RPC calls.
-  // The current-model read rides ui-model-selection's `modelDirectories`
-  // service, resolved lazily so registration order never matters.
   const models = (): ModelDirectoriesLike | undefined =>
     ctx.get('modelDirectories') as ModelDirectoriesLike | undefined
-  ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
-    name: 'conversation.input.right',
-    id: 'codex-speed',
-    order: 0,
-    locale: NS,
-    inject: (sessionId: string): SpeedSelectInjected => ({
-      loadSpeed: createSpeedLoader(connection, models, sessionId),
-      setSpeed: createSpeedSetter(connection, sessionId, models),
-    }),
-  }, SpeedSelect))
+  const sliderProviders = ['codex', 'claude'] as const
+  const loadProviders = async () => {
+    const { providers } = await callSubscriptionsAuth<{ providers: Partial<Record<typeof sliderProviders[number], ProviderStatus>> }>(connection.rpc, 'status', {})
+    return sliderProviders.filter(id => providers[id]?.enabled !== false && (providers[id]?.accounts.length ?? 0) > 0)
+  }
+  ctx.inject(['modelDirectories'], (scope: ClientContext) => {
+    scope.slots.inject('conversation.input.right', () => scope.slots.register({
+      name: 'conversation.input.right',
+      id: 'subscription-model-slider',
+      // Sort after other Composer tools, next to the native picker.
+      priority: 100,
+      order: 100,
+      locale: NS,
+      inject: (sessionId: string) => ({
+        sliderSessionId: sessionId,
+        loadProviders,
+        directory: resolveSliderDirectory(scope.get('modelDirectories'), sessionId),
+        speed: {
+          loadSpeed: createSpeedLoader(connection, models, sessionId),
+          setSpeed: createSpeedSetter(connection, sessionId, models),
+        },
+      }),
+    }, ModelSlider))
+  })
 
   // The subscription usage badge renders a stats pill in the composer's dock
   // (conversation.composer.dock) — collapsed, the current model's provider
   // (e.g. "Codex 6d1h 25%"); clicking opens every provider's windows. A fresh
   // id means it appears beside the shipped StatsPills, never replacing them;
-  // the current-model read shares the Speed toggle's `modelDirectories` path.
+  // the current-model read uses the same `modelDirectories` service.
   ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
     name: 'conversation.composer.dock',
     id: 'subscription-usage',

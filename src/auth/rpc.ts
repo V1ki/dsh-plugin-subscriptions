@@ -78,19 +78,17 @@ const VIDEO_NAME_PATTERN = /^[\w.-]+\.mp4$/
 /** One session's speed choice: standard routing or the fast (priority) tier. */
 export type SpeedTier = 'standard' | 'fast'
 
-/** `speed` endpoint value: the session's choice plus the visibility list. */
 export interface SpeedState {
-  /** Explicit session speed, or the subagent's model default when supplied. */
   tier: SpeedTier
+  /** Explicit session speed, if set, even when the requested model is ineligible. */
+  sessionTier?: SpeedTier
   /** Codex model ids whose catalog advertises a fast tier. */
   fastModels: string[]
 }
 
-/** Session overrides plus persisted subagent model defaults. */
 export interface SpeedController {
-  /** Pass the current Codex model to resolve a subagent's default speed. */
   speed(sessionId: string, model?: string): Promise<SpeedState>
-  /** Set the session override and remember it for this model across restarts when supplied. */
+  /** Set the session choice. The optional model is accepted for compatibility. */
   setSpeed(sessionId: string, tier: SpeedTier, model?: string): Promise<void>
 }
 
