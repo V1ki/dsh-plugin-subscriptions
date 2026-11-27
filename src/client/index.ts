@@ -31,7 +31,6 @@ import type { VideoGenerateToolviewInjected } from './VideoGenerateToolview.js'
 import { SpeedSelect, createSpeedLoader, createSpeedSetter } from './SpeedSelect.js'
 import type { ModelDirectoriesLike, SpeedSelectInjected } from './SpeedSelect.js'
 import { SubscriptionUsageBadge, createCurrentModelReader } from './SubscriptionUsageBadge.js'
-import { SubagentSubscriptionUsageBadge } from './SubagentSubscriptionUsageBadge.js'
 import type { SubscriptionUsageBadgeInjected } from './SubscriptionUsageBadge.js'
 import { en, zh } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
@@ -183,17 +182,6 @@ export function apply(ctx: ClientContext): void {
       currentModel: createCurrentModelReader(models, sessionId),
     }),
   }, SubscriptionUsageBadge))
-
-  // One-shot child sessions replace the ordinary composer with a read-only
-  // panel, so their composer dock is absent. Render the same usage badge in
-  // the child header; root sessions keep the existing composer badge.
-  ctx.slots.inject('conversation.session.header.utilities', () => ctx.slots.register({
-    name: 'conversation.session.header.utilities',
-    id: 'subagent-subscription-usage',
-    order: 40,
-    locale: NS,
-    inject: () => ({ rpc: connection.rpc }),
-  }, SubagentSubscriptionUsageBadge))
 
   // The /fast slash command offers the same Standard/Fast choice as a popup.
   // `available` is synchronous and sees only the session id, so the command

@@ -57,7 +57,7 @@ try {
   await settingsVisible(page)
   const order = await page.evaluate(() => {
     const tabs = document.querySelector('[role="tablist"]')
-    const quota = document.querySelector('select[aria-label="Status-bar quota display"]')
+    const quota = document.querySelector('button[aria-label="Status-bar quota display"]')
     const proxy = [...document.querySelectorAll('button')].find(el => el.textContent.trim() === 'Configure…')
     return !!(tabs && quota && proxy && (tabs.compareDocumentPosition(quota) & Node.DOCUMENT_POSITION_FOLLOWING) && (quota.compareDocumentPosition(proxy) & Node.DOCUMENT_POSITION_FOLLOWING))
   })

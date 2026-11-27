@@ -32,13 +32,11 @@ test('display preference defaults safely without a browser and renders bilingual
   for (const dictionary of [en, zh]) {
     const html = renderToStaticMarkup(createElement(UsageBadgeDisplaySetting, { t: key => dictionary[key] }))
     assert.ok(html.includes(dictionary.usageBadgeDisplay))
-    assert.ok(html.includes(dictionary.usageBadgeDisplayHidden))
     assert.ok(html.includes(dictionary.usageBadgeDisplayRecent))
-    assert.equal((html.match(/<option /g) ?? []).length, 4)
-    assert.match(html, /role="switch"/)
-    assert.match(html, /aria-checked="true"/)
+    assert.equal((html.match(/aria-haspopup="menu"/g) ?? []).length, 3)
+    assert.doesNotMatch(html, /role="switch"/)
     assert.match(html, /aria-haspopup="menu"/)
-    assert.ok(html.includes(dictionary.usageBadgeStyleCompact))
+    assert.ok(html.includes(dictionary.usageBadgeStyleText))
 
     assert.ok(html.includes('<label'))
   }
@@ -129,8 +127,8 @@ test('quota mode defaults to used and remains independent from legacy hiding', (
 }))
 
 const styleKey = 'dsh.subscriptions.usageBadgeStyle'
-test('compact visual style is the local default and can be changed independently', () => withBrowser(browser => {
-  assert.equal(readUsageBadgeStyle(), 'compact')
+test('text visual style is the local default and can be changed independently', () => withBrowser(browser => {
+  assert.equal(readUsageBadgeStyle(), 'text')
   let updates = 0
   const unsubscribe = subscribeUsageBadgeStyle(() => { updates++ })
   setUsageBadgeStyle('text')

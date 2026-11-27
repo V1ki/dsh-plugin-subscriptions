@@ -47,12 +47,12 @@ const STYLE_KEY = 'dsh.subscriptions.usageBadgeStyle'
 const STYLE_EVENT = 'dsh:subscriptions:usage-badge-style'
 
 export function readUsageBadgeStyle(): UsageBadgeStyle {
-  if (typeof window === 'undefined') return 'compact'
+  if (typeof window === 'undefined') return 'text'
   try {
-    return window.localStorage.getItem(STYLE_KEY) === 'text' ? 'text' : 'compact'
+    return window.localStorage.getItem(STYLE_KEY) === 'compact' ? 'compact' : 'text'
   } catch (error) {
     if (!(error instanceof DOMException) || error.name !== 'SecurityError') throw error
-    return 'compact'
+    return 'text'
   }
 }
 
@@ -75,7 +75,7 @@ export function subscribeUsageBadgeStyle(notify: () => void): () => void {
 }
 
 export function useUsageBadgeStyle(): UsageBadgeStyle {
-  return useSyncExternalStore(subscribeUsageBadgeStyle, readUsageBadgeStyle, () => 'compact')
+  return useSyncExternalStore(subscribeUsageBadgeStyle, readUsageBadgeStyle, () => 'text')
 }
 
 /** Display-only linear spending guide; OFF is explicit, ON is the default. */

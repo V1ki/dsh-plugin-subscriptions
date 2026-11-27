@@ -304,7 +304,7 @@ export function budgetTargetRemaining(
   return Math.max(0, Math.min(100, 100 * remainingMs / duration))
 }
 
-/** Marker tone: red once over budget; yellow when within 10 pp of the target. */
+/** Marker tone: red once over budget; orange when within 10 pp of the target. */
 export function budgetTargetTone(remainingPercent: number, targetPercent: number): 'over' | 'near' | 'safe' {
   if (remainingPercent < targetPercent) return 'over'
   if (remainingPercent - targetPercent <= 10) return 'near'
@@ -384,7 +384,7 @@ function usageWindowLabel(t: Translate, window: UsageWindow): string {
  * for the current model's provider, opening a dialog with every provider's
  * accounts and their windows, including unavailable telemetry.
  */
-export function SubscriptionUsageBadge({ rpc, currentModel, t, headerPlacement = false }: Pick<SubscriptionUsageBadgeProps, 'rpc' | 'currentModel' | 't'> & { headerPlacement?: boolean }) {
+export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsageBadgeProps) {
   const translate: Translate = t ?? fallbackTranslate
   const [displays, setDisplays] = useState<ProviderUsageDisplay[]>([])
   const [selection, setSelection] = useState<ModelSelection | undefined>(undefined)
@@ -395,7 +395,7 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t, headerPlacement =
   const quotaMode = useQuotaDisplayMode()
   const now = useQuotaClock()
   const current = selection?.provider
-  const badgeSelection = headerPlacement ? selection : retainSubscriptionSelection(lastSubscription, selection)
+  const badgeSelection = retainSubscriptionSelection(lastSubscription, selection)
   const [open, setOpen] = useState(false)
   const [hover, setHover] = useState(false)
   const inflightRef = useRef(false)
@@ -601,7 +601,7 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t, headerPlacement =
   const [statsRow, setStatsRow] = useState<HTMLElement | null>(null)
   useEffect(() => {
     const seat = seatRef.current
-    if (seat === null || headerPlacement) return
+    if (seat === null) return
     const scope = statsScopeOf(seat)
     if (scope === null) return
     const find = (): HTMLElement | null => scope.querySelector<HTMLElement>('[data-composer-stats]')
@@ -609,7 +609,7 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t, headerPlacement =
     const observer = new MutationObserver(() => { setStatsRow(find()) })
     observer.observe(scope, { childList: true, subtree: true })
     return () => { observer.disconnect() }
-  }, [headerPlacement])
+  }, [])
 
   const seat = <span ref={seatRef} style={styles.seat} aria-hidden />
   const collapsed = collapsedDisplays(displays, badgeSelection?.provider)
@@ -624,11 +624,11 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t, headerPlacement =
   const label = compactSegment(collapsed[0]!, badgeSelection?.model, translate, quotaMode)
   const compactRows = styleMode === 'compact' ? compactQuotaRows(collapsed[0]!) : []
   const compact = compactRows.length > 0
-  // The compact bars always encode REMAINING quota.
-  // Keep full account information in the screen-reader label and popup.
+  // Both presentations use the same quota preference; budget risk is always
+  // evaluated in remaining-quota coordinates.
   const compactSummary = compactRows.map(row => {
     const target = budgetTargetEnabled ? budgetTargetRemaining(row, now) : undefined
-    return `${row.shortLabel}: ${Math.round(row.remainingPercent)}% remaining${target === undefined ? '' : `, linear target ${Math.round(target)}%`}`
+    return `${row.shortLabel}: ${quotaText(row.usedPercent, quotaMode, translate)}${target === undefined ? '' : `, ${translate('budgetTargetValue', { percent: Math.round(quotaMode === 'used' ? 100 - target : target) })}`}`
   }).join(' · ')
 
   // The dialog opens from the badge, so it follows the provider and model the
@@ -653,14 +653,16 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t, headerPlacement =
         style={{ ...styles.pill, ...(compact ? styles.compactPill : {}), ...(hover || open ? styles.pillActive : {}) }}
         aria-haspopup="dialog"
         aria-expanded={open}
-        aria-label={`${title} · ${label}`}
+        aria-label={compact ? `${title}: ${collapsed[0]!.name} · ${translate('quotaDefaultAccount')} · ${compactSummary}` : `${title} · ${label}`}
         title={compact ? `${title}: ${collapsed[0]!.name} · ${translate('quotaDefaultAccount')} · ${compactSummary}` : title}
         onMouseEnter={() => { setHover(true) }}
         onMouseLeave={() => { setHover(false) }}
         onClick={toggle}
       >
         {compact
-          ? <span style={styles.compactStack} aria-hidden="true">
+          ? <>
+            <span style={styles.label} aria-hidden="true">{collapsed[0]!.name}</span>
+            <span style={styles.compactStack} aria-hidden="true">
               {compactRows.map(row => (
                 <span key={row.kind} style={styles.compactLine} data-subscription-quota-row={row.kind}>
                   <span style={styles.compactShortLabel}>{row.shortLabel}</span>
@@ -668,9 +670,10 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t, headerPlacement =
                     <span
                       data-subscription-quota-fill={row.kind}
                       data-subscription-quota-remaining={Math.round(row.remainingPercent)}
+                      data-subscription-quota-displayed={Math.round(quotaMode === 'used' ? row.usedPercent : row.remainingPercent)}
                       style={{
                         ...styles.compactFill,
-                        width: `${row.remainingPercent}%`,
+                        width: `${quotaMode === 'used' ? row.usedPercent : row.remainingPercent}%`,
                         backgroundColor: compactQuotaColor(row.remainingPercent),
                       }}
                     />
@@ -681,11 +684,12 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t, headerPlacement =
                         <span
                           data-subscription-budget-target={row.kind}
                           data-subscription-budget-percent={Math.round(target)}
+                          data-subscription-budget-displayed={Math.round(quotaMode === 'used' ? 100 - target : target)}
                           data-subscription-budget-over={tone === 'over' ? 'true' : 'false'}
                           data-subscription-budget-tone={tone}
                           style={{
                             ...styles.budgetTargetMarker,
-                            left: `clamp(1.5px, ${target}%, calc(100% - 1.5px))`,
+                            left: `clamp(1.5px, ${quotaMode === 'used' ? 100 - target : target}%, calc(100% - 1.5px))`,
                             ...(tone === 'over' ? styles.budgetTargetOver : tone === 'near' ? styles.budgetTargetNear : {}),
                           }}
                         />
@@ -695,6 +699,7 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t, headerPlacement =
                 </span>
               ))}
             </span>
+            </>
           : <>
               <UsageBadgeIcon />
               <span style={styles.label}>{label}</span>
@@ -857,11 +862,11 @@ const styles: Record<string, CSSProperties> = {
     alignItems: 'center', gap: 6, padding: '1px 8px', display: 'inline-flex', cursor: 'pointer',
   },
   compactPill: {
-    width: 78, minWidth: 78, minHeight: 28, padding: '2px 4px',
+    minHeight: 28, padding: '2px 4px', gap: 5,
     justifyContent: 'center',
   },
   compactStack: {
-    display: 'inline-flex', flexDirection: 'column', justifyContent: 'center', gap: 3,
+    display: 'inline-flex', flexShrink: 0, flexDirection: 'column', justifyContent: 'center', gap: 3,
   },
   compactLine: {
     display: 'inline-flex', alignItems: 'center', gap: 4, height: 9,

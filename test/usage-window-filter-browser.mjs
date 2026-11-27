@@ -1,5 +1,6 @@
 // Offline UI regression: PLAYWRIGHT_PATH=/path/to/playwright node test/usage-window-filter-browser.mjs
 import assert from 'node:assert/strict'
+import { choosePreference } from './preference-menu-browser.mjs'
 import { readdir } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -11,6 +12,7 @@ const result = await build({
   input: 'test/usage-window-filter-browser.fixture.tsx',
   resolve: { alias: { 'react-dom/client': `${packagePath('react-dom')}/client.js` } },
   transform: { define: { 'process.env.NODE_ENV': '"production"' } },
+  plugins: [{ name: 'test-css', load(id) { return id.endsWith('.css') ? 'export default {}' : null } }],
   output: { format: 'iife' }, write: false,
 })
 const code = result.output.find(file => file.type === 'chunk').code
@@ -65,7 +67,7 @@ try {
   assert.equal(await page.getByText('1% used', { exact: true }).count(), 2)
   assert.equal(await page.getByText('0% used', { exact: true }).count(), 2)
   assert.equal(await page.getByText('33% used', { exact: true }).count(), 1)
-  await page.getByRole('combobox', { name: 'Quota percentages', exact: true }).selectOption('remaining')
+  await choosePreference(page.getByRole('button', { name: 'Quota percentages', exact: true }), 'remaining')
   assert.equal(await page.getByText('99% remaining', { exact: true }).count(), 2)
   assert.equal(await page.getByText('100% remaining', { exact: true }).count(), 2)
   assert.equal(await page.getByText('67% remaining', { exact: true }).count(), 1)

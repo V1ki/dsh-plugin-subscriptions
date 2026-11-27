@@ -212,31 +212,6 @@ ${formScope} select {
   font-weight: 400;
   line-height: 1.5;
 }
-.dsh-subscription-select-wrap {
-  position: relative;
-  display: flex;
-  align-items: center;
-  width: 100%;
-  min-width: 0;
-}
-${formScope} select.dsh-subscription-select {
-  appearance: none;
-  -webkit-appearance: none;
-  height: 36px;
-  padding: 0 34px 0 12px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 10px;
-  background: var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-base));
-  cursor: pointer;
-}
-.dsh-subscription-select-chevron {
-  position: absolute;
-  right: 11px;
-  top: 50%;
-  transform: translateY(-50%);
-  pointer-events: none;
-  color: var(--dsw-alias-label-tertiary);
-}
 ${formScope} input::placeholder {
   color: var(--dsw-alias-label-tertiary);
   opacity: 1;

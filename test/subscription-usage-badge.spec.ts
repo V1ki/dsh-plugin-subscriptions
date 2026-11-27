@@ -374,21 +374,3 @@ test('compact quota fill uses no green and bright warning colors', () => {
   assert.equal(compactQuotaColor(20), '#ffaa00')
   assert.equal(compactQuotaColor(0), '#ff244c')
 })
-
-test('subagent badge uses only the actual latest completed request route', async () => {
-  const { latestSubagentSubscriptionModel } = await import('../src/client/SubagentSubscriptionUsageBadge.js')
-  const nodes = [
-    { kind: 'turn-tail', anchorSeq: 100, data: { tokenUsage: { routes: [{ provider: 'claude', model: 'claude-opus-5-5' }] } } },
-    { kind: 'turn-tail', anchorSeq: 200, data: { tokenUsage: { routes: [
-      { provider: 'claude', model: 'claude-opus-5-5' },
-      { provider: 'dsh-opencode-go', model: 'deepseek-v4.1-flash' },
-    ] } } },
-  ]
-  const chat = { nodes: { values: () => nodes } }
-  assert.deepEqual(latestSubagentSubscriptionModel(chat),
-    { provider: 'dsh-opencode-go', model: 'deepseek-v4.1-flash' })
-  assert.equal(latestSubagentSubscriptionModel(null), undefined)
-  assert.equal(latestSubagentSubscriptionModel({ nodes: { values: () => [
-    { kind: 'turn-tail', anchorSeq: 9, data: { tokenUsage: { routes: undefined } } },
-  ] } }), undefined)
-})

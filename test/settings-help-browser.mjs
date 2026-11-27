@@ -1,6 +1,7 @@
 // Offline regression; no server, account or real browser settings are used.
 // PLAYWRIGHT_PATH=/path/to/playwright node test/settings-help-browser.mjs
 import assert from 'node:assert/strict'
+import { choosePreference, preferenceValue } from './preference-menu-browser.mjs'
 import { readdir } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -37,7 +38,7 @@ async function createPage(options = {}) {
   page.setDefaultTimeout(4000)
   page.on('pageerror', error => errors.push(error.message))
   await page.goto('http://settings-help.test/')
-  await page.getByRole('combobox', { name: hints[0].name, exact: true }).waitFor()
+  await page.getByRole('button', { name: hints[0].name, exact: true }).waitFor()
   return { page, context }
 }
 const trigger = (page, name) => page.getByRole('button', { name: `About ${name}`, exact: true })
@@ -64,7 +65,7 @@ try {
   await page.getByRole('button', { name: 'Before settings' }).focus()
   for (const { name, hint } of hints) {
     const button = trigger(page, name)
-    for (let i = 0; i < 6 && !(await button.evaluate(el => el === document.activeElement)); i++) await page.keyboard.press('Tab')
+    for (let i = 0; i < 10 && !(await button.evaluate(el => el === document.activeElement)); i++) await page.keyboard.press('Tab')
     assert.equal(await button.evaluate(el => el === document.activeElement), true, `Tab reaches ${name} help`)
     await tip(page, hint).waitFor({ state: 'visible' })
     await checkDescription(button, hint)
@@ -74,10 +75,10 @@ try {
   // A click opens the popover without changing either preference; outside dismisses it.
   await page.getByRole('button', { name: 'Outside settings' }).focus()
   for (const { name, hint } of hints) {
-    const before = await page.locator('select').evaluateAll(els => els.map(el => el.value))
+    const before = await page.locator('button[aria-haspopup=menu]').allTextContents()
     await trigger(page, name).click()
     await tip(page, hint).waitFor({ state: 'visible' })
-    assert.deepEqual(await page.locator('select').evaluateAll(els => els.map(el => el.value)), before)
+    assert.deepEqual(await page.locator('button[aria-haspopup=menu]').allTextContents(), before)
     await trigger(page, name).click()
     await tip(page, hint).waitFor({ state: 'hidden' })
     await page.mouse.move(0, 0)
@@ -86,32 +87,39 @@ try {
     await page.getByRole('button', { name: 'Outside settings' }).click()
     await tip(page, hint).waitFor({ state: 'hidden' })
   }
-  const badge = page.getByRole('combobox', { name: hints[0].name, exact: true })
-  const quota = page.getByRole('combobox', { name: hints[1].name, exact: true })
-  await badge.selectOption('hidden')
-  await quota.selectOption('remaining')
-  assert.equal(await badge.inputValue(), 'hidden')
-  assert.equal(await quota.inputValue(), 'remaining')
+  const badge = page.getByRole('button', { name: hints[0].name, exact: true })
+  const quota = page.getByRole('button', { name: hints[1].name, exact: true })
+  await choosePreference(badge, 'hidden')
+  await choosePreference(quota, 'remaining')
+  assert.equal(await preferenceValue(badge), 'hidden')
+  assert.equal(await preferenceValue(quota), 'remaining')
   await page.reload()
-  assert.equal(await badge.inputValue(), 'hidden', 'status-bar selection persists')
-  assert.equal(await quota.inputValue(), 'remaining', 'quota selection persists')
-  // Native host menu and switch preserve independent display preferences.
+  assert.equal(await preferenceValue(badge), 'hidden', 'status-bar selection persists')
+  assert.equal(await preferenceValue(quota), 'remaining', 'quota selection persists')
+  // Text is the default, and irrelevant options are removed without clearing preferences.
   const style = page.getByRole('button', { name: 'Status-bar style', exact: true })
   const target = page.getByRole('switch', { name: 'Linear spending target', exact: true })
+  assert.equal(await style.count(), 0)
+  await choosePreference(badge, 'recent')
+  assert.equal(await preferenceValue(style), 'text')
+  assert.equal(await target.count(), 0)
+  await choosePreference(style, 'compact')
   assert.equal(await target.getAttribute('aria-checked'), 'true')
-  await style.click()
-  await page.getByRole('menuitem', { name: 'Original text badge', exact: true }).click()
-  assert.match(await style.innerText(), /Original text badge/)
   await target.click()
   assert.equal(await target.getAttribute('aria-checked'), 'false')
+  await choosePreference(style, 'text')
+  assert.equal(await target.count(), 0)
   await page.reload()
-  assert.match(await style.innerText(), /Original text badge/)
+  assert.equal(await preferenceValue(style), 'text')
+  await choosePreference(style, 'compact')
   assert.equal(await target.getAttribute('aria-checked'), 'false')
-  await style.click()
-  await page.getByRole('menuitem', { name: 'Compact quota bars', exact: true }).click()
-  assert.match(await style.innerText(), /Compact quota bars/)
   await target.click()
   assert.equal(await target.getAttribute('aria-checked'), 'true')
+  await choosePreference(badge, 'hidden')
+  assert.equal(await style.count(), 0)
+  assert.equal(await target.count(), 0)
+  await choosePreference(badge, 'recent')
+  assert.equal(await preferenceValue(style), 'compact')
   await style.click()
   await page.keyboard.press('Escape')
   assert.equal(await style.getAttribute('aria-expanded'), 'false')
