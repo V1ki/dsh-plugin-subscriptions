@@ -30,6 +30,11 @@ test('all DSH peers share the minimum-only compatibility policy without an engin
   }
 })
 
+test('peer ranges admit the Cordis and Schemastery prereleases used by DSH 0.2.3', () => {
+  assert.ok(semver.satisfies('4.2.0-alpha.1', manifest.peerDependencies['@deepseek-ai/cordis']!))
+  assert.ok(semver.satisfies('3.20.0-alpha.1', manifest.peerDependencies['@deepseek-ai/schemastery']!))
+})
+
 // npm defaults exclude unrelated prereleases; DSH app-boot explicitly uses
 // includePrerelease: true. Exercise both rather than assuming equivalence.
 for (const includePrerelease of [false, true]) {

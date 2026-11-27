@@ -99,8 +99,12 @@ test('a soft byte target re-encodes heavy images at their own size and caps ever
   assert.equal(imageRequestTarget(heavy, LIMIT), undefined, 'no soft target keeps the edge-only rule')
   assert.equal(imageRequestTarget(WIDE, soft)?.maxBytes, 1_000_000)
   assert.equal(imageRequestTarget(heavy, { ...LIMIT, softBytes: 5_000_000 }), undefined, 'the soft target never exceeds maxBytes')
-  assert.equal(imageRequestTarget({ ...SMALL, bytes: 4_000_000 }, { ...LIMIT, softBytes: 5_000_000 })?.maxBytes, 3_750_000)
-  assert.equal(imageRequestTarget(WIDE, { ...LIMIT, softBytes: 5_000_000 })?.maxBytes, 3_750_000)
+  for (const image of [{ ...SMALL, bytes: 4_000_000 }, WIDE]) {
+    const target = imageRequestTarget(image, { ...LIMIT, softBytes: 5_000_000 })
+    assert.equal(target?.maxBytes, LIMIT.maxBytes)
+    assert.equal(target?.maxImageBytes, LIMIT.maxBytes)
+    assert.equal(target?.imageTargetBytes, LIMIT.maxBytes)
+  }
 })
 
 test('Claude re-encodes lossless screenshots over 1MB within the edge limit', async () => {
