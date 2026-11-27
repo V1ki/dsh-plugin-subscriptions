@@ -46,7 +46,7 @@ const rpc = { call: async (_channel: string, method: string, payload: { provider
   if (method.endsWith('.usage')) return { ok: true, value: {
     supported: true, fetchedAt: Date.now() - (codexStale ? 600_000 : 1000), staleAt: Date.now() + (codexStale ? -300_000 : 299_000), windows: payload.provider === 'antigravity'
       ? Array.from({ length: 30 }, (_, i) => ({ kind: 'other', scope: `gemini-model-${i}`, usedPercent: i }))
-      : payload.provider === 'codex' ? codexValues.map((usedPercent, i) => ({ kind: i === 0 ? 'session' : 'weekly', usedPercent, ...(codexStale ? { resetsAt: Date.now() - 1000 } : {}) })) : [{ kind: 'weekly', usedPercent: 25 }],
+      : payload.provider === 'codex' ? codexValues.map((usedPercent, i) => ({ kind: i === 0 ? 'session' : 'weekly', usedPercent, ...(codexStale ? { resetsAt: Date.now() - 1000 } : location.search.includes('budget=1') ? { resetsAt: Date.now() + (i === 0 ? 2 : 24) * 3600_000, durationMs: (i === 0 ? 5 : 168) * 3600_000 } : {}) })) : [{ kind: 'weekly', usedPercent: 25 }],
   } }
   throw new Error(`Unexpected RPC: ${method}`)
 } } as unknown as SubscriptionUsageBadgeInjected['rpc']

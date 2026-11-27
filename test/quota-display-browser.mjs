@@ -1,6 +1,7 @@
 // Optional offline UI check: PLAYWRIGHT_PATH=/path/to/playwright node test/subscription-usage-browser.mjs
 // No running DSH server, real accounts, credentials or model writes. Screenshots use the fixture theme.
 import assert from 'node:assert/strict'
+import { choosePreference, preferenceValue } from './preference-menu-browser.mjs'
 import { readdir } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -33,12 +34,13 @@ try {
   assert.doesNotMatch(await badge.innerText(), /Default account/, 'the pill leaves the account label to the dialog')
   await page.getByRole('button', { name: 'Toggle settings', exact: true }).click()
   const settings = page.locator('[data-settings]')
+  await settings.locator('[role=tab][data-subscription-provider=codex]').click()
   const codex = settings.getByRole('tabpanel').filter({ hasText: 'Codex (ChatGPT)' })
   await codex.getByText('13% used', { exact: true }).waitFor()
-  const mode = settings.getByRole('combobox', { name: 'Quota percentages', exact: true })
+  const mode = settings.getByRole('button', { name: 'Quota percentages', exact: true })
   const calls = () => page.evaluate(() => Number(document.documentElement.dataset.usageCalls))
   const before = await calls()
-  await mode.selectOption('remaining')
+  await choosePreference(mode, 'remaining')
   await codex.getByText('87% remaining', { exact: true }).waitFor()
   assert.match(await badge.innerText(), /87% remaining/)
   assert.equal(await calls(), before, 'changing preference must not fetch quota')
@@ -90,20 +92,20 @@ try {
   assert.equal(await codex.getByText(/Last known usage; refresh unavailable/).count(), 0)
   const other = await context.newPage()
   await other.goto('http://subscription-usage.test/')
-  await other.getByRole('combobox', { name: 'Quota percentages', exact: true }).selectOption('used')
+  await choosePreference(other.getByRole('button', { name: 'Quota percentages', exact: true }), 'used')
   await codex.getByText('36% used', { exact: true }).waitFor()
   assert.match(await badge.innerText(), /36% used/)
-  await mode.selectOption('remaining')
-  await settings.getByRole('combobox', { name: 'Status-bar quota display', exact: true }).selectOption('hidden')
+  await choosePreference(mode, 'remaining')
+  await choosePreference(settings.getByRole('button', { name: 'Status-bar quota display', exact: true }), 'hidden')
   await badge.waitFor({ state: 'detached' })
-  assert.equal(await mode.inputValue(), 'remaining')
+  assert.equal(await preferenceValue(mode), 'remaining')
   await codex.getByText('64% remaining', { exact: true }).waitFor()
   await page.reload()
-  await page.getByRole('combobox', { name: 'Quota percentages', exact: true }).waitFor()
-  assert.equal(await page.getByRole('combobox', { name: 'Quota percentages', exact: true }).inputValue(), 'remaining')
-  await page.getByRole('combobox', { name: 'Status-bar quota display', exact: true }).selectOption('recent')
+  await page.getByRole('button', { name: 'Quota percentages', exact: true }).waitFor()
+  assert.equal(await preferenceValue(page.getByRole('button', { name: 'Quota percentages', exact: true })), 'remaining')
+  await choosePreference(page.getByRole('button', { name: 'Status-bar quota display', exact: true }), 'recent')
   await page.getByRole('button', { name: 'Locale', exact: true }).click()
-  await page.getByRole('combobox', { name: '额度百分比', exact: true }).waitFor()
+  await page.getByRole('button', { name: '额度百分比', exact: true }).waitFor()
   await page.setViewportSize({ width: 360, height: 720 })
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true)
   await page.getByRole('button', { name: 'codex', exact: true }).click()

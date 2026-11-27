@@ -471,7 +471,7 @@ test('SubscriptionsPage renders unified top tabs (default usage, switchable to s
   assert.match(usageHtml, /dsh-usage-dashboard-embedded/)
   assert.doesNotMatch(usageHtml, /class="dsh-subscriptions-settings/)
 
-  // Settings tab renders embedded full-width 2-column layout with hideUsageHint=true and custom-chevron selects
+  // Settings tab renders embedded full-width 2-column layout with hideUsageHint=true and native preference menus
   const settingsHtml = renderToStaticMarkup(createElement(SubscriptionsPage, {
     rpc: fakeRpc,
     t: tZh,
@@ -482,7 +482,7 @@ test('SubscriptionsPage renders unified top tabs (default usage, switchable to s
   assert.match(settingsHtml, /dsh-subscriptions-settings-embedded/)
   assert.match(settingsHtml, /dsh-subscriptions-embedded-grid/)
   assert.match(settingsHtml, /dsh-subscriptions-embedded-aside/)
-  assert.match(settingsHtml, /dsh-subscription-select-chevron/)
+  assert.match(settingsHtml, /aria-haspopup="menu"/)
   assert.doesNotMatch(settingsHtml, /dsh-subscriptions-page-settings-wrap/)
   assert.doesNotMatch(settingsHtml, /已移至侧边栏「用量」页面/)
 

@@ -1,6 +1,7 @@
 // Optional offline UI check: PLAYWRIGHT_PATH=/path/to/playwright node test/subscription-usage-browser.mjs
 // No running DSH server, real accounts, credentials, screenshots or model writes.
 import assert from 'node:assert/strict'
+import { choosePreference, preferenceValue } from './preference-menu-browser.mjs'
 import { readdir } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -25,7 +26,7 @@ try {
   const errors = []
   page.on('pageerror', error => { errors.push(error.message); console.error(error.message) })
   await page.goto('http://subscription-usage.test/')
-  const control = page.getByRole('combobox', { name: 'Status-bar quota display', exact: true })
+  const control = page.getByRole('button', { name: 'Status-bar quota display', exact: true })
   const badge = page.locator('[data-composer-stats] button')
   const title = 'Subscription usage'
   const panel = page.getByRole('dialog', { name: title, exact: true })
@@ -133,19 +134,19 @@ try {
   // Change the preference from a second tab while the quota dialog is open.
   const other = await context.newPage()
   await other.goto('http://subscription-usage.test/')
-  const otherControl = other.getByRole('combobox', { name: 'Status-bar quota display', exact: true })
-  await otherControl.selectOption('hidden')
+  const otherControl = other.getByRole('button', { name: 'Status-bar quota display', exact: true })
+  await choosePreference(otherControl, 'hidden')
   await badge.waitFor({ state: 'detached' })
   await panel.waitFor({ state: 'detached' })
-  assert.equal(await control.inputValue(), 'hidden')
+  assert.equal(await preferenceValue(control), 'hidden')
   await page.reload()
   await control.waitFor()
-  assert.equal(await control.inputValue(), 'hidden')
+  assert.equal(await preferenceValue(control), 'hidden')
   await choose('codex', 'codex')
   assert.equal(await badge.count(), 0)
   // A page that loads hidden never asks for usage; showing it refreshes at once.
   assert.equal(await page.evaluate(() => document.documentElement.dataset.statusCalls), undefined)
-  await control.selectOption('recent')
+  await choosePreference(control, 'recent')
   await badge.waitFor()
   assert.equal(await page.getByRole('dialog').count(), 0, 'unhiding does not reopen the previous dialog')
   await page.waitForFunction(() => localStorage.getItem('dsh.subscriptions.usageBadgeMode') === 'recent')
@@ -157,15 +158,15 @@ try {
       return window.savedSetItem.call(this, key, value)
     }
   })
-  await control.selectOption('hidden')
+  await choosePreference(control, 'hidden')
   await page.getByRole('alert').waitFor()
-  assert.equal(await control.inputValue(), 'recent')
+  assert.equal(await preferenceValue(control), 'recent')
   assert.equal(await badge.count(), 1)
   await page.evaluate(() => { Storage.prototype.setItem = window.savedSetItem })
-  await control.selectOption('hidden')
+  await choosePreference(control, 'hidden')
   await page.getByRole('alert').waitFor({ state: 'detached' })
   await page.getByRole('button', { name: 'Locale', exact: true }).click()
-  await page.getByRole('combobox', { name: '状态栏额度显示', exact: true }).waitFor()
+  await page.getByRole('button', { name: '状态栏额度显示', exact: true }).waitFor()
   await page.setViewportSize({ width: 360, height: 720 })
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true)
   assert.deepEqual(errors, [])
