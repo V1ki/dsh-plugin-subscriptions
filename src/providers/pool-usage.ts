@@ -336,9 +336,10 @@ function cooldownFor(error: unknown, defaultTtlMs: number): number {
 /**
  * Whether a window constrains this model: unscoped windows always do; a
  * model-scoped window (Claude's Opus/Sonnet lanes) applies when its scope
- * names the model family.
+ * names the model family. Exported for the usage window tracker, which
+ * places request counts by the same rule routing scores quota by.
  */
-function windowApplies(window: UsageWindow, model: string, provider: ProviderId): boolean {
+export function windowApplies(window: Pick<UsageWindow, 'scope'>, model: string, provider: ProviderId): boolean {
   if (window.scope === undefined) return true
   if (provider === 'antigravity' && antigravityQuotaApplies(window.scope, model)) return true
   return model.toLowerCase().includes(window.scope.toLowerCase())

@@ -73,6 +73,7 @@ import { DEFAULT_RATE_LIMIT_MAX_WAIT_MS, resolveRateLimitWait } from './provider
 import type { RateLimitConfig } from './providers/rate-limit.js'
 import { DEFAULT_PROMPT_CACHE_TTL } from './translate/anthropic.js'
 import type { PromptCacheTtl } from './translate/anthropic.js'
+import type { HostPathMapper } from './translate/resolved.js'
 import { accountCatalogStore, catalogStore } from './providers/catalog-store.js'
 import { ClaudeCliVersionCache } from './providers/claude-cli-version.js'
 import type { CliVersion, NpmCliVersionCache } from './providers/npm-cli-version.js'
@@ -87,6 +88,13 @@ import { buildAccountPools, poolKey } from './providers/pool-family.js'
 import type { PoolDefinition, PoolMemberRef } from './providers/pool-family.js'
 import { PoolHealthRegistry } from './providers/pool-health.js'
 import { PoolUsageTracker } from './providers/pool-usage.js'
+import { observeUsageFetchers, type SnapshotObserver, type UsageFetchers } from './usage/snapshot-hook.js'
+import { WindowStore } from './usage/window-store.js'
+import type { HostSessionQuery } from './usage/host-events.js'
+import { PreTracking } from './usage/pre-tracking.js'
+import { UsageService } from './usage/service.js'
+import { createUsageHistoryController } from './usage/usage-rpc.js'
+import type { RequestEnd } from './providers/replay.js'
 import {
   CodexAdapter,
   codexFlow,
@@ -174,6 +182,14 @@ export interface Config {
    * compaction and session-title requests always stay on five minutes.
    */
   claudePromptCacheTtl?: PromptCacheTtl
+  /**
+   * Claude only: tool-name patterns sent with `defer_loading: true`, with the
+   * server-side tool search tool added, so the model loads those definitions
+   * on demand instead of carrying them in every request. A pattern is a
+   * literal name or a prefix ending in `*` (`mcp__*`). Default empty: the
+   * request body is unchanged.
+   */
+  claudeDeferTools?: string[]
   /** Whether and how long a route waits out a closed rate-limit window. */
   rateLimit?: RateLimitConfig
   /** Advisory model catalogs overriding the built-in defaults, per provider. */
@@ -231,6 +247,7 @@ export const Config: z<Config> = z.object({
   codexClientVersion: z.string(),
   streamIdleTimeoutMs: z.number().min(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   claudePromptCacheTtl: z.union(['5m', '1h']).default(DEFAULT_PROMPT_CACHE_TTL),
+  claudeDeferTools: z.array(z.string()).default([]),
   rateLimit: z.object({
     wait: z.boolean().default(true),
     maxWaitMs: z.number().min(1).default(DEFAULT_RATE_LIMIT_MAX_WAIT_MS),
@@ -340,9 +357,6 @@ function planOf(provider: ProviderId, session: StoredSession): string | undefine
   }
 }
 
-/** Per-provider per-account usage lookup; providers without a usage endpoint are absent. */
-type UsageFetchers = Partial<Record<ProviderId, (account: string, signal: AbortSignal) => Promise<ProviderUsage>>>
-
 /**
  * Auth operations behind the `/subscriptions-auth` RPC channel: start/complete
  * OAuth attempts in the background, feed pasted codes, cancel, log out, and
@@ -428,6 +442,8 @@ export class SubscriptionsAuthController implements AuthController {
      * failure must not outlive an explicit re-check (issue #139).
      */
     private readonly onUsageForced?: (provider: ProviderId, account: string) => void,
+    /** Opt-in provider gate (Antigravity defaults to disabled); false blocks login and usage calls. */
+    private readonly providerEnabled: (provider: ProviderId) => boolean = () => true,
   ) {}
 
   prepareReset(account: string, signal: AbortSignal) {
@@ -441,6 +457,7 @@ export class SubscriptionsAuthController implements AuthController {
   }
 
   usage(provider: ProviderId, account: string, signal: AbortSignal, force = false): Promise<ProviderUsage> {
+    if (!this.providerEnabled(provider)) return Promise.resolve({ supported: false })
     if (force) this.onUsageForced?.(provider, account)
     const fetcher = this.usageFetchers[provider]
     if (fetcher === undefined) return Promise.resolve({ supported: false })
@@ -491,6 +508,9 @@ export class SubscriptionsAuthController implements AuthController {
   }
 
   async login(provider: ProviderId, method?: LoginMethod): Promise<{ authorizeUrl: string; userCode?: string }> {
+    if (!this.providerEnabled(provider)) {
+      throw new BadRequest(`provider ${provider} is disabled; enable it manually in Settings > Subscriptions first`)
+    }
     if (provider === 'claude' && method !== 'oauth') {
       const imported = this.readClaudeCreds()
       if (imported !== undefined) {
@@ -730,6 +750,12 @@ export function apply(ctx: Context, config: Config): void {
   if (claudePromptCacheTtl !== '5m' && claudePromptCacheTtl !== '1h') {
     throw new Error(`${name}: claudePromptCacheTtl must be '5m' or '1h'`)
   }
+  const claudeDeferTools = config.claudeDeferTools ?? []
+  if (!Array.isArray(claudeDeferTools)
+    || claudeDeferTools.some(pattern => typeof pattern !== 'string' || pattern.length === 0 || pattern !== pattern.trim())) {
+    // A pattern with surrounding whitespace would silently match nothing, so it is rejected rather than trimmed.
+    throw new Error(`${name}: claudeDeferTools must be an array of non-empty strings without surrounding whitespace`)
+  }
   const rateLimit = resolveRateLimitWait(config.rateLimit, `${name}: rateLimit`)
   const catalog = resolveCatalog(config.models)
   // A non-empty configured catalog is an explicit override: it wins over live
@@ -748,6 +774,15 @@ export function apply(ctx: Context, config: Config): void {
   // this plugin's apply, so a one-time capture would stay undefined forever.
   const resolveAttachments = (): AttachmentStore | undefined =>
     ctx.get('attachments') as AttachmentStore | undefined
+  // Optional, resolved per request for the same reason: maps an attachment's
+  // host path into the tool execution world, so an image offloaded to text
+  // names a read-only copy the model can reopen. Structural face of the
+  // filesystem service; only this one method is consumed.
+  const resolveHostPathMapper = (): HostPathMapper | undefined => {
+    const fs = ctx.get('fs') as { processPathFromHostPath?: HostPathMapper } | undefined
+    const map = fs?.processPathFromHostPath
+    return typeof map === 'function' ? hostPath => map.call(fs, hostPath) : undefined
+  }
 
   // Registration handles are kept so an auth-state change can re-announce the
   // route (`replace` fires `llm/adapters-updated`), which makes the web model
@@ -816,13 +851,48 @@ export function apply(ctx: Context, config: Config): void {
     return model === undefined ? 'standard' : modelSpeeds.get(model) ?? 'standard'
   }
   let codexAdapter: CodexAdapter | undefined
+  let grokAdapter: GrokAdapter | undefined
   // Dropped on every copilot auth transition so replay state (captured
   // reasoning) never survives an account switch in memory.
   let copilotAdapter: CopilotAdapter | undefined
   const memberAdapters = new Map<ProviderId, AccountAwareAdapter>()
+  // Usage window tracking: one store per plugin
+  // instance. It owns the window tracker, loads `trackingStartedAt` and the
+  // open entries from disk, and saves behind the request path; events that
+  // arrive before it has loaded are applied once it has. Dispose saves what
+  // is pending.
+  const usageStore = new WindowStore({ onWarn })
+  ctx.effect(() => () => usageStore.dispose(), 'dsh-plugin-subscriptions: usage window store')
+  // The provider total from before tracking: folded once from DSH's
+  // session history, which only `sessionQuery` reads. The service is
+  // optional (headless profiles have none), so the scan waits for it.
+  // It also waits for `sessionPersistence`: without it `sessionQuery`
+  // lists only the live sessions, and a scan then would store a total that
+  // misses every stored session and is never recomputed.
+  // Leaving either service aborts a running scan, which then writes nothing
+  // and is retried at the next startup; dispose waits for a scan already
+  // writing, within the shutdown bound.
+  const preTracking = new PreTracking({
+    onWarn,
+    trackingStartedAt: async () => {
+      await usageStore.ready
+      return usageStore.trackingStartedAt
+    },
+  })
+  ctx.inject(['sessionQuery', 'sessionPersistence'], queryCtx => {
+    queryCtx.effect(
+      () => preTracking.attach(queryCtx.get('sessionQuery') as HostSessionQuery),
+      'dsh-plugin-subscriptions: earlier usage history scan',
+    )
+  })
+  // Usage inspection does not fetch quota or make provider requests.
+  const usageService = new UsageService({ store: usageStore, preTracking })
+  ctx.effect(() => () => { usageService.dispose() }, 'dsh-plugin-subscriptions: usage service')
+  const onRequestEnd = (end: RequestEnd): void => { usageStore.recordRequest(end) }
   const register = (provider: ProviderId, adapter: AccountAwareAdapter): AdapterRegistrationHandle => {
     const route = new AccountPreferencesAdapter({
-      provider, adapter, settings: preferences, pool: () => poolAdapter,
+      provider, adapter, settings: preferences, pool: () => poolAdapter, onRequestEnd,
+      enabled: () => preferences.providerEnabled(provider),
       accounts: async () => (await accountTokens.get(provider)?.list() ?? []).map(({ key, session }) => ({ key, label: accountOf(provider, session) ?? key })),
     })
     memberAdapters.set(provider, route.poolMember())
@@ -872,7 +942,9 @@ export function apply(ctx: Context, config: Config): void {
           onCatalogChanged: catalogChanged,
           accountCatalogStore: account => accountCatalogStore('codex', account),
           defaultEffortOf: (model: string) => defaultEffortOf('codex', model),
-          contextWindowOf: model => preferences.contextWindow(model),
+          contextWindowOf: model => preferences.contextWindow('codex', model),
+          defaultContextWindow: () => preferences.get('codex').contextWindow,
+          defaultMaxTokens: () => preferences.get('codex').defaultMaxTokens,
           pool: () => poolAdapter,
           speedFor: (sessionId: string | undefined, model: string): boolean | Promise<boolean> =>
             sessionId !== undefined
@@ -911,6 +983,7 @@ export function apply(ctx: Context, config: Config): void {
           discovery: !overridden.has('claude'),
           onWarn,
           resolveAttachments,
+          resolveHostPathMapper,
           catalogStore: catalogStore('claude'),
           onCatalogChanged: catalogChanged,
           accountCatalogStore: account => accountCatalogStore('claude', account),
@@ -918,6 +991,7 @@ export function apply(ctx: Context, config: Config): void {
           resolveCliVersion: () => claudeVersion.resolve(),
           promptCacheTtl: claudePromptCacheTtl,
           promptCacheTtlOverride: () => preferences.promptCacheTtl(),
+          deferToolPatterns: () => claudeDeferTools,
           pool: () => poolAdapter,
         })
         adapters.set('claude', adapter)
@@ -953,8 +1027,12 @@ export function apply(ctx: Context, config: Config): void {
           onCatalogChanged: catalogChanged,
           accountCatalogStore: account => accountCatalogStore('grok', account),
           defaultEffortOf: (model: string) => defaultEffortOf('grok', model),
+          // Catalog-driven context tiers (issue #149): the Settings page
+          // offers the window list and the adapter caps the request here.
+          contextWindowOf: model => preferences.contextWindow('grok', model),
           pool: () => poolAdapter,
         })
+        grokAdapter = adapter
         adapters.set('grok', adapter)
         handles.set('grok', register('grok', adapter))
         break
@@ -1028,6 +1106,12 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
 
+  const trackUsage: SnapshotObserver = (provider, account, snapshot, at) => {
+    try { usageStore.observe(provider, account, snapshot, at) }
+    catch { onWarn(`Could not track the ${provider} quota window`) }
+  }
+  observeUsageFetchers(usageFetchers, trackUsage)
+
   // Same-subscription account pools: a catalog model with ≥2 accounts of
   // that provider is served through the pool (same id, same picker group).
   // Configured tiers are extra picker rows. Built whenever enabled; a
@@ -1040,7 +1124,7 @@ export function apply(ctx: Context, config: Config): void {
     // degrade the strategy (zero urgency), not stall the user's request.
     // Copilot has no usage endpoint, so its accounts resolve no fetcher and
     // score zero urgency — the natural last resort.
-    const fetcherFor = (provider: ProviderId, account: string): (() => Promise<ProviderUsage>) | undefined => {
+    const rawFetcherFor = (provider: ProviderId, account: string): (() => Promise<ProviderUsage>) | undefined => {
       switch (provider) {
         case 'codex': {
           // Settings reads the pool cache too: use the complete usage fetcher
@@ -1075,6 +1159,17 @@ export function apply(ctx: Context, config: Config): void {
           return undefined
       }
     }
+    // Codex already goes through the observed fetcher table. The other pool
+    // fetchers keep their existing timeout/lookup behavior and report here.
+    const fetcherFor = (provider: ProviderId, account: string): (() => Promise<ProviderUsage>) | undefined => {
+      const fetch = rawFetcherFor(provider, account)
+      if (fetch === undefined || provider === 'codex') return fetch
+      return async () => {
+        const snapshot = await fetch()
+        trackUsage(provider, account, snapshot, Date.now())
+        return snapshot
+      }
+    }
     poolHealth = new PoolHealthRegistry()
     poolUsage = new PoolUsageTracker(fetcherFor)
     const families = async (): Promise<Map<string, PoolDefinition>> => {
@@ -1086,6 +1181,7 @@ export function apply(ctx: Context, config: Config): void {
         const sources: Parameters<typeof buildAccountPools>[0] = {}
         await Promise.all([...adapters].map(async ([provider, adapter]) => {
           try {
+            if (!preferences.providerEnabled(provider)) return
             const accounts = (await accountTokens.get(provider)?.list() ?? []).map(entry => entry.key)
             if (accounts.length === 0) return
             const catalogs = (await Promise.all(accounts.map(async account => {
@@ -1095,7 +1191,7 @@ export function apply(ctx: Context, config: Config): void {
               )
               const settings = preferences.get(provider).accounts
               const policy = settings && Object.hasOwn(settings, account) ? settings[account] : undefined
-              return models === undefined ? undefined : { account, models: models.filter(model => accountAllowsPool(policy, model.id)) }
+              return models === undefined ? undefined : { account, models: models.filter(model => accountAllowsPool(policy, model.id, provider, models)) }
             }))).filter(entry => entry !== undefined)
             if (catalogs.length > 0) sources[provider] = { catalogs }
           } catch {
@@ -1126,6 +1222,7 @@ export function apply(ctx: Context, config: Config): void {
       families,
       tiers: poolConfig?.tiers ?? {},
       onWarn,
+      onRequestEnd,
     })
   }
 
@@ -1261,6 +1358,7 @@ export function apply(ctx: Context, config: Config): void {
       await consumeCodexResetCredit(await codexTokens.session(account), creditId, requestId, proxiedFetch, signal)
     },
     account => poolUsage?.invalidate('codex', account),
+    (account, at) => { usageStore.redeem('codex', account, at) },
   )
   registerAuthRpc(ctx, new SubscriptionsAuthController(
     flows, deviceFlows, authChanged, resolveAttachments, usageFetchers, undefined, poolUsage, config.antigravity,
@@ -1274,6 +1372,7 @@ export function apply(ctx: Context, config: Config): void {
     },
     resetRedemption,
     (provider, account) => poolHealth?.clear(provider, account),
+    provider => preferences.providerEnabled(provider),
   ), speed, {
     get: () => proxyGetConfig(),
     set: input => proxySetConfig(input),
@@ -1281,10 +1380,24 @@ export function apply(ctx: Context, config: Config): void {
   }, modelDefaults, {
     displayName: provider => preferences.get(provider).displayName,
     visibleModels: provider => preferences.get(provider).visibleModels,
+    enabled: provider => preferences.providerEnabled(provider),
+    async setEnabled(provider, enabled) {
+      if (provider !== 'antigravity') throw new BadRequest('Only Antigravity supports toggling enabled state')
+      if (!adapters.has(provider)) throw new BadRequest(`provider ${provider} is not configured`)
+      await preferences.setProviderEnabled(provider, enabled)
+      if (!enabled) {
+        flows.pending(provider)?.cancel()
+      }
+      poolAdapter?.invalidate()
+      for (const [route, handle] of handles) handle.replace([route])
+    },
     async get(provider, force) {
       await loadModelDefaults()
       const adapter = adapters.get(provider)
       if (!adapter) throw new BadRequest(`provider ${provider} is not configured`)
+      if (!preferences.providerEnabled(provider)) {
+        throw new BadRequest(`provider ${provider} is disabled; enable it manually in Settings > Subscriptions first`)
+      }
       if (force) {
         if (provider === 'codex') codexVersion.invalidate()
         if (provider === 'claude') claudeVersion.invalidate()
@@ -1305,11 +1418,40 @@ export function apply(ctx: Context, config: Config): void {
         if (provider === 'codex' && codexAdapter) {
           for (const account of accountCatalogs) {
             if (account.models?.some(entry => entry.id === model.id)) {
-              const limits = await codexAdapter.contextLimits(model.id, account.account).catch(() => undefined)
+              const limits = await withTimeout(
+                () => codexAdapter.contextLimits(model.id, account.account),
+                DISCOVERY_TIMEOUT_MS,
+              ).catch(() => undefined)
               if (limits) contexts.push(limits)
             }
           }
         }
+        const grokContexts: { default: number; max: number; options?: number[] }[] = []
+        if (provider === 'grok' && grokAdapter) {
+          for (const account of accountCatalogs) {
+            if (account.models?.some(entry => entry.id === model.id)) {
+              const limits = await withTimeout(
+                () => grokAdapter.contextLimits(model.id, account.account),
+                DISCOVERY_TIMEOUT_MS,
+              ).catch(() => undefined)
+              if (limits) grokContexts.push(limits)
+            }
+          }
+        }
+        const grokLimits = (() => {
+          if (grokContexts.length === 0) return undefined
+          const defaultWindow = Math.min(...grokContexts.map(entry => entry.default))
+          const maxWindow = Math.min(...grokContexts.map(entry => entry.max))
+          const optionSets = grokContexts.map(entry => new Set(entry.options ?? [entry.default]))
+          const commonOptions = [...optionSets[0]]
+            .filter(option => option <= maxWindow && optionSets.every(set => set.has(option)))
+            .sort((left, right) => left - right)
+          return {
+            default: defaultWindow,
+            max: maxWindow,
+            ...(commonOptions.length > 1 ? { options: commonOptions } : {}),
+          }
+        })()
         // A model with unavailable capabilities can still be hidden or restored.
         const info = await withTimeout(() => adapter.resolveModel(provider, model.id), DISCOVERY_TIMEOUT_MS).catch(() => undefined)
         return {
@@ -1322,6 +1464,11 @@ export function apply(ctx: Context, config: Config): void {
             defaultContextWindow: Math.min(...contexts.map(entry => entry.default)),
             maxContextWindow: Math.min(...contexts.map(entry => entry.max)),
           } : {}),
+          ...(grokLimits === undefined ? {} : {
+            defaultContextWindow: grokLimits.default,
+            maxContextWindow: grokLimits.max,
+            ...grokLimits.options === undefined ? {} : { contextWindowOptions: grokLimits.options },
+          }),
         }
       }))
       // Announce forced refresh only after the replacement catalog is ready.
@@ -1342,17 +1489,29 @@ export function apply(ctx: Context, config: Config): void {
       try { validated = validatePreferences(provider, settings) } catch (error) {
         throw new BadRequest(error instanceof Error ? error.message : String(error))
       }
-      await preferences.set(provider, validated)
+      const next = provider === 'antigravity'
+        && preferences.providerEnabled('antigravity')
+        && !Object.hasOwn(settings as Record<string, unknown>, 'enabled')
+        ? { ...validated, enabled: true }
+        : validated
+      await preferences.set(provider, next)
       poolAdapter?.invalidate()
       for (const [route, handle] of handles) handle.replace([route])
     },
-  })
+  }, createUsageHistoryController(
+    usageService,
+    // The auth store's list (default first), as the card shows it; reading it refreshes no token.
+    async provider => (await listAccounts(provider)).map(({ key, session }) => {
+      const label = accountOf(provider, session)
+      return label === undefined ? { key } : { key, label }
+    }),
+  ))
 
   // OpenCode-style cadence: a startup check (five-minute cache freshness),
   // then one hour between completed runs. Picker reads never schedule refreshes.
   ctx.effect(() => startCatalogRefresh(async signal => {
     await Promise.all([...adapters].map(async ([provider, adapter]) => {
-      if (signal.aborted || overridden.has(provider)) return
+      if (signal.aborted || overridden.has(provider) || !preferences.providerEnabled(provider)) return
       // Account unions bound each discovery and omit logged-out accounts.
       await adapter.listOwnModels(provider, undefined, signal)
     }))

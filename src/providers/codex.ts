@@ -5,6 +5,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto'
+import { CODEX_CONTEXT_WINDOW, CODEX_DEFAULT_MAX_TOKENS } from '../codex-budget-defaults.js'
 import { attributionHeaders, EMPTY_RESPONSE_CODE, errorChain, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
@@ -66,8 +67,6 @@ export const CODEX_TOKEN_URL = 'https://auth.openai.com/oauth/token'
 export const CODEX_API_URL = 'https://chatgpt.com/backend-api/codex/responses'
 const CODEX_SCOPE = 'openid profile email offline_access api.connectors.read api.connectors.invoke'
 const CODEX_CALLBACK_PATH = '/auth/callback'
-const CODEX_CONTEXT_WINDOW = 400_000
-const CODEX_DEFAULT_MAX_TOKENS = 128_000
 /** Refresh when the access token has less than this much life left. */
 export const CODEX_PREEMPT_MS = 5 * 60_000
 
@@ -373,10 +372,20 @@ interface CodexUsageWindow {
 /** Seconds of the canonical 5-hour session and 7-day weekly windows. */
 const SESSION_WINDOW_SECONDS = 5 * 60 * 60
 const WEEKLY_WINDOW_SECONDS = 7 * 24 * 60 * 60
+/**
+ * Relative tolerance of a window-length match (±5%, both ends included).
+ * The usage window tracker's 5-hour and weekly classification ranges
+ * use it too, through {@link matchesWindow}.
+ */
+const WINDOW_LENGTH_TOLERANCE = 0.05
 
-/** Whether a reported duration approximately matches the expected window length. */
-function matchesWindow(seconds: number, expected: number): boolean {
-  return seconds >= expected * 0.95 && seconds <= expected * 1.05
+/**
+ * Whether a reported duration approximately matches the expected window
+ * length: within ±5%, both ends included. Unit-free (seconds here, ms in the
+ * usage window tracker, which reuses it for classification).
+ */
+export function matchesWindow(value: number, expected: number): boolean {
+  return value >= expected * (1 - WINDOW_LENGTH_TOLERANCE) && value <= expected * (1 + WINDOW_LENGTH_TOLERANCE)
 }
 
 /**
@@ -661,6 +670,8 @@ export interface CodexAdapterOptions {
    */
   defaultEffortOf?: (model: string) => string | undefined
   contextWindowOf?: (model: string) => number | undefined
+  defaultContextWindow?: () => number | undefined
+  defaultMaxTokens?: () => number | undefined
   /**
    * Per-request speed lookup (the composer Speed toggle's host half). Returns
    * whether this session's current choice sends the model on the fast tier;
@@ -1077,7 +1088,7 @@ export class CodexAdapter extends LlmAdapter {
       ...discovered?.description === undefined ? {} : { description: discovered.description },
       inputModalities: configured?.inputModalities ?? CODEX_MODALITIES,
       context: { contextWindow: await this.contextWindowFor(model, account) },
-      defaultMaxTokens: configured?.maxTokens ?? CODEX_DEFAULT_MAX_TOKENS,
+      defaultMaxTokens: configured?.maxTokens ?? this.options.defaultMaxTokens?.() ?? CODEX_DEFAULT_MAX_TOKENS,
       ...(reasoning === undefined ? {} : { reasoning }),
     }
   }
@@ -1092,7 +1103,10 @@ export class CodexAdapter extends LlmAdapter {
 
   private async contextWindowFor(model: string, account?: string): Promise<number> {
     const limits = await this.contextLimits(model, account)
-    return Math.min(this.options.contextWindowOf?.(model) ?? limits.default, limits.max)
+    const requested = this.options.contextWindowOf?.(model)
+      ?? this.options.defaultContextWindow?.()
+      ?? limits.default
+    return Math.min(requested, limits.max)
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {

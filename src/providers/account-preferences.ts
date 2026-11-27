@@ -5,7 +5,8 @@ import type { ProviderSettingsStore, AccountPreferences } from '../provider-sett
 import type { AccountAwareAdapter } from './accounts.js'
 import { DISCOVERY_TIMEOUT_MS, withAbortSignal, withTimeout } from './common.js'
 import type { PoolAdapter } from './pool.js'
-import { streamAccountWithReplay } from './replay.js'
+import { streamAccountWithReplay, type RequestEndObserver } from './replay.js'
+import { antigravityModelId, antigravitySelectionId } from '../antigravity-model-id.js'
 
 /** Reserved namespace, recognized even when malformed or no longer enabled. */
 export const ACCOUNT_MODEL_PREFIX = '~account:'
@@ -23,8 +24,18 @@ export function parseAccountModelId(id: string): { account: string; model: strin
     return { account, model }
   } catch { throw new LlmError('Invalid independent account model id', 'NO_ADAPTER') }
 }
-export function accountAllowsPool(preferences: AccountPreferences | undefined, model: string): boolean {
-  return preferences?.poolEnabled !== false && (preferences?.poolModels?.includes(model) ?? true)
+export function accountAllowsPool(preferences: AccountPreferences | undefined, model: string, provider?: ProviderId, models: readonly { id: string }[] = []): boolean {
+  if (preferences?.poolEnabled === false) return false
+  const selected = preferences?.poolModels
+  if (selected === undefined || selected.includes(model)) return true
+  return provider === 'antigravity' && selected.some(id => antigravitySelectionId(id, models) === model)
+}
+/** Cheap pre-discovery filter: skips accounts whose allowlist cannot match even after legacy family mapping. */
+function mayAllowPool(preferences: AccountPreferences | undefined, model: string, provider: ProviderId): boolean {
+  if (preferences?.poolEnabled === false) return false
+  const selected = preferences?.poolModels
+  if (selected === undefined || selected.includes(model)) return true
+  return provider === 'antigravity' && selected.some(id => antigravityModelId(id) === model)
 }
 interface Options {
   provider: ProviderId
@@ -34,11 +45,19 @@ interface Options {
   pool: () => PoolAdapter | undefined
   /** Per-account discovery bound (defaults to {@link DISCOVERY_TIMEOUT_MS}; tests shorten it). */
   discoveryTimeoutMs?: number
+  /** Usage tracking: told about every request this route serves on one account (pool requests report through the pool). */
+  onRequestEnd?: RequestEndObserver
+  /** Opt-in gate (Antigravity): false hides models and refuses dispatch without touching upstream. */
+  enabled?: () => boolean
 }
 
 /** Keeps the registered route separate from raw adapters and pool member seams. */
 export class AccountPreferencesAdapter extends LlmAdapter {
   constructor(private readonly options: Options) { super() }
+  private isEnabled(): boolean { return this.options.enabled?.() !== false }
+  private disabledError(): LlmError {
+    return new LlmError(`Provider ${this.options.provider} is disabled. Enable it manually in Settings > Subscriptions first.`, 'NO_ADAPTER')
+  }
   override providerInfo(provider: string): LlmProviderInfo {
     const info = this.options.adapter.providerInfo(provider)
     // Native model groups read provider metadata, separately from model names.
@@ -60,15 +79,21 @@ export class AccountPreferencesAdapter extends LlmAdapter {
     return await withAbortSignal(async () => this.options.adapter.lastKnownOwnModels?.(this.options.provider, account), signal) ?? []
   }
   private async requireAccount(account: string, model: string, independent: boolean, signal?: AbortSignal): Promise<void> {
-    if (!(await withAbortSignal(this.options.accounts, signal)).some(entry => entry.key === account)
-      || (independent ? this.preference(account)?.independentEntry !== true : !accountAllowsPool(this.preference(account), model))
-      || !(await this.models(account, signal)).some(entry => entry.id === model)) {
+    const accounts = await withAbortSignal(this.options.accounts, signal)
+    const preferences = this.preference(account)
+    if (!accounts.some(entry => entry.key === account)
+      || (independent ? preferences?.independentEntry !== true
+        : !mayAllowPool(preferences, model, this.options.provider))) {
+      throw new LlmError(`Account route unavailable: ${this.options.provider}/${account}/${model}`, 'NO_ADAPTER')
+    }
+    const models = await this.models(account, signal)
+    if (!models.some(entry => entry.id === model)
+      || (independent ? this.preference(account)?.independentEntry !== true : !accountAllowsPool(this.preference(account), model, this.options.provider, models))) {
       throw new LlmError(`Account route unavailable: ${this.options.provider}/${account}/${model}`, 'NO_ADAPTER')
     }
   }
   private async fallback(model: string, signal?: AbortSignal): Promise<string> {
     for (const { key } of await withAbortSignal(this.options.accounts, signal)) {
-      if (!accountAllowsPool(this.preference(key), model)) continue
       try { await this.requireAccount(key, model, false, signal); return key } catch { signal?.throwIfAborted() }
     }
     throw new LlmError(`No eligible account for ${this.options.provider}/${model}`, 'NO_ADAPTER')
@@ -77,6 +102,7 @@ export class AccountPreferencesAdapter extends LlmAdapter {
   poolMember(): AccountAwareAdapter {
     const raw = this.options.adapter
     const keyFor = async (account: string | undefined, model: string, signal?: AbortSignal): Promise<string> => {
+      if (!this.isEnabled()) throw this.disabledError()
       if (model.startsWith(ACCOUNT_MODEL_PREFIX)) throw new LlmError('Independent entries cannot be pool members', 'NO_ADAPTER')
       const key = account ?? (await withAbortSignal(this.options.accounts, signal))[0]?.key
       if (!key) throw new LlmError('No account available', 'NO_ADAPTER')
@@ -101,13 +127,14 @@ export class AccountPreferencesAdapter extends LlmAdapter {
     } })
   }
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
+    if (!this.isEnabled()) return []
     const result = new Map<string, LlmModelInfo>()
     const catalogs = await Promise.all((await this.options.accounts()).map(async account => ({ ...account, models: await this.models(account.key).catch(() => []) })))
     for (const { key, label, models } of catalogs) {
       const preferences = this.preference(key)
       for (const model of models) {
         if (model.id.startsWith(ACCOUNT_MODEL_PREFIX)) continue
-        if (accountAllowsPool(preferences, model.id) && this.options.settings.visible(this.options.provider, model.id) && !result.has(model.id)) result.set(model.id, model)
+        if (accountAllowsPool(preferences, model.id, this.options.provider, models) && this.options.settings.visible(this.options.provider, model.id) && !result.has(model.id)) result.set(model.id, model)
         if (preferences?.independentEntry === true && this.options.settings.visible(this.options.provider, model.id)) {
           const id = accountModelId(key, model.id)
           result.set(id, { ...model, id, name: `${preferences.alias || label} · ${this.options.settings.modelName(this.options.provider, model.id, model.name)}` })
@@ -128,6 +155,7 @@ export class AccountPreferencesAdapter extends LlmAdapter {
   }
   override async prepareCall(provider: string, id: string, signal?: AbortSignal): Promise<PreparedAdapterCall> {
     signal?.throwIfAborted()
+    if (!this.isEnabled()) throw this.disabledError()
     const independent = parseAccountModelId(id)
     const pool = this.options.pool()
     if (!independent && pool && await withAbortSignal(() => pool.owns(this.options.provider, id), signal)) {
@@ -144,10 +172,11 @@ export class AccountPreferencesAdapter extends LlmAdapter {
     return {
       model: independent ? { ...named, id, name: `${this.preference(account)?.alias || label} · ${named.name}` } : named,
       async *stream(options) {
+        if (!owner.isEnabled()) throw owner.disabledError()
         // Keep the capability-bearing account; revoked permission must fail instead of rerouting.
         await owner.requireAccount(account, model, independent !== undefined, options.signal)
         options.signal?.throwIfAborted()
-        yield* streamAccountWithReplay(owner.options.adapter, options, account, model)
+        yield* streamAccountWithReplay(owner.options.adapter, options, account, model, owner.options.onRequestEnd)
       },
     }
   }
@@ -156,11 +185,12 @@ export class AccountPreferencesAdapter extends LlmAdapter {
     return { ...info, name: this.options.settings.modelName(this.options.provider, id, info.name) }
   }
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    if (!this.isEnabled()) throw this.disabledError()
     const independent = parseAccountModelId(options.model)
     if (independent) {
       await this.requireAccount(independent.account, independent.model, true, options.signal)
       options.signal?.throwIfAborted()
-      yield* streamAccountWithReplay(this.options.adapter, options, independent.account, independent.model)
+      yield* streamAccountWithReplay(this.options.adapter, options, independent.account, independent.model, this.options.onRequestEnd)
       return
     }
     const pool = this.options.pool()
@@ -170,6 +200,6 @@ export class AccountPreferencesAdapter extends LlmAdapter {
     }
     const account = await this.fallback(options.model, options.signal)
     options.signal?.throwIfAborted()
-    yield* streamAccountWithReplay(this.options.adapter, options, account)
+    yield* streamAccountWithReplay(this.options.adapter, options, account, options.model, this.options.onRequestEnd)
   }
 }

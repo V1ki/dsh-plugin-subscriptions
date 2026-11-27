@@ -1,7 +1,8 @@
+import './css-hook.js'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
-import { createSpeedLoader, createSpeedSetter } from '../src/client/SpeedSelect.js'
+const { createSpeedLoader, createSpeedSetter } = await import('../src/client/SpeedSelect.js')
 
 test('Speed selector resolves a child default for the current model and rechecks model switches', async () => {
   const requests: unknown[] = []

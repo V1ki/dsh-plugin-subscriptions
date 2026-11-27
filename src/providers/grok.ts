@@ -412,13 +412,14 @@ interface GrokCliWireModel {
   name?: string
   description?: string
   context_window?: number
+  context_windows?: number[]
   supports_reasoning_effort?: boolean
   reasoning_effort?: string
   reasoning_efforts?: { value?: string; label?: string; description?: string }[]
 }
 
 /** Per-model metadata the CLI catalog contributes to a discovered model. */
-type GrokCliModelMeta = Partial<Pick<DiscoveredModel, 'name' | 'description' | 'contextWindow' | 'reasoning'>>
+type GrokCliModelMeta = Partial<Pick<DiscoveredModel, 'name' | 'description' | 'contextWindow' | 'contextWindowOptions' | 'reasoning'>>
 
 /**
  * Strength rank of the well-known effort ids, weakest first. The harness
@@ -468,6 +469,19 @@ function grokCliReasoning(entry: GrokCliWireModel): NonNullable<DiscoveredModel[
   return { efforts, ...defaultEffort === undefined ? {} : { defaultEffort } }
 }
 
+/** Selectable context-window tiers from one CLI catalog entry, ascending; [] when it offers no choice. */
+function grokCliContextWindows(entry: GrokCliWireModel): number[] {
+  if (!Array.isArray(entry.context_windows)) return []
+  const valid = entry.context_windows.filter(option => Number.isSafeInteger(option) && option > 0)
+  if (valid.length === 0) return []
+  if (typeof entry.context_window === 'number' && Number.isSafeInteger(entry.context_window) && entry.context_window > 0) {
+    valid.push(entry.context_window)
+  }
+  const options = [...new Set(valid)].sort((left, right) => left - right)
+  // One tier is not a choice: the scalar context_window already covers it.
+  return options.length > 1 ? options : []
+}
+
 /**
  * Fetch the CLI catalog and index its per-model metadata by model id.
  * @param session - the stored session (used as-is; never refreshed here).
@@ -497,6 +511,7 @@ export async function fetchGrokCliCatalog(
   for (const entry of payload.data) {
     if (typeof entry.id !== 'string' || entry.id.length === 0) continue
     const reasoning = grokCliReasoning(entry)
+    const windowOptions = grokCliContextWindows(entry)
     catalog.set(entry.id, {
       ...typeof entry.name === 'string' && entry.name.length > 0 ? { name: entry.name } : {},
       ...typeof entry.description === 'string' && entry.description.length > 0
@@ -505,6 +520,7 @@ export async function fetchGrokCliCatalog(
       ...typeof entry.context_window === 'number' && entry.context_window > 0
         ? { contextWindow: entry.context_window }
         : {},
+      ...windowOptions.length === 0 ? {} : { contextWindowOptions: windowOptions },
       ...reasoning === undefined ? {} : { reasoning },
     })
   }
@@ -532,6 +548,7 @@ function grokPriorMeta(prior: DiscoveredModel | undefined): GrokCliModelMeta {
     ...(prior.name.length > 0 ? { name: prior.name } : {}),
     ...(prior.description === undefined ? {} : { description: prior.description }),
     ...(prior.contextWindow === undefined ? {} : { contextWindow: prior.contextWindow }),
+    ...(prior.contextWindowOptions === undefined ? {} : { contextWindowOptions: [...prior.contextWindowOptions] }),
     ...(prior.reasoning === undefined ? {} : { reasoning: prior.reasoning }),
   }
 }
@@ -662,8 +679,28 @@ export interface GrokAdapterOptions {
    * the provider's own default.
    */
   defaultEffortOf?: (model: string) => string | undefined
+  /**
+   * Per-model requested context window (the Settings page's picker). Returns
+   * the user-selected number of tokens, or undefined to follow the provider's
+   * advertised default.
+   */
+  contextWindowOf?: (model: string) => number | undefined
   /** How long this route may hold a turn open waiting for a rate-limit window; defaults to waiting on, six-hour ceiling. */
   rateLimit?: RateLimitWait
+}
+
+/** Advertised default window, largest selectable tier, and tiers for one resolved model. */
+function grokContextBounds(
+  discovered: DiscoveredModel | undefined,
+  configured: ModelEntry | undefined,
+): { default: number; max: number; options?: number[] } {
+  const fallback = discovered?.contextWindow ?? configured?.contextWindow ?? GROK_CONTEXT_WINDOW
+  const options = discovered?.contextWindowOptions ?? []
+  return {
+    default: fallback,
+    max: Math.max(fallback, ...options),
+    ...options.length === 0 ? {} : { options: [...options] },
+  }
 }
 
 /** Grok wire adapter: one instance serves the `grok` provider route. */
@@ -819,14 +856,30 @@ export class GrokAdapter extends LlmAdapter {
    * lapsed mid-turn would fail the call with UNSUPPORTED_REASONING_EFFORT
    * before provider I/O.
    */
-  private async discovered(model: string): Promise<DiscoveredModel | undefined> {
+  private async discovered(model: string, account?: string): Promise<DiscoveredModel | undefined> {
     if (!this.options.discovery) return undefined
-    const accounts = (await this.options.tokens.list()).map(entry => entry.key)
+    const accounts = account === undefined
+      ? (await this.options.tokens.list()).map(entry => entry.key)
+      : [account]
     return discoverAcrossAccounts(accounts, async account => {
       const catalog = await this.catalogFor(account)
       const models = await catalog.resolve(() => this.fetchCatalog(account))
       return models?.find(entry => entry.id === model)
     })
+  }
+
+  /**
+   * The advertised default window, the largest selectable tier, and the tiers
+   * themselves for one model (optionally scoped to one account). The tiers
+   * come from the live CLI catalog; an absent list means the advertised
+   * default is the only choice, so a user override can only shrink the budget
+   * in that case.
+   */
+  async contextLimits(model: string, account?: string): Promise<{ default: number; max: number; options?: number[] }> {
+    return grokContextBounds(
+      await this.discovered(model, account),
+      this.options.models.find(entry => entry.id === model),
+    )
   }
 
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
@@ -838,9 +891,10 @@ export class GrokAdapter extends LlmAdapter {
   }
 
   /** Capability resolution of the provider's own models (the pool resolves members here). */
-  async resolveOwnModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
-    const discovered = await this.discovered(model)
+  async resolveOwnModel(provider: string, model: string, account?: string): Promise<LlmResolvedModelInfo> {
+    const discovered = await this.discovered(model, account)
     const configured = this.options.models.find(entry => entry.id === model)
+    const bounds = grokContextBounds(discovered, configured)
     // Efforts come from the discovered CLI catalog; models it does not
     // cover expose none, so the harness rejects explicit efforts before
     // provider I/O instead of the API 400ing. A configured default effort
@@ -853,7 +907,7 @@ export class GrokAdapter extends LlmAdapter {
       name: discovered?.name ?? configured?.name ?? model,
       ...discovered?.description === undefined ? {} : { description: discovered.description },
       inputModalities: configured?.inputModalities ?? grokModalities(model),
-      context: { contextWindow: discovered?.contextWindow ?? configured?.contextWindow ?? GROK_CONTEXT_WINDOW },
+      context: { contextWindow: Math.min(this.options.contextWindowOf?.(model) ?? bounds.default, bounds.max) },
       defaultMaxTokens: configured?.maxTokens ?? GROK_DEFAULT_MAX_TOKENS,
       ...reasoning === undefined ? {} : { reasoning },
     }

@@ -14,7 +14,7 @@
 import { creditBalanceText, quotaPercent, quotaText, UsageFreshness, useQuotaClock } from './quota-display.js'
 import { useQuotaDisplayMode } from './usage-badge-preferences.js'
 import { readUsageCache, subscribeUsage } from './usage-cache.js'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import { en } from './locales.js'
@@ -23,6 +23,10 @@ import { AntigravityQuotaSummary } from './AntigravityQuotaSummary.js'
 import { antigravityQuotaScope } from '../antigravity-model-id.js'
 import { visibleUsageWindows } from './usage-window-filter.js'
 import { ProviderAccountManager } from './ProviderAccountManager.js'
+import { ProviderActionIcon } from './ProviderActionIcon.js'
+import { ProviderRefreshButton } from './ProviderRefreshButton.js'
+import { SettingHelp } from './SettingHelp.js'
+import { SubscriptionTabs } from './SubscriptionTabs.js'
 import { providerSettingsCss } from './provider-settings-styles.js'
 import { UsageBadgeDisplaySetting } from './UsageBadgeDisplaySetting.js'
 import type { SubscriptionsKey } from './locales.js'
@@ -41,6 +45,7 @@ const MODEL_FILTER_THRESHOLD = 8
 
 /** Subscription provider ids, fixed by the node half's OAuth adapters. */
 export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity'
+export type UsageProvider = Exclude<SubscriptionProvider, 'copilot'>
 
 /** One logged-in account as answered by the `status` endpoint. */
 export interface AccountStatus {
@@ -56,6 +61,8 @@ export interface ProviderStatus {
   /** Picker selection; absent follows discovery, [] hides all model quotas. */
   visibleModels?: string[]
   displayName?: string
+  /** False when the provider is disabled by default and requires manual opt-in. */
+  enabled?: boolean
   busy: boolean
   accounts: AccountStatus[]
   detail?: string
@@ -169,7 +176,12 @@ export interface SubscriptionsSectionInjected {
  * Props delivered by the slot outlet: the inject face spread flat (the
  * renderer erases the share boundary at the render call).
  */
-export type SubscriptionsSectionProps = Partial<SubscriptionsSectionInjected>
+export type SubscriptionsSectionProps = Partial<SubscriptionsSectionInjected> & {
+  /** Omit the pointer to the sidebar Usage page when already hosted inside it. */
+  hideUsageHint?: boolean
+  /** Expand section max-width comfortably when rendered inside the full-width sidebar page. */
+  embedded?: boolean
+}
 
 /** Card display metadata, in page order (names are brand names, not translated). */
 const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [
@@ -179,6 +191,24 @@ const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [
   { id: 'copilot', name: 'GitHub Copilot' },
   { id: 'antigravity', name: 'Google Antigravity' },
 ]
+
+/** Whether a provider is currently disabled via the opt-in gate (Antigravity defaults to false). */
+export function isProviderDisabled(status: ProviderStatus | undefined): boolean {
+  return status?.enabled === false
+}
+
+/** Sort the visible provider names within connected, disconnected, and disabled groups. */
+export function sortedSubscriptionProviders(statuses: Partial<Record<SubscriptionProvider, ProviderStatus>>) {
+  const rank = (status: ProviderStatus | undefined): number => {
+    if (isProviderDisabled(status)) return 2
+    return hasAccount(status) ? 0 : 1
+  }
+  return [...PROVIDERS].sort((a, b) => {
+    const order = rank(statuses[a.id]) - rank(statuses[b.id])
+    return order || (statuses[a.id]?.displayName || a.name).localeCompare(statuses[b.id]?.displayName || b.name)
+      || a.id.localeCompare(b.id)
+  })
+}
 
 /** Human text of an action failure, SubscriptionsAuthError or not. */
 function messageOf(error: unknown): string {
@@ -238,7 +268,6 @@ const styles: Record<string, CSSProperties> = {
   usageHeader: { display: 'flex', alignItems: 'center', gap: 8 },
   usageTitle: { fontSize: 12, lineHeight: '18px', fontWeight: 500, color: 'var(--dsw-alias-label-secondary)' },
   usagePlan: { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
-  usageRefresh: { minHeight: 22, height: 22, padding: '0 8px', marginLeft: 'auto' },
   usageRow: { display: 'flex', flexDirection: 'column', gap: 3 },
   usageMeta: {
     display: 'flex', justifyContent: 'space-between', gap: 8,
@@ -298,10 +327,25 @@ const styles: Record<string, CSSProperties> = {
   },
   modalHeader: { display: 'flex', alignItems: 'center', gap: 8 },
   modalTitle: { fontWeight: 500, fontSize: 16, lineHeight: '24px', color: 'var(--dsw-alias-label-primary)' },
+  warnBanner: {
+    display: 'flex', flexDirection: 'column', gap: 4, marginTop: 4,
+    padding: '10px 12px', borderRadius: 'var(--dsw-radius-lg, 12px)',
+    border: '0.5px solid var(--dsw-alias-state-warn-label, #d97706)',
+    background: 'color-mix(in srgb, var(--dsw-alias-state-warn-label, #d97706) 8%, transparent)',
+  },
+  warnBannerTitle: {
+    fontSize: 12, lineHeight: '18px', fontWeight: 600,
+    color: 'var(--dsw-alias-state-warn-label, #b45309)',
+  },
+  warnBannerBody: {
+    margin: 0, fontSize: 12, lineHeight: '18px',
+    color: 'var(--dsw-alias-label-secondary)',
+  },
 }
 
 /** Status dot color for one provider state. */
 function dotColor(status: ProviderStatus | undefined): string {
+  if (isProviderDisabled(status)) return 'var(--dsw-alias-label-dimmed)'
   if (status?.busy === true) return 'var(--dsw-alias-state-warn-label)'
   if ((status?.accounts.length ?? 0) > 0) return 'var(--dsw-alias-state-success-primary)'
   return 'var(--dsw-alias-label-dimmed)'
@@ -315,7 +359,17 @@ function dotColor(status: ProviderStatus | undefined): string {
  * @returns true when the provider serves at least one account.
  */
 function hasAccount(status: ProviderStatus | undefined): boolean {
-  return (status?.accounts.length ?? 0) > 0
+  return !isProviderDisabled(status) && (status?.accounts.length ?? 0) > 0
+}
+
+/** Persistent risk & availability banner shown inside the Google Antigravity panel. */
+export function AntigravityRiskNotice({ t }: { t: SubscriptionsSectionInjected['t'] }) {
+  return (
+    <div role="note" className="dsh-subscription-antigravity-notice" style={styles.warnBanner}>
+      <strong style={styles.warnBannerTitle}>{t('antigravityNoticeTitle')}</strong>
+      <p style={styles.warnBannerBody}>{t('antigravityNoticeBody')}</p>
+    </div>
+  )
 }
 
 /** The CLI version a route presents, beside the provider name; nothing for routes without one. */
@@ -339,6 +393,7 @@ export function ClientVersionTag({ clientVersion, t }: {
  */
 function statusText(t: SubscriptionsSectionInjected['t'], status: ProviderStatus | undefined): string {
   if (status === undefined) return t('checking')
+  if (isProviderDisabled(status)) return t('antigravityDisabledStatus')
   if (status.busy) return t('loginInProgress')
   if (status.accounts.length > 0) return t('loggedInCount', { count: status.accounts.length })
   return t('notLoggedIn')
@@ -485,9 +540,23 @@ export function modelDefaultsSignature(
 export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const quotaMode = useQuotaDisplayMode()
   const quotaNow = useQuotaClock()
-  const { rpc } = props
+  const { rpc, hideUsageHint = false, embedded = false } = props
   const t = props.t ?? fallbackTranslate
   const [statuses, setStatuses] = useState<Partial<Record<SubscriptionProvider, ProviderStatus>>>({})
+  // Undefined until a status snapshot arrives or the user chooses a tab.
+  const [selectedProvider, setSelectedProvider] = useState<SubscriptionProvider>()
+  const tabIdPrefix = useId()
+  const tabRefs = useRef<Partial<Record<SubscriptionProvider, HTMLButtonElement>>>({})
+  const focusToRestore = useRef<{ element: HTMLElement; provider: SubscriptionProvider } | null>(null)
+  useLayoutEffect(() => {
+    const previous = focusToRestore.current
+    focusToRestore.current = null
+    if (!previous || (document.activeElement !== document.body && document.activeElement !== previous.element)) return
+    if (previous.element.isConnected) previous.element.focus()
+    else tabRefs.current[previous.provider]?.focus()
+  }, [statuses])
+  const sortedProviders = sortedSubscriptionProviders(statuses)
+  const activeProvider = selectedProvider ?? sortedProviders[0].id
   const [errors, setErrors] = useState<Partial<Record<SubscriptionProvider, string>>>({})
   const [manualDrafts, setManualDrafts] = useState<Record<SubscriptionProvider, string>>({
     codex: '', claude: '', grok: '', copilot: '', antigravity: '',
@@ -509,6 +578,14 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     if (resetConfirmation) resetDialogRef.current?.showModal()
     else resetDialogRef.current?.close()
   }, [resetConfirmation])
+  const [antigravityConfirmOpen, setAntigravityConfirmOpen] = useState(false)
+  const [antigravityAcknowledged, setAntigravityAcknowledged] = useState(false)
+  const [antigravityToggleBusy, setAntigravityToggleBusy] = useState(false)
+  const antigravityDialogRef = useRef<HTMLDialogElement>(null)
+  useEffect(() => {
+    if (antigravityConfirmOpen) antigravityDialogRef.current?.showModal()
+    else antigravityDialogRef.current?.close()
+  }, [antigravityConfirmOpen])
   const resetInflight = useRef(false)
   const mountedRef = useRef(true)
   const pollersRef = useRef(new Map<SubscriptionProvider, ReturnType<typeof setInterval>>())
@@ -563,7 +640,11 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       return
     }
     if (!mountedRef.current) return
+    const focused = document.activeElement
+    const provider = focused instanceof HTMLElement ? focused.closest<HTMLElement>('[data-subscription-provider]')?.dataset.subscriptionProvider as SubscriptionProvider | undefined : undefined
+    focusToRestore.current = focused instanceof HTMLElement && provider ? { element: focused, provider } : null
     setStatuses(response.providers)
+    setSelectedProvider(current => current ?? sortedSubscriptionProviders(response.providers)[0].id)
     // The poll recovered: drop any error line a previous failed poll left.
     for (const { id } of PROVIDERS) setProviderError(id, undefined)
     for (const { id } of PROVIDERS) {
@@ -689,6 +770,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   useEffect(() => {
     const live = new Set<string>()
     for (const { id } of PROVIDERS) {
+      if (isProviderDisabled(statuses[id])) continue
       for (const account of statuses[id]?.accounts ?? []) {
         const key = `${id}:${account.key}`
         live.add(key)
@@ -698,6 +780,21 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     setUsages(prev => dropStale(prev, live))
     setUsageErrors(prev => dropStale(prev, live))
   }, [statuses, usages, usageErrors, loadUsage])
+
+  const toggleProviderEnabled = useCallback(async (provider: SubscriptionProvider, enabled: boolean): Promise<void> => {
+    if (rpc === undefined || antigravityToggleBusy) return
+    setAntigravityToggleBusy(true)
+    setProviderError(provider, undefined)
+    try {
+      await callSubscriptionsAuth<{ ok: true }>(rpc, 'setProviderEnabled', { provider, enabled })
+      if (mountedRef.current) setAntigravityConfirmOpen(false)
+      await refresh()
+    } catch (error) {
+      setProviderError(provider, messageOf(error))
+    } finally {
+      if (mountedRef.current) setAntigravityToggleBusy(false)
+    }
+  }, [rpc, antigravityToggleBusy, setProviderError, refresh])
 
   const login = useCallback(async (provider: SubscriptionProvider, method?: 'oauth' | 'keychain'): Promise<void> => {
     if (rpc === undefined) return
@@ -878,56 +975,122 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     return <p style={styles.intro}>{t('unavailable')}</p>
   }
 
-  return (
-    <div className="dsh-subscriptions-settings" style={styles.section}>
-      <style>{providerSettingsCss}</style>
-      <p style={styles.intro}>{t('intro')}</p>
-      <UsageBadgeDisplaySetting t={t} />
-      <div style={styles.proxyCard}>
-        <div style={styles.cardHeader}>
-          <span style={{
-            ...styles.dot,
-            background: proxy?.enabled === true
-              ? 'var(--dsw-alias-state-success-primary)'
-              : 'var(--dsw-alias-label-dimmed)',
-          }} />
-          <span style={styles.name}>{t('proxyTitle')}</span>
-          <button
-            type="button"
-            style={{ marginLeft: 'auto', flexShrink: 0 }}
-            onClick={openProxyDialog}
-          >
-            {t('proxyConfigure')}
-          </button>
-        </div>
-        <p style={styles.statusLine}>{proxyStatusText(t, proxy, proxyLoadError)}</p>
-      </div>
-      <div style={styles.separator} />
-      {PROVIDERS.map(({ id, name }) => {
+  const providerPanels = sortedProviders.map(({ id, name }) => {
         const status = statuses[id]
-        const busy = status?.busy === true
+        const providerDisabled = isProviderDisabled(status)
+        const busy = !providerDisabled && status?.busy === true
         const deviceCode = deviceCodes[id]
         const accounts = status?.accounts ?? []
         return (
-          <div key={id} style={styles.card}>
-            <div style={styles.cardHeader}>
-              <span style={{ ...styles.dot, background: dotColor(status) }} />
-              <span style={styles.name}>{status?.displayName || name}</span>
-              {status?.displayName && <small style={styles.statusLine}>{name}</small>}
-              <ClientVersionTag clientVersion={status?.clientVersion} t={t} />
+          <div key={id} role="tabpanel" data-subscription-provider={id} id={`${tabIdPrefix}-panel-${id}`}
+            aria-labelledby={`${tabIdPrefix}-tab-${id}`} hidden={activeProvider !== id} tabIndex={0}>
+          <div className="dsh-subscription-settings-card" style={styles.card}>
+            <div className="dsh-subscription-provider-header">
+              <div className="dsh-subscription-provider-identity">
+                <div style={{ ...styles.cardHeader, flexWrap: 'wrap' }}>
+                  <span style={{ ...styles.dot, background: dotColor(status) }} />
+                  <span style={styles.name}>{status?.displayName || name}</span>
+                  {status?.displayName && <small style={styles.statusLine}>{name}</small>}
+                  <ClientVersionTag clientVersion={status?.clientVersion} t={t} />
+                </div>
+                <p style={styles.statusLine}>{statusText(t, status)}</p>
+              </div>
+              <div className="dsh-subscription-provider-actions">
+                {providerDisabled ? (
+                  <button
+                    type="button"
+                    disabled={antigravityToggleBusy}
+                    aria-haspopup="dialog"
+                    onClick={() => {
+                      setAntigravityAcknowledged(false)
+                      setAntigravityConfirmOpen(true)
+                    }}
+                  >
+                    {t('antigravityEnable')}
+                  </button>
+                ) : <>
+                  {!busy && accounts.length === 0 && (
+                    <button type="button" onClick={() => { void login(id) }}>
+                      {t('login')}
+                    </button>
+                  )}
+                  {!busy && accounts.length > 0 && id === 'claude' && (
+                    <>
+                      <div className="dsh-subscription-add-account">
+                        <SettingHelp title={t('addAccountOAuth')} hint={t('addAccountHint')} t={t} />
+                        <button type="button" onClick={() => { void login(id, 'oauth') }}>
+                          <ProviderActionIcon icon="add" />{t('addAccountOAuth')}
+                        </button>
+                      </div>
+                      <button type="button" onClick={() => { void login(id, 'keychain') }}>
+                        {t('addAccountKeychain')}
+                      </button>
+                    </>
+                  )}
+                  {!busy && accounts.length > 0 && id !== 'claude' && (
+                    <div className="dsh-subscription-add-account">
+                      <SettingHelp title={t('addAccount')} hint={t('addAccountHint')} t={t} />
+                      <button type="button" onClick={() => { void login(id) }}>
+                        <ProviderActionIcon icon="add" />{t('addAccount')}
+                      </button>
+                    </div>
+                  )}
+                  {/* 与同排其它按钮一致：登录/取消进行中不开第二个写配置的弹窗。 */}
+                  {!busy && <button type="button" aria-haspopup="dialog"
+                    onClick={() => setManagedProvider({ id, name })}>
+                    <ProviderActionIcon icon="manage" />{t('accountsManage')}
+                  </button>}
+                  {!busy && id === 'antigravity' && (
+                    <button
+                      type="button"
+                      disabled={antigravityToggleBusy}
+                      onClick={() => { void toggleProviderEnabled('antigravity', false) }}
+                    >
+                      {t('antigravityDisable')}
+                    </button>
+                  )}
+                  {busy && (
+                    <button type="button" onClick={() => { void cancel(id) }}>
+                      {t('cancel')}
+                    </button>
+                  )}
+                </>}
+              </div>
             </div>
-            <p style={styles.statusLine}>{statusText(t, status)}</p>
-            {status?.detail !== undefined && status.detail !== '' && (
+            {id === 'antigravity' && <AntigravityRiskNotice t={t} />}
+            {!providerDisabled && status?.detail !== undefined && status.detail !== '' && (
               <p style={styles.statusLine}>{status.detail}</p>
             )}
             {errors[id] !== undefined && <p style={styles.errorLine}>{errors[id]}</p>}
-            {accounts.map((account) => {
+            {providerDisabled && accounts.length > 0 && <>
+              <p style={styles.statusLine}>{t('antigravitySavedAccounts', { count: accounts.length })}</p>
+              {accounts.map((account) => {
+                const display = account.account ?? account.key
+                return (
+                  <div key={account.key} style={styles.accountRow}>
+                    <div style={styles.accountHeader}>
+                      <span style={styles.accountName}>{display}</span>
+                      <button
+                        type="button"
+                        style={{ marginLeft: 'auto', flexShrink: 0 }}
+                        onClick={() => { void logout(id, account.key, display, name) }}
+                      >
+                        {t('logout')}
+                      </button>
+                    </div>
+                  </div>
+                )
+              })}
+            </>}
+            {!providerDisabled && accounts.map((account) => {
               const usageKey = `${id}:${account.key}`
               const usage = usages[usageKey]
               const shownWindows = visibleUsageWindows(id, usage?.windows, status?.visibleModels)
               const usageError = usageErrors[usageKey]
               const display = account.account ?? account.key
               const sortedCredits = [...(usage?.resetCredits ?? [])].sort((a, b) => (a.expiresAt ?? Infinity) - (b.expiresAt ?? Infinity))
+              const balance = id === 'codex' ? creditBalanceText(usage?.credits, t) : undefined
+              const resetCount = sortedCredits.length === 1 ? t('resetCreditAvailable') : t('resetCreditsAvailable', { count: sortedCredits.length })
               const nextReset = sortedCredits.find(c => c.expiresAt === undefined || c.expiresAt > Date.now())
               const resetBlock = usage ? resetActionBlock(usage) : 'resetUseRefresh'
               const resetDisabled = resetBusy || resetBlock !== undefined
@@ -969,14 +1132,8 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                         {usage?.plan !== undefined && (
                           <span style={styles.usagePlan}>{t('usagePlan', { plan: usage.plan })}</span>
                         )}
-                        {usage?.supported !== false && <button
-                          type="button"
-                          style={styles.usageRefresh}
-                          disabled={usageLoading[usageKey] === true}
-                          onClick={() => { void loadUsage(id, account.key, true) }}
-                        >
-                          {t('usageRefresh')}
-                        </button>}
+                        {usage?.supported !== false && <ProviderRefreshButton label={t('usageRefresh')}
+                          disabled={usageLoading[usageKey] === true} onClick={() => { void loadUsage(id, account.key, true) }} />}
                       </div>
                       {usage && <UsageFreshness usage={usage} t={t} />}
                       {usage === undefined && usageError === undefined && (
@@ -1008,93 +1165,55 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                           </div>
                         )
                       })}
-                      {id === 'codex' && creditBalanceText(usage?.credits, t) !== undefined && (
-                        <div style={styles.usageRow}>
-                          <div style={styles.usageMeta}>
-                            <span>{creditBalanceText(usage?.credits, t)}</span>
-                          </div>
+                      {id === 'codex' && (balance !== undefined || usage?.resetCredits !== undefined || (resetAccount === account.key && !!resetMessage)) && (
+                        <div className="subscriptions-credit-summary" style={styles.statusLine}>
+                          {sortedCredits.length > 0 ? (
+                            <details className="subscriptions-reset-credits">
+                              <summary>
+                                {balance !== undefined && <span>{balance}</span>}
+                                <span className="subscriptions-reset-count">
+                                  <span>{resetCount}</span>
+                                  <span className="subscriptions-reset-disclosure">
+                                    <span className="subscriptions-reset-expand">{t('modelsExpand')}</span>
+                                    <span className="subscriptions-reset-collapse">{t('modelsCollapse')}</span>
+                                    <svg aria-hidden="true" width="12" height="12" viewBox="0 0 16 16">
+                                      <path d="m4 6 4 4 4-4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                                    </svg>
+                                  </span>
+                                </span>
+                              </summary>
+                              <div className="subscriptions-reset-list">
+                                {sortedCredits.map((credit, index) => (
+                                  <div key={credit.id ?? index} className="subscriptions-reset-row">
+                                    <span>{credit.expiresAt === undefined ? t('resetCreditExpiryUnknown') : t('resetCreditExpires', { date: new Date(credit.expiresAt).toLocaleString() })}</span>
+                                    {credit === nextReset && (
+                                      <button type="button" aria-disabled={resetDisabled}
+                                        title={t(resetBusy ? 'resetUseChecking' : resetBlock ?? 'resetUseReady')}
+                                        style={{ height: 22, minHeight: 22, padding: '0 7px',
+                                          opacity: resetDisabled ? 0.35 : 1, cursor: resetDisabled ? 'not-allowed' : 'pointer' }}
+                                        onClick={() => { if (!resetDisabled) void prepareReset(account.key) }}>
+                                        {resetBusy && resetAccount === account.key ? t('resetUseChecking') : t('resetUseButton')}
+                                      </button>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            </details>
+                          ) : (balance !== undefined || usage?.resetCredits !== undefined) && <div className="subscriptions-credit-line">
+                            {balance !== undefined && <span>{balance}</span>}
+                            {usage?.resetCredits !== undefined && <span className="subscriptions-reset-count">{resetCount}</span>}
+                          </div>}
+                          {resetAccount === account.key && resetMessage && <p role="status" style={styles.statusLine}>{resetMessage}</p>}
                         </div>
                       )}
                       {id === 'codex' && usage?.resetCreditsError !== undefined && (
                         <p style={styles.errorLine}>{t('resetCreditsError', { message: usage.resetCreditsError })}</p>
-                      )}
-                      {id === 'codex' && usage?.resetCredits !== undefined && (
-                        <details className="subscriptions-reset-credits" style={styles.usageRow}>
-                          <summary style={{ ...styles.usageMeta, cursor: 'pointer', listStyle: 'none', justifyContent: 'flex-start', gap: 6 }}>
-                            <svg aria-hidden="true" width="12" height="12" viewBox="0 0 16 16" style={{ flexShrink: 0 }}>
-                              <path d="m6 3 5 5-5 5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                            </svg>
-                            <span>{t('resetCreditsTitle')}</span>
-                            <span style={{ marginLeft: 'auto' }}>{t('resetCreditsAvailable', { count: usage.resetCredits.length })}</span>
-                          </summary>
-                          <style>{
-                            '.subscriptions-reset-credits > summary::-webkit-details-marker { display: none; }'
-                            + '.subscriptions-reset-credits[open] > summary > svg { transform: rotate(90deg); }'
-                          }</style>
-                          <div style={{ paddingLeft: 18, marginTop: 6 }}>
-                            {sortedCredits.map((credit, index) => (
-                              <div key={credit.id ?? index} style={{ ...styles.usageMeta, minHeight: 28, gap: 12 }}>
-                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-                                  {t('resetCreditFull')}
-                                  {credit === nextReset && (
-                                    <button type="button" aria-disabled={resetDisabled}
-                                      title={t(resetBusy ? 'resetUseChecking' : resetBlock ?? 'resetUseReady')}
-                                      style={{ height: 22, minHeight: 22, padding: '0 7px',
-                                        opacity: resetDisabled ? 0.35 : 1, cursor: resetDisabled ? 'not-allowed' : 'pointer' }}
-                                      onClick={() => { if (!resetDisabled) void prepareReset(account.key) }}>
-                                      {resetBusy && resetAccount === account.key ? t('resetUseChecking') : t('resetUseButton')}
-                                    </button>
-                                  )}
-                                </span>
-                                <span style={{ textAlign: 'right' }}>{credit.expiresAt === undefined ? t('resetCreditExpiryUnknown') : t('resetCreditExpires', { date: new Date(credit.expiresAt).toLocaleString() })}</span>
-                              </div>
-                            ))}
-                            {resetAccount === account.key && resetMessage && <p role="status" style={styles.statusLine}>{resetMessage}</p>}
-                          </div>
-                        </details>
                       )}
                     </div>
                   )}
                 </div>
               )
             })}
-            <div style={styles.actions}>
-              {!busy && accounts.length === 0 && (
-                <button type="button" onClick={() => { void login(id) }}>
-                  {t('login')}
-                </button>
-              )}
-              {!busy && accounts.length > 0 && id === 'claude' && (
-                <>
-                  <button type="button" onClick={() => { void login(id, 'oauth') }}>
-                    {t('addAccountOAuth')}
-                  </button>
-                  <button type="button" onClick={() => { void login(id, 'keychain') }}>
-                    {t('addAccountKeychain')}
-                  </button>
-                </>
-              )}
-              {!busy && accounts.length > 0 && id !== 'claude' && (
-                <button type="button" onClick={() => { void login(id) }}>
-                  {t('addAccount')}
-                </button>
-              )}
-              {/* 与同排其它按钮一致：登录/取消进行中不开第二个写配置的弹窗。 */}
-              {!busy && <button type="button" aria-haspopup="dialog"
-                onClick={() => setManagedProvider({ id, name })}>
-                {t('accountsManage')}
-              </button>}
-
-              {busy && (
-                <button type="button" onClick={() => { void cancel(id) }}>
-                  {t('cancel')}
-                </button>
-              )}
-            </div>
-            {!busy && accounts.length > 0 && (
-              <p style={styles.statusLine}>{t('addAccountHint')}</p>
-            )}
-
             {busy && deviceCode !== undefined && (
               <div style={styles.deviceCode}>
                 <span style={styles.statusLine}>{t('deviceCodePrompt')}</span>
@@ -1129,10 +1248,84 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
               </details>
             )}
           </div>
+          </div>
         )
-      })}
+      })
+
+  const proxyCardNode = (
+    <div
+      className={embedded ? 'dsh-subscription-settings-card' : undefined}
+      style={embedded ? { ...styles.card, padding: '14px 16px', gap: 8 } : styles.proxyCard}
+    >
+      <div style={styles.cardHeader}>
+        <span style={{
+          ...styles.dot,
+          background: proxy?.enabled === true
+            ? 'var(--dsw-alias-state-success-primary)'
+            : 'var(--dsw-alias-label-dimmed)',
+        }} />
+        <span style={styles.name}>{t('proxyTitle')}</span>
+        <button
+          type="button"
+          style={{ marginLeft: 'auto', flexShrink: 0 }}
+          onClick={openProxyDialog}
+        >
+          {t('proxyConfigure')}
+        </button>
+      </div>
+      <p style={styles.statusLine}>{proxyStatusText(t, proxy, proxyLoadError)}</p>
+    </div>
+  )
+
+  const providerTabsNode = (
+    <SubscriptionTabs prefix={tabIdPrefix} label={t('providerTabs')} active={activeProvider}
+      scrollLeftLabel={t('scrollProvidersLeft')} scrollRightLabel={t('scrollProvidersRight')}
+      onSelect={setSelectedProvider} tabRefs={tabRefs} tabs={sortedProviders.map(({ id, name }) => {
+        const status = statuses[id]
+        const displayName = status?.displayName || name
+        return { key: id, id, label: displayName, provider: id,
+          ariaLabel: displayName + ' — ' + statusText(t, status),
+          content: <><span aria-hidden="true" style={{ ...styles.dot, background: dotColor(status) }} />{displayName}</> }
+      })} />
+  )
+
+  return (
+    <div
+      className={embedded ? 'dsh-subscriptions-settings dsh-subscriptions-settings-embedded' : 'dsh-subscriptions-settings'}
+      style={embedded ? { ...styles.section, maxWidth: 'none', width: '100%' } : styles.section}
+    >
+      <style>{providerSettingsCss}</style>
+      <p style={styles.intro}>{t('intro')}</p>
+      {!hideUsageHint && <p style={styles.statusLine}>{t('usageSettingsHint')}</p>}
+      {embedded ? (
+        <>
+          <div className="dsh-subscription-provider-area">
+            {providerTabsNode}
+          </div>
+          <div className="dsh-subscriptions-embedded-grid">
+            <div className="dsh-subscriptions-embedded-main">
+              {providerPanels}
+            </div>
+            <aside className="dsh-subscriptions-embedded-aside">
+              <UsageBadgeDisplaySetting t={t} />
+              {proxyCardNode}
+            </aside>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="dsh-subscription-provider-area">
+            {providerTabsNode}
+            {providerPanels}
+          </div>
+          <div style={styles.separator} />
+          <UsageBadgeDisplaySetting t={t} />
+          {proxyCardNode}
+        </>
+      )}
       {managedProvider && <ProviderAccountManager provider={managedProvider.id} name={managedProvider.name}
-        rpc={rpc} t={t} onClose={() => { setManagedProvider(undefined); void refresh() }} />}
+        rpc={rpc} t={t} accountsVersion={JSON.stringify((statuses[managedProvider.id]?.accounts ?? []).map(account => account.key).sort())}
+        onClose={() => { setManagedProvider(undefined); void refresh() }} />}
       <style>{'.subscriptions-reset-dialog::backdrop { background: var(--dsw-alias-bg-mask-1, #0006); backdrop-filter: var(--dsw-mask-blur, none); }'}</style>
       <dialog ref={resetDialogRef} className="subscriptions-reset-dialog"
         aria-labelledby="subscriptions-reset-title" onCancel={() => setResetConfirmation(undefined)}
@@ -1158,6 +1351,26 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
               style={{ opacity: resetAcknowledged ? 1 : 0.35, cursor: resetAcknowledged ? 'pointer' : 'not-allowed' }}
               disabled={!resetAcknowledged || resetBusy}
               onClick={() => { void consumeReset() }}>{t('resetUseConfirm')}</button>
+          </div>
+        </>}
+      </dialog>
+      <dialog ref={antigravityDialogRef} className="subscriptions-reset-dialog"
+        aria-labelledby="subscriptions-antigravity-enable-title" onCancel={() => setAntigravityConfirmOpen(false)}
+        onClose={() => setAntigravityConfirmOpen(false)}
+        style={{ ...styles.modal, display: antigravityConfirmOpen ? 'flex' : 'none', margin: 'auto', color: 'var(--dsw-alias-label-primary)' }}>
+        {antigravityConfirmOpen && <>
+          <h3 id="subscriptions-antigravity-enable-title" style={{ ...styles.modalTitle, margin: 0 }}>{t('antigravityEnableConfirmTitle')}</h3>
+          <p style={{ ...styles.statusLine, margin: '4px 0', color: 'var(--dsw-alias-label-secondary)' }}>{t('antigravityEnableConfirmBody')}</p>
+          <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 12 }}>
+            <input type="checkbox" checked={antigravityAcknowledged} onChange={e => setAntigravityAcknowledged(e.target.checked)} />
+            {t('antigravityEnableAcknowledge')}
+          </label>
+          <div className="dsh-subscription-dialog-actions" style={{ ...styles.actions, justifyContent: 'flex-end', marginTop: 8 }}>
+            <button type="button" autoFocus onClick={() => setAntigravityConfirmOpen(false)}>{t('cancel')}</button>
+            <button type="button" className="dsh-subscription-primary"
+              style={{ opacity: antigravityAcknowledged ? 1 : 0.35, cursor: antigravityAcknowledged ? 'pointer' : 'not-allowed' }}
+              disabled={!antigravityAcknowledged || antigravityToggleBusy}
+              onClick={() => { void toggleProviderEnabled('antigravity', true) }}>{t('antigravityEnableConfirm')}</button>
           </div>
         </>}
       </dialog>

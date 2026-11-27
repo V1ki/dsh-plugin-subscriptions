@@ -24,6 +24,10 @@ import { Config } from '../src/index.js'
 import { CopilotAdapter, fetchCopilotModels } from '../src/providers/copilot.js'
 import { ModelCatalogCache } from '../src/providers/common.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
+import { PoolAdapter } from '../src/providers/pool.js'
+import { poolKey } from '../src/providers/pool-family.js'
+import { PoolHealthRegistry } from '../src/providers/pool-health.js'
+import { PoolUsageTracker } from '../src/providers/pool-usage.js'
 import type { CatalogPersistence, CatalogSnapshot, FetchFn } from '../src/providers/common.js'
 import type { ClaudeSession, CodexSession, CopilotSession, GrokSession } from '../src/auth/store.js'
 import { oauthEndpointError, withTimeout } from '../src/providers/common.js'
@@ -67,6 +71,66 @@ test('Codex context overrides clamp per account, restore defaults, and distrust 
   assert.equal((await adapter.resolveOwnModel('codex', 'm', 'pro')).context?.contextWindow, 272000)
   requested = 128000
   assert.equal((await adapter.resolveOwnModel('codex', 'm', 'pro')).context?.contextWindow, 128000)
+})
+
+test('Codex provider budgets preserve saved context and static output overrides without disabling discovery', async () => {
+  let globalWindow: number | undefined = 350000
+  let globalOutput: number | undefined = 32768
+  let perModel: number | undefined
+  const session = { accessToken: 'p', refreshToken: 'r', accountId: 'p', expiresAt: Date.now() + 3600000 }
+  const adapter = new CodexAdapter({
+    models: [{ id: 'static', contextWindow: 230000, maxTokens: 8192 }], discovery: true,
+    tokens: memoryAccounts({ p: session }), streamIdleTimeoutMs: 1000,
+    defaultContextWindow: () => globalWindow, defaultMaxTokens: () => globalOutput,
+    contextWindowOf: model => model === 'static' ? perModel : undefined,
+    fetchFn: (async () => new Response(JSON.stringify({ models: [
+      { slug: 'static', context_window: 272000, max_context_window: 300000 },
+      { slug: 'new', context_window: 272000, max_context_window: 300000 },
+      { slug: 'unknown-max', context_window: 200000 },
+    ] }))) as FetchFn,
+  })
+  assert.deepEqual((await adapter.listOwnModels('codex', 'p')).map(row => row.id), ['static', 'new', 'unknown-max'])
+  assert.equal((await adapter.resolveOwnModel('codex', 'new', 'p')).context?.contextWindow, 300000)
+  assert.equal((await adapter.resolveOwnModel('codex', 'new', 'p')).defaultMaxTokens, 32768)
+  assert.equal((await adapter.resolveOwnModel('codex', 'unknown-max', 'p')).context?.contextWindow, 200000)
+  assert.equal((await adapter.resolveOwnModel('codex', 'static', 'p')).context?.contextWindow, 300000)
+  assert.equal((await adapter.resolveOwnModel('codex', 'static', 'p')).defaultMaxTokens, 8192)
+  perModel = 150000
+  assert.equal((await adapter.resolveOwnModel('codex', 'static', 'p')).context?.contextWindow, 150000)
+  perModel = undefined
+  globalWindow = undefined
+  globalOutput = undefined
+  assert.equal((await adapter.resolveOwnModel('codex', 'static', 'p')).context?.contextWindow, 272000, 'unset preserves discovery precedence')
+  assert.equal((await adapter.resolveOwnModel('codex', 'new', 'p')).defaultMaxTokens, 8_192)
+})
+
+test('Codex pool budgets intersect per-account limits and mixed-provider members', async () => {
+  const session = { accessToken: 'token', refreshToken: 'r', accountId: 'pro', expiresAt: Date.now() + 3600000 }
+  let globalWindow = 500000
+  const codex = new CodexAdapter({
+    models: [], discovery: true, tokens: memoryAccounts({ pro: session, plus: { ...session, accountId: 'plus' } }),
+    streamIdleTimeoutMs: 1000, defaultContextWindow: () => globalWindow, defaultMaxTokens: () => 32000,
+    fetchFn: (async (_url, init) => new Response(JSON.stringify({ models: [{ slug: 'm', context_window: 272000,
+      max_context_window: new Headers(init?.headers).get('chatgpt-account-id') === 'pro' ? 800000 : 300000 }] }))) as FetchFn,
+  })
+  const claude = new ClaudeAdapter({ models: [{ id: 'other', contextWindow: 250000, maxTokens: 16000 }],
+    discovery: false, tokens: memoryAccounts({ pro: claudeSession }), streamIdleTimeoutMs: 1000 })
+  const pool = new PoolAdapter({
+    adapters: { codex, claude }, health: new PoolHealthRegistry(), usage: new PoolUsageTracker(() => undefined),
+    strategy: 'priority', switchMargin: 2, defaultAccount: async () => 'pro', tiers: {}, onWarn: () => {},
+    families: async () => new Map([
+      [poolKey('codex', 'm'), { members: [{ provider: 'codex', model: 'm', account: 'pro' }, { provider: 'codex', model: 'm', account: 'plus' }] }],
+      [poolKey('codex', 'tier'), { members: [{ provider: 'codex', model: 'm', account: 'pro' }, { provider: 'claude', model: 'other', account: 'pro' }], extra: true }],
+    ]),
+  })
+  const pooled = await pool.resolveModel('codex', 'm')
+  assert.equal(pooled.context?.contextWindow, 300000)
+  assert.equal(pooled.defaultMaxTokens, 32000)
+  const mixed = await pool.resolveModel('codex', 'tier')
+  assert.equal(mixed.context?.contextWindow, 250000)
+  assert.equal(mixed.defaultMaxTokens, 16000)
+  globalWindow = 200000
+  assert.equal((await pool.resolveModel('codex', 'm')).context?.contextWindow, 200000)
 })
 
 const codexSession: CodexSession = {
@@ -418,6 +482,81 @@ test('grok discovery maps the data array', async () => {
   assert.deepEqual(models.map(model => model.id), ['grok-4-1', 'grok-code-2'])
 })
 
+test('grok discovery exposes catalog context tiers and clamps the requested window', async () => {
+  // Both the api.x.ai list and the CLI catalog read the same injected payload:
+  // the ids come from the former, the window metadata from the latter.
+  const payload = {
+    data: [
+      { id: 'grok-4.7', name: 'Grok 4.7', context_window: 256_000, context_windows: [500_000, 256_000, 500_000, 0, -1, 1.5] },
+      { id: 'grok-4.6', name: 'Grok 4.6', context_window: 256_000, context_windows: [500_000] },
+      { id: 'grok-4.3', name: 'Grok 4.3', context_window: 256_000 },
+    ],
+  }
+  let requested: number | undefined = 872_000
+  const adapter = new GrokAdapter({
+    models: STATIC_GROK,
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens(grokSession),
+    discovery: true,
+    fetchFn: fakeFetch(payload).fetchFn,
+    contextWindowOf: () => requested,
+  })
+  const models = await adapter.listModels('grok')
+  assert.deepEqual(models.map(model => model.id), ['grok-4.7', 'grok-4.6', 'grok-4.3'])
+  // The catalog's tiers are the only source of the ceiling (issue #149).
+  assert.deepEqual(await adapter.contextLimits('grok-4.7'), {
+    default: 256_000, max: 500_000, options: [256_000, 500_000],
+  })
+  // A single extra tier combines with the scalar default so the choice is preserved.
+  assert.deepEqual(await adapter.contextLimits('grok-4.6'), {
+    default: 256_000, max: 500_000, options: [256_000, 500_000],
+  })
+  assert.deepEqual(await adapter.contextLimits('grok-4.3'), { default: 256_000, max: 256_000 })
+  // A request above the largest tier is capped; following the provider stays
+  // on the advertised default; a smaller request is honoured as-is.
+  assert.equal((await adapter.resolveModel('grok', 'grok-4.7')).context?.contextWindow, 500_000)
+  // Models without a tier list can shrink but never grow past the default.
+  assert.equal((await adapter.resolveModel('grok', 'grok-4.3')).context?.contextWindow, 256_000)
+  requested = undefined
+  assert.equal((await adapter.resolveModel('grok', 'grok-4.7')).context?.contextWindow, 256_000)
+  requested = 500_000
+  assert.equal((await adapter.resolveModel('grok', 'grok-4.7')).context?.contextWindow, 500_000)
+  requested = 128_000
+  assert.equal((await adapter.resolveModel('grok', 'grok-4.7')).context?.contextWindow, 128_000)
+})
+
+test('grok contextLimits and resolveOwnModel scope lookups to the named account', async () => {
+  const accounts = new Map<string, GrokSession>([
+    ['alice', { ...grokSession, accessToken: 'tok-alice', account: 'alice@example.com' }],
+    ['bob', { ...grokSession, accessToken: 'tok-bob', account: 'bob@example.com' }],
+  ])
+  const tokens = {
+    async list() { return [...accounts.entries()].map(([key, session]) => ({ key, session })) },
+    async defaultAccount() { return 'alice' },
+    async hasSession(account?: string) { return accounts.has(account ?? 'alice') },
+    async session(account?: string) { return accounts.get(account ?? 'alice')! },
+  } as unknown as AccountTokenManager<GrokSession>
+  const fetchFn: FetchFn = async (_url, init) => {
+    const auth = (init?.headers as Record<string, string> | undefined)?.authorization
+    const data = auth === 'Bearer tok-alice'
+      ? [{ id: 'grok-4.7', name: 'Grok 4.7', context_window: 256_000 }]
+      : [{ id: 'grok-4.7', name: 'Grok 4.7', context_window: 256_000, context_windows: [256_000, 500_000] }]
+    return new Response(JSON.stringify({ data }), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+  const adapter = new GrokAdapter({
+    models: STATIC_GROK,
+    streamIdleTimeoutMs: 1000,
+    tokens,
+    discovery: true,
+    fetchFn,
+    contextWindowOf: () => 500_000,
+  })
+  assert.deepEqual(await adapter.contextLimits('grok-4.7', 'alice'), { default: 256_000, max: 256_000 })
+  assert.deepEqual(await adapter.contextLimits('grok-4.7', 'bob'), { default: 256_000, max: 500_000, options: [256_000, 500_000] })
+  assert.equal((await adapter.resolveOwnModel('grok', 'grok-4.7', 'alice')).context?.contextWindow, 256_000)
+  assert.equal((await adapter.resolveOwnModel('grok', 'grok-4.7', 'bob')).context?.contextWindow, 500_000)
+})
+
 test('claude logged in returns the static catalog', async () => {
   const claude = new ClaudeAdapter({
     models: STATIC_CLAUDE,
@@ -542,6 +681,8 @@ test('codexRequestBody sends service_tier priority only on the fast tier', () =>
   )
   assert.equal(base.model, 'gpt-5.1-codex')
   assert.equal('service_tier' in base, false)
+  const withReservation = codexRequestBody({ provider: 'codex', model: 'gpt-5.1-codex', messages: [], maxTokens: 32768 }, { input: [] }, false)
+  assert.equal('max_output_tokens' in withReservation, false, 'the local reservation is not a Codex wire limit')
 
   const fast = codexRequestBody(
     {

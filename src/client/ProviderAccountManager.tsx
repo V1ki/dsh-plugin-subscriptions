@@ -1,5 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react'
-import type { CSSProperties } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import type { AccountPreferences, PromptCacheTtlSetting, ProviderPreferences } from '../provider-settings.js'
 import type { SubscriptionProvider } from './SubscriptionsSection.js'
@@ -10,7 +9,10 @@ import type { AccountCatalogRow } from './account-preferences.js'
 import { ProviderModelEditor } from './ProviderModelEditor.js'
 import type { ProviderModelEditorHandle } from './ProviderModelEditor.js'
 import { notifyDisplayNameChange } from './display-name-events.js'
-import { providerSettingsCss } from './provider-settings-styles.js'
+import { dialogLayout, providerSettingsCss } from './provider-settings-styles.js'
+import { SubscriptionTabs } from './SubscriptionTabs.js'
+import { SettingHelp } from './SettingHelp.js'
+import { CODEX_DEFAULT_MAX_TOKENS } from '../codex-budget-defaults.js'
 
 interface Catalog {
   settings: ProviderPreferences
@@ -22,20 +24,30 @@ const PROMPT_CACHE_TTLS: readonly PromptCacheTtlSetting[] = ['5m', '1h']
 interface Props {
   provider: SubscriptionProvider
   name: string
+  /** Changes when the connected account set changes while the dialog is open. */
+  accountsVersion?: string
   rpc: ConnectionHandle['rpc']
   t: (key: SubscriptionsKey, params?: Record<string, unknown>) => string
   onClose: () => void
 }
-const border = '0.5px solid var(--dsw-alias-border-l2)'
-const stack: CSSProperties = { display: 'grid', gap: 12, minWidth: 0 }
-const actions: CSSProperties = { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }
+const { border, stack, actions } = dialogLayout
 
 /** Native top-layer dialog provides keyboard containment, Escape and focus restoration. */
-export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Props) {
+export function ProviderAccountManager({ provider, name, accountsVersion, rpc, t, onClose }: Props) {
   const dialog = useRef<HTMLDialogElement>(null)
   const title = useId()
   const description = useId()
   const cacheTtlId = useId()
+  const displayNameId = useId()
+  const tabIdPrefix = useId()
+  const [selectedAccount, setSelectedAccount] = useState<string>()
+  const selectedAccountRef = useRef<string>()
+  selectedAccountRef.current = selectedAccount
+  const tabRefs = useRef<Record<string, HTMLButtonElement>>({})
+  const restoreAccountFocus = useRef(false)
+  const initialized = useRef(false)
+  const contextWindowId = useId()
+  const outputReserveId = useId()
   const [catalog, setCatalog] = useState<Catalog>()
   const [changes, setChanges] = useState<Record<string, AccountPreferences>>({})
   const [loading, setLoading] = useState(true)
@@ -49,6 +61,11 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
   /** '' follows the plugin config; otherwise an explicit TTL. */
   const [cacheTtl, setCacheTtl] = useState<PromptCacheTtlSetting | ''>('')
   const [cacheTtlDirty, setCacheTtlDirty] = useState(false)
+  const [contextWindow, setContextWindow] = useState('')
+  const [outputReserve, setOutputReserve] = useState('')
+  const [contextDirty, setContextDirty] = useState(false)
+  const [reserveDirty, setReserveDirty] = useState(false)
+  const [budgetSubmitted, setBudgetSubmitted] = useState(false)
   const alive = useRef(true)
   const saveLock = useRef(false)
   const editor = useRef<ProviderModelEditorHandle>(null)
@@ -68,12 +85,45 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
     setLoading(true)
     setError('')
     void callSubscriptionsAuth<Catalog>(rpc, 'providerSettings', { provider }).then(data => {
-      if (current) { setCatalog(data); setDisplayName(data.settings.displayName ?? ''); setCacheTtl(data.settings.promptCacheTtl ?? '') }
+      if (current) {
+        // Keep all drafts when another client connects or disconnects an account.
+        if (!initialized.current) {
+          setDisplayName(data.settings.displayName ?? '')
+          setCacheTtl(data.settings.promptCacheTtl ?? '')
+          setContextWindow(data.settings.contextWindow?.toString() ?? '')
+          setOutputReserve(data.settings.defaultMaxTokens?.toString() ?? '')
+          initialized.current = true
+        }
+        const previous = selectedAccountRef.current
+        if (previous !== undefined && !data.accounts.some(account => account.key === previous)) {
+          const focus = document.activeElement
+          const oldTab = tabRefs.current[previous]
+          const oldPanel = oldTab?.getAttribute('aria-controls')
+          restoreAccountFocus.current = focus === oldTab || !!(oldPanel && document.getElementById(oldPanel)?.contains(focus))
+          setSelectedAccount(data.accounts[0]?.key)
+        } else if (previous === undefined) setSelectedAccount(data.accounts[0]?.key)
+        setCatalog(data)
+      }
     }).catch(error => {
       if (current) setError(t('accountsLoadFailed', { message: error instanceof Error ? error.message : String(error) }))
     }).finally(() => { if (current) setLoading(false) })
     return () => { current = false }
-  }, [provider, rpc, attempt])
+  }, [provider, rpc, attempt, accountsVersion])
+  useLayoutEffect(() => {
+    if (!restoreAccountFocus.current) return
+    restoreAccountFocus.current = false
+    if (selectedAccount !== undefined && tabRefs.current[selectedAccount]) tabRefs.current[selectedAccount].focus()
+    else dialog.current?.querySelector<HTMLButtonElement>('header button')?.focus()
+  }, [catalog, selectedAccount])
+
+  // Empty means no override. Reject exponents, decimals, signs and unsafe integers.
+  function parseBudget(value: string): number | undefined {
+    if (!/^[0-9]+$/.test(value)) return undefined
+    const parsed = Number(value)
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined
+  }
+  const contextInvalid = contextWindow !== '' && parseBudget(contextWindow) === undefined
+  const reserveInvalid = outputReserve !== '' && parseBudget(outputReserve) === undefined
 
   function edit(key: string, next: AccountPreferences) {
     setChanges(current => ({ ...current, [key]: next }))
@@ -85,6 +135,10 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
    */
   async function save() {
     if (saveLock.current) return
+    if (provider === 'codex' && (contextInvalid || reserveInvalid)) {
+      setBudgetSubmitted(true)
+      return
+    }
     // An invalid model draft (e.g. a malformed context window) blocks the
     // whole submit; the editor shows the reason next to the field.
     const models = editor.current === null ? { efforts: [] } : editor.current.collect()
@@ -104,13 +158,18 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
       const latest = await callSubscriptionsAuth<Catalog>(rpc, 'providerSettings', { provider })
       if (!alive.current) return
       const base = models.settings === undefined ? latest.settings : mergeLatestAccounts(models.settings, latest.settings)
-      const { displayName: _staleName, promptCacheTtl: _staleTtl, ...rest } = mergeAccountChanges(base, changes)
+      const { displayName: _staleName, promptCacheTtl: _staleTtl, contextWindow: _staleContext, defaultMaxTokens: _staleReserve, enabled: _staleEnabled, ...rest } = mergeAccountChanges(base, changes)
       const savedName = nameDirty ? displayName.trim() : latest.settings.displayName
       const savedTtl = cacheTtlDirty ? cacheTtl : latest.settings.promptCacheTtl
+      const savedContext = contextDirty ? parseBudget(contextWindow) : latest.settings.contextWindow
+      const savedReserve = reserveDirty ? parseBudget(outputReserve) : latest.settings.defaultMaxTokens
       const settings = {
         ...rest,
+        ...(latest.settings.enabled === true ? { enabled: true } : {}),
         ...(savedName ? { displayName: savedName } : {}),
         ...(savedTtl ? { promptCacheTtl: savedTtl } : {}),
+        ...(savedContext === undefined ? {} : { contextWindow: savedContext }),
+        ...(savedReserve === undefined ? {} : { defaultMaxTokens: savedReserve }),
       }
       await callSubscriptionsAuth(rpc, 'setProviderSettings', { provider, settings })
       notifyDisplayNameChange(provider, settings.displayName)
@@ -125,9 +184,13 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
       if (alive.current) setSaving(false)
     }
   }
+  const activeAccount = catalog?.accounts.some(account => account.key === selectedAccount)
+    ? selectedAccount : catalog?.accounts[0]?.key
+  // Encode UTF-16 units rather than using raw account identifiers in DOM ids.
+  const accountId = (key: string) => Array.from({ length: key.length }, (_, index) => key.charCodeAt(index).toString(16).padStart(4, '0')).join('') || 'empty'
   return <dialog className="dsh-subscription-manager" ref={dialog} aria-labelledby={title} aria-describedby={description}
     onCancel={event => { if (saveLock.current) event.preventDefault() }} onClose={onClose}
-    style={{ width: 620, maxWidth: 'calc(100vw - 32px)', maxHeight: 'calc(100dvh - 32px)', overflow: 'auto' }}>
+    style={{ width: 900, maxWidth: 'calc(100vw - 32px)', maxHeight: 'calc(100dvh - 32px)', overflow: 'auto' }}>
     <style>{providerSettingsCss}</style>
     <div style={{ ...stack, padding: 20 }}>
       <header style={{ ...actions, justifyContent: 'space-between' }}>
@@ -137,16 +200,16 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
       <p id={description} className="dsh-subscription-hint">{t('accountsHint')}</p>
       {error && <p role="alert">{error}</p>}
       {loading && <p role="status" className="dsh-subscription-hint">{t('accountsLoading')}</p>}
-      {!loading && !catalog && <button type="button" onClick={() => setAttempt(value => value + 1)}>{t('modelDefaultsRetry')}</button>}
-      {catalog && <fieldset disabled={saving || loading} style={{ ...stack, border: 0, margin: 0, padding: 0 }}>
+      {!loading && (!catalog || !!error) && <button type="button" onClick={() => setAttempt(value => value + 1)}>{t('modelDefaultsRetry')}</button>}
+      {catalog && <fieldset disabled={saving} style={{ ...stack, border: 0, margin: 0, padding: 0 }}>
         <section style={{ ...stack, gap: 6, paddingBottom: 8 }}>
-          <label style={{ ...stack, gap: 6 }}>
-            <strong>{t('subscriptionDisplayName')}</strong>
-            <input maxLength={80} value={displayName} placeholder={name}
+          <div style={{ ...actions, gap: 4 }}>
+            <label htmlFor={displayNameId}><strong>{t('subscriptionDisplayName')}</strong></label>
+            <SettingHelp title={t('subscriptionDisplayName')} hint={t('subscriptionDisplayNameHint')} t={t} portal={false} />
+          </div>
+          <div style={actions}>
+            <input id={displayNameId} maxLength={80} value={displayName} placeholder={name} style={{ flex: '1 1 200px' }}
               onChange={event => { setDisplayName(event.target.value); setNameDirty(true) }} />
-          </label>
-          <div style={{ ...actions, justifyContent: 'space-between' }}>
-            <small className="dsh-subscription-hint">{t('subscriptionDisplayNameHint')}</small>
             <button type="button" disabled={!displayName}
               onClick={() => { setDisplayName(''); setNameDirty(true) }}>{t('displayNameReset')}</button>
           </div>
@@ -162,11 +225,21 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
           <small className="dsh-subscription-hint">{t('claudePromptCacheTtlHint')}</small>
         </section>}
         {catalog.accounts.length === 0 && <p className="dsh-subscription-hint">{t('accountsEmpty')}</p>}
+        {catalog.accounts.length > 0 && <SubscriptionTabs prefix={tabIdPrefix} label={t('accountsTabs')}
+          scrollLeftLabel={t('scrollAccountsLeft')} scrollRightLabel={t('scrollAccountsRight')}
+          active={activeAccount} onSelect={setSelectedAccount} tabRefs={tabRefs} tabs={catalog.accounts.map(account => {
+            const alias = (changes[account.key] ?? catalog.settings.accounts?.[account.key])?.alias?.trim()
+            return { key: account.key, id: accountId(account.key), label: alias || account.label,
+              ariaLabel: alias ? alias + ' — ' + account.label : account.label }
+          })} />}
         {catalog.accounts.map(account => {
           const preferences = changes[account.key] ?? catalog.settings.accounts?.[account.key] ?? {}
-          const selected = accountPoolSelection(preferences, account.models)
-          const models = accountModelRows(account, preferences)
-          return <fieldset key={account.key} style={{ ...stack, border, borderRadius: 'var(--dsw-radius-lg, 12px)', padding: 14, margin: 0 }}>
+          const selected = accountPoolSelection(preferences, account.models, provider)
+          const models = accountModelRows(account, preferences, provider).sort((a, b) =>
+            b.name.localeCompare(a.name, undefined, { sensitivity: 'base', numeric: true }) || b.id.localeCompare(a.id))
+          return <div key={account.key} role="tabpanel" id={`${tabIdPrefix}-panel-${accountId(account.key)}`}
+            aria-labelledby={`${tabIdPrefix}-tab-${accountId(account.key)}`} hidden={activeAccount !== account.key} tabIndex={0}>
+          <fieldset style={{ ...stack, border, borderRadius: 'var(--dsw-radius-lg, 12px)', padding: 14, margin: 0 }}>
             <legend style={{ padding: '0 6px', overflowWrap: 'anywhere', maxWidth: '100%' }}>{account.label}</legend>
             {account.unavailable && <p className="dsh-subscription-hint">{t('accountsCatalogUnavailable')}</p>}
             <label style={{ ...stack, gap: 6 }}>
@@ -186,7 +259,7 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
             <p className="dsh-subscription-hint">{t('accountsIndependentHint')}</p>
             <details>
               <summary style={{ cursor: 'pointer', fontSize: 13 }}>{t('accountsModels')} · {preferences.poolModels === undefined
-                ? t('accountsModelsAll') : t('accountsModelsCount', { count: preferences.poolModels.length })}</summary>
+                ? t('accountsModelsAll') : t('accountsModelsCount', { count: selected.size })}</summary>
               <div style={{ ...stack, marginTop: 12 }}>
                 <p className="dsh-subscription-hint">{t('accountsModelsHint')}</p>
                 <label><input type="checkbox" checked={preferences.poolModels === undefined} onChange={event => {
@@ -212,15 +285,43 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
               </div>
             </details>
           </fieldset>
+          </div>
         })}
+        {provider === 'codex' && <section style={{ ...stack, gap: 10, paddingBottom: 8 }}>
+          <h3 style={{ margin: 0 }}>{t('codexModelDefaults')}</h3>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 240px), 1fr))', gap: 12, alignItems: 'start' }}>
+            <div style={{ ...stack, gap: 6 }}>
+              <div style={{ ...actions, gap: 4 }}>
+                <label htmlFor={contextWindowId}>{t('codexGlobalContext')}</label>
+                <SettingHelp title={t('codexGlobalContext')} hint={t('codexGlobalContextHint')} t={t} portal={false} />
+              </div>
+              <input id={contextWindowId} type="text" inputMode="numeric" value={contextWindow} placeholder={t('codexContextDefault')}
+                aria-describedby={budgetSubmitted && contextInvalid ? contextWindowId + '-error' : undefined}
+                aria-invalid={budgetSubmitted && contextInvalid || undefined}
+                onChange={event => { setContextWindow(event.target.value); setContextDirty(true) }} />
+              {budgetSubmitted && contextInvalid && <small id={contextWindowId + '-error'} role="alert">{t('codexBudgetInvalid')}</small>}
+            </div>
+            <div style={{ ...stack, gap: 6 }}>
+              <div style={{ ...actions, gap: 4 }}>
+                <label htmlFor={outputReserveId}>{t('codexOutputReserve')}</label>
+                <SettingHelp title={t('codexOutputReserve')} hint={t('codexOutputReserveHint')} t={t} portal={false} />
+              </div>
+              <input id={outputReserveId} type="text" inputMode="numeric" value={outputReserve} placeholder={t('codexBudgetDefault', { value: CODEX_DEFAULT_MAX_TOKENS.toLocaleString() })}
+                aria-describedby={budgetSubmitted && reserveInvalid ? outputReserveId + '-error' : undefined}
+                aria-invalid={budgetSubmitted && reserveInvalid || undefined}
+                onChange={event => { setOutputReserve(event.target.value); setReserveDirty(true) }} />
+              {budgetSubmitted && reserveInvalid && <small id={outputReserveId + '-error'} role="alert">{t('codexBudgetInvalid')}</small>}
+            </div>
+          </div>
+        </section>}
       </fieldset>}
-      <ProviderModelEditor ref={editor} provider={provider} rpc={rpc} t={t} disabled={saving} onDirtyChange={setModelsDirty} />
+      <ProviderModelEditor ref={editor} provider={provider} rpc={rpc} t={t} disabled={saving} globalContextWindow={parseBudget(contextWindow)} onDirtyChange={setModelsDirty} />
       <footer style={{ ...stack, gap: 8, borderTop: border, padding: '14px 0 8px',
         position: 'sticky', bottom: 0, background: 'var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1))' }}>
         {saveError && <p role="alert">{saveError}</p>}
         <div style={{ ...actions, justifyContent: 'flex-end' }}>
           <button type="button" disabled={saving} onClick={onClose}>{t('cancel')}</button>
-          <button type="button" className="dsh-subscription-primary" disabled={loading || saving || (!Object.keys(changes).length && !modelsDirty && !nameDirty && !cacheTtlDirty)}
+          <button type="button" className="dsh-subscription-primary" disabled={loading || saving || (!Object.keys(changes).length && !modelsDirty && !nameDirty && !cacheTtlDirty && !contextDirty && !reserveDirty)}
             onClick={() => { void save() }}>{saving ? t('modelDefaultsSaving') : t('modelsSave')}</button>
         </div>
       </footer>

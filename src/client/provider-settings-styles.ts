@@ -1,9 +1,17 @@
+import type { CSSProperties } from 'react'
+
 /**
  * The host loads one JS client bundle, so keep this small, scoped stylesheet
  * with the dialog instead of relying on a separate CSS asset. Geometry and
  * theme tokens follow the host's settings-form and ui-primitives controls.
  */
 const formScope = ':is(.dsh-subscription-manager, .dsh-subscriptions-settings)'
+
+export const dialogLayout = {
+  border: '0.5px solid var(--dsw-alias-border-l2)',
+  stack: { display: 'grid', gap: 12, minWidth: 0 },
+  actions: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' },
+} satisfies { border: string, stack: CSSProperties, actions: CSSProperties }
 
 export const providerSettingsCss = `
 .dsh-subscription-manager {
@@ -24,6 +32,128 @@ export const providerSettingsCss = `
   font-size: 13px;
   line-height: 1.5;
   color-scheme: light;
+}
+.dsh-subscription-provider-area { min-width: 0; }
+.dsh-subscription-provider-header {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+.dsh-subscription-provider-identity { flex: 1 1 12rem; min-width: 0; overflow-wrap: anywhere; }
+.dsh-subscription-provider-actions,
+.dsh-subscription-add-account {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.dsh-subscription-provider-actions { margin-left: auto; }
+.dsh-subscription-add-account { gap: 2px; }
+.dsh-subscription-provider-actions button { gap: 5px; }
+.subscriptions-credit-summary { padding-top: 8px; }
+.subscriptions-credit-line,
+.subscriptions-reset-credits > summary {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+.subscriptions-reset-count {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+.subscriptions-credit-line > :not(.subscriptions-reset-count) ~ .subscriptions-reset-count,
+.subscriptions-reset-credits > summary > :not(.subscriptions-reset-count) ~ .subscriptions-reset-count {
+  margin-inline-start: auto;
+}
+.subscriptions-reset-credits > summary { list-style: none; cursor: pointer; }
+.subscriptions-reset-credits > summary::-webkit-details-marker { display: none; }
+.subscriptions-reset-disclosure { display: inline-flex; align-items: center; gap: 3px; }
+.subscriptions-reset-credits:not([open]) .subscriptions-reset-collapse,
+.subscriptions-reset-credits[open] .subscriptions-reset-expand { display: none; }
+.subscriptions-reset-credits[open] .subscriptions-reset-disclosure svg { transform: rotate(180deg); }
+.subscriptions-reset-list { display: grid; gap: 4px; margin-top: 6px; }
+.subscriptions-reset-row { display: flex; align-items: center; gap: 8px; min-height: 28px; }
+.subscriptions-reset-row > span { min-width: 0; overflow-wrap: anywhere; }
+.dsh-subscription-tabs-shell {
+  position: relative;
+  min-width: 0;
+  margin-bottom: 4px;
+  --tabs-surface: var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-layer-1, Canvas));
+}
+.dsh-subscription-tabs {
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.dsh-subscription-tabs::-webkit-scrollbar { display: none; }
+.dsh-subscription-tabs-track {
+  display: flex;
+  width: max-content;
+  gap: 6px;
+  padding: 4px 4px 10px;
+}
+.dsh-subscription-tabs-shell::before,
+.dsh-subscription-tabs-shell::after {
+  position: absolute;
+  z-index: 1;
+  top: 4px;
+  bottom: 10px;
+  width: 44px;
+  content: '';
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.dsh-subscription-tabs-shell::before {
+  left: 0;
+  background: linear-gradient(to right, var(--tabs-surface) 24px, transparent);
+}
+.dsh-subscription-tabs-shell::after {
+  right: 0;
+  background: linear-gradient(to left, var(--tabs-surface) 24px, transparent);
+}
+.dsh-subscription-tabs-shell[data-left]::before,
+.dsh-subscription-tabs-shell[data-right]::after { opacity: 1; }
+${formScope} button.dsh-subscription-tabs-arrow {
+  position: absolute;
+  z-index: 2;
+  top: 6px;
+  width: 24px;
+  height: 24px;
+  min-height: 24px;
+  padding: 0;
+  border: 1px solid var(--dsw-alias-border-l2, #8884);
+  border-radius: 9px;
+  color: var(--dsw-alias-label-secondary, inherit);
+  background: var(--tabs-surface);
+  box-shadow: 0 1px 3px #0002;
+  transition: opacity 120ms ease, visibility 120ms;
+}
+${formScope} button.dsh-subscription-tabs-arrow-left { left: 0; }
+${formScope} button.dsh-subscription-tabs-arrow-right { right: 0; }
+${formScope} button.dsh-subscription-tabs-arrow:disabled {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+${formScope} .dsh-subscription-tabs button {
+  gap: 6px;
+  white-space: nowrap;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+${formScope} .dsh-subscription-tabs button:focus-visible { outline-offset: -2px; }
+@media (prefers-reduced-motion: reduce) {
+  .dsh-subscription-tabs-shell::before,
+  .dsh-subscription-tabs-shell::after,
+  ${formScope} button.dsh-subscription-tabs-arrow,
+  ${formScope} .dsh-subscription-tabs button { transition: none; }
+}
+${formScope} .dsh-subscription-tabs button[aria-selected="true"] {
+  background: var(--dsw-alias-interactive-bg-active, var(--dsw-alias-bg-layer-3));
+  border-color: var(--dsw-alias-state-business-primary, var(--dsw-alias-brand-primary));
 }
 body[data-ds-dark-theme] ${formScope} {
   color-scheme: dark;
@@ -81,6 +211,31 @@ ${formScope} select {
   font-size: 13px;
   font-weight: 400;
   line-height: 1.5;
+}
+.dsh-subscription-select-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+}
+${formScope} select.dsh-subscription-select {
+  appearance: none;
+  -webkit-appearance: none;
+  height: 36px;
+  padding: 0 34px 0 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-base));
+  cursor: pointer;
+}
+.dsh-subscription-select-chevron {
+  position: absolute;
+  right: 11px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+  color: var(--dsw-alias-label-tertiary);
 }
 ${formScope} input::placeholder {
   color: var(--dsw-alias-label-tertiary);
@@ -150,6 +305,57 @@ ${formScope} button:disabled {
   opacity: 0.4;
   cursor: default;
 }
+${formScope} button.dsh-subscription-setting-help {
+  min-height: 24px;
+  width: 24px;
+  padding: 4px;
+  border: 0;
+  border-radius: 50%;
+  color: var(--dsw-alias-label-tertiary);
+}
+${formScope} button.dsh-subscription-setting-help:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary, var(--dsw-alias-brand-primary));
+  outline-offset: 2px;
+}
+
+${formScope} button.dsh-subscription-model-toggle {
+  flex: 1 1 0;
+  min-width: 0;
+  justify-content: flex-start;
+  gap: 6px;
+  padding: 4px 6px;
+  border: 0;
+  text-align: left;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+.dsh-subscription-model-name { min-width: 0; overflow-wrap: anywhere; }
+.dsh-subscription-model-id {
+  min-width: 0;
+  padding-left: 6px;
+  color: var(--dsw-alias-label-tertiary, #888);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dsh-subscription-model-action {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  color: var(--dsw-alias-label-tertiary, #888);
+  font-size: 12px;
+}
+.dsh-subscription-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  min-width: 0;
+}
+.dsh-subscription-tools label { min-width: 0; overflow-wrap: anywhere; }
+
 ${formScope} button.dsh-subscription-quiet {
   border-color: transparent;
   color: var(--dsw-alias-label-secondary, var(--dsw-alias-label-primary));

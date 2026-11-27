@@ -27,6 +27,7 @@ import {
 } from '../translate/antigravity.js'
 import type { AntigravityRequest, AntigravityResponseEvent } from '../translate/antigravity.js'
 import {
+  ACCOUNT_SUSPENDED_CODE,
   httpLlmError,
   idleWatchdog,
   mapFetchFailure,
@@ -488,8 +489,10 @@ export async function fetchAntigravityUsage(
       if (ANTIGRAVITY_QUOTA_SCOPES.slice(0, 2).every(scope => shared.some(window => window.scope === scope))) return shared
     } catch (error) {
       if (isDiscoveryAborted(error, signal)) throw error
-      // Auth and throttling failures must surface rather than trigger extra requests.
-      if (error instanceof LlmError && ['AUTH', 'RATE_LIMIT'].includes(error.code)) throw error
+      // Auth, suspension and throttling failures must surface rather than
+      // trigger extra requests: a disabled account answers every supplemental
+      // call the same way, so falling through would only repeat the rejection.
+      if (error instanceof LlmError && [ACCOUNT_SUSPENDED_CODE, 'AUTH', 'RATE_LIMIT'].includes(error.code)) throw error
     }
     let models: AntigravityModelsResponse
     try {

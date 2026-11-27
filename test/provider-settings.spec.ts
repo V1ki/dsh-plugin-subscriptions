@@ -27,6 +27,28 @@ test('display names persist per provider, trim whitespace and clear back to defa
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
 
+test('Codex global budgets validate, persist, and clear independently of per-model settings', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'codex-budgets-'))
+  try {
+    const store = new ProviderSettingsStore(join(dir, 'settings.json'))
+    await store.set('codex', { contextWindow: 240000, defaultMaxTokens: 32768, contextWindows: { m: 180000 } })
+    const reload = new ProviderSettingsStore(store.path)
+    assert.deepEqual(reload.get('codex'), { contextWindow: 240000, defaultMaxTokens: 32768, contextWindows: { m: 180000 } })
+    for (const field of ['contextWindow', 'defaultMaxTokens']) {
+      for (const invalid of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Infinity, NaN, null, '5', true]) {
+        assert.throws(() => validatePreferences('codex', { [field]: invalid }), /positive safe integer/)
+      }
+      for (const provider of ['claude', 'grok', 'copilot', 'antigravity'] as const) {
+        assert.throws(() => validatePreferences(provider, { [field]: 100 }), /only for Codex/)
+      }
+    }
+    await reload.set('codex', { contextWindows: { m: 180000 } })
+    assert.equal(new ProviderSettingsStore(store.path).get('codex').contextWindow, undefined)
+    assert.equal(new ProviderSettingsStore(store.path).get('codex').defaultMaxTokens, undefined)
+    assert.equal(reload.contextWindow('codex', 'm'), 180000)
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
 test('the Claude prompt-cache TTL is a Claude-only preference that persists and clears', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'cache-ttl-'))
   try {
@@ -52,16 +74,21 @@ test('provider selections survive refresh-independent reloads and concurrent pro
     assert.equal(store.visible('codex', 'future-model'), true)
     await Promise.all([
       store.set('codex', { visibleModels: ['gpt-6-astra'], contextWindows: { 'gpt-6-astra': 512000 } }),
-      store.set('grok', { visibleModels: [] }),
+      store.set('grok', { visibleModels: [], contextWindows: { 'grok-4.7': 500000 } }),
     ])
     const reload = new ProviderSettingsStore(path)
     assert.equal(reload.visible('codex', 'gpt-6-astra'), true)
     assert.equal(reload.visible('codex', 'future-model'), false)
     assert.equal(reload.visible('grok', 'grok-4'), false)
-    assert.equal(reload.contextWindow('gpt-6-astra'), 512000)
+    assert.equal(reload.contextWindow('codex', 'gpt-6-astra'), 512000)
+    // Grok shares the mechanism (issue #149), in its own provider bucket.
+    assert.equal(reload.contextWindow('grok', 'grok-4.7'), 500000)
+    assert.equal(reload.contextWindow('grok', 'grok-4.6'), undefined)
+    assert.equal(reload.contextWindow('codex', 'grok-4.7'), undefined)
     await reload.set('codex', {})
     assert.equal(reload.visible('codex', 'future-model'), true)
-    assert.equal(reload.contextWindow('gpt-6-astra'), undefined)
+    assert.equal(reload.contextWindow('codex', 'gpt-6-astra'), undefined)
+    assert.equal(reload.contextWindow('grok', 'grok-4.7'), 500000)
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
 
@@ -113,6 +140,12 @@ test('provider settings reject invalid contexts and unsupported tools; ids are s
   for (const value of [0, -1, 1.2, Infinity, NaN, '500000']) {
     assert.throws(() => validatePreferences('codex', { contextWindows: { model: value } }))
   }
+  // Grok accepts the same per-model override now; every other provider still refuses it.
+  assert.equal(validatePreferences('grok', { contextWindows: { 'grok-4.7': 500000 } }).contextWindows?.['grok-4.7'], 500000)
+  for (const value of [0, -1, 1.2, Infinity, NaN, '500000']) {
+    assert.throws(() => validatePreferences('grok', { contextWindows: { model: value } }))
+  }
+  assert.throws(() => validatePreferences('claude', { contextWindows: { model: 500000 } }), /only for Codex and Grok/)
   assert.throws(() => validatePreferences('claude', { tools: { image_generate: false } }))
   assert.throws(() => validatePreferences('codex', { tools: { video_generate: true } }))
   assert.throws(() => validatePreferences('codex', { visibleModels: [null] }))
@@ -147,7 +180,7 @@ test('Codex subagent speed defaults persist independently and validate model key
     assert.equal(restored.subagentSpeed('m'), 'fast')
     assert.equal(restored.subagentSpeed('other'), 'standard')
     assert.equal(restored.subagentSpeed('missing'), 'standard')
-    assert.equal(restored.contextWindow('m'), 512000)
+    assert.equal(restored.contextWindow('codex', 'm'), 512000)
     const copy = restored.get('codex')
     copy.subagentSpeeds!.m = 'standard'
     assert.equal(restored.subagentSpeed('m'), 'fast')
@@ -162,5 +195,30 @@ test('Codex subagent speed defaults persist independently and validate model key
       assert.throws(() => validatePreferences('codex', { subagentSpeeds }), /subagent speeds/)
     }
     assert.throws(() => validatePreferences('claude', { subagentSpeeds: { m: 'fast' } }), /only for Codex/)
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
+test('Antigravity defaults to disabled and setProviderEnabled preserves other preferences', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'antigravity-enabled-'))
+  try {
+    const store = new ProviderSettingsStore(join(dir, 'settings.json'))
+    assert.equal(store.providerEnabled('antigravity'), false)
+    for (const provider of ['codex', 'claude', 'grok', 'copilot'] as const) {
+      assert.equal(store.providerEnabled(provider), true)
+    }
+    await store.set('antigravity', { displayName: 'AGY', visibleModels: ['gemini-4-argon'], accounts: { alice: { alias: 'Work' } } })
+    assert.equal(store.providerEnabled('antigravity'), false)
+    await store.setProviderEnabled('antigravity', true)
+    assert.equal(store.providerEnabled('antigravity'), true)
+    const reloaded = new ProviderSettingsStore(store.path)
+    assert.equal(reloaded.providerEnabled('antigravity'), true)
+    assert.equal(reloaded.get('antigravity').displayName, 'AGY')
+    assert.deepEqual(reloaded.get('antigravity').visibleModels, ['gemini-4-argon'])
+    assert.equal(reloaded.get('antigravity').accounts?.alice?.alias, 'Work')
+    await reloaded.setProviderEnabled('antigravity', false)
+    assert.equal(new ProviderSettingsStore(store.path).providerEnabled('antigravity'), false)
+    assert.equal(new ProviderSettingsStore(store.path).get('antigravity').displayName, 'AGY')
+    assert.throws(() => validatePreferences('codex', { enabled: true }), /only for Antigravity/)
+    assert.throws(() => validatePreferences('antigravity', { enabled: 'yes' }), /boolean/)
   } finally { await rm(dir, { recursive: true, force: true }) }
 })

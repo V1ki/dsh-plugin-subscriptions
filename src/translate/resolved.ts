@@ -81,7 +81,23 @@ export interface ImageRequestLimit {
   maxEdge: number
   /** Encoded-byte target before base64 expansion. */
   maxBytes: number
+  /**
+   * Stored size above which an image within `maxEdge` is still re-encoded at
+   * its own dimensions, and the byte target for every re-encoded image. Lossless
+   * screenshots run 2–4MB each, so without it a few of them exhaust a route's
+   * request image budget and older images are omitted. Absent means only
+   * oversized edges trigger a re-encode.
+   */
+  softBytes?: number
 }
+
+/** Execution-world read path of one image, as the host's offload placeholder names it. */
+export interface ImageAccess {
+  readonlyPath: string
+}
+
+/** Maps one absolute host path into the current tool execution world. */
+export type HostPathMapper = (hostPath: string) => string | undefined
 
 /**
  * Failure code a host's image-offload executor answers by replacing the oldest
@@ -129,22 +145,70 @@ export function requiredImageOffloadCount(messages: readonly TranslatableMessage
   return count
 }
 
+/** Request-image target carrying every host generation's fields. */
+export interface ImageRequestProjection {
+  width: number
+  height: number
+  /** DSH 0.1.x pixel budget. */
+  maxPixels: number
+  /** DSH 0.1.7–0.2.2 byte target. */
+  maxBytes: number
+  /** DSH 0.2.3+ hard encoded-byte cap: the route's own limit. */
+  maxImageBytes: number
+  /** DSH 0.2.3+ preferred encoded-byte target, never above `maxImageBytes`. */
+  imageTargetBytes: number
+}
+
 /**
  * The request projection for one oversized image, or undefined when it fits.
- * Hosts before DSH 0.1.7 read a pixel budget (`maxPixels`), later ones the
- * target edges (`width`/`height`); each validates only its own fields, so
- * one projection carries both.
+ * An image is oversized when its long edge exceeds `maxEdge`, or when its
+ * stored bytes exceed `softBytes`; the latter keeps its dimensions and is only
+ * re-encoded. Hosts before DSH 0.1.7 read a pixel budget (`maxPixels`), later
+ * ones the target edges (`width`/`height`). DSH 0.2.3 split the byte budget
+ * into a hard cap (`maxImageBytes`) and a preferred target
+ * (`imageTargetBytes`) and rejects a target that lacks them; hosts before it
+ * read the single `maxBytes`. Each host validates only its own fields, so one
+ * projection carries all of them.
  */
 export function imageRequestTarget(
-  ref: { width: number; height: number },
+  ref: { width: number; height: number; bytes?: number },
   limit: ImageRequestLimit,
-): { width: number; height: number; maxPixels: number; maxBytes: number } | undefined {
+): ImageRequestProjection | undefined {
+  const maxBytes = limit.softBytes === undefined ? limit.maxBytes : Math.min(limit.maxBytes, limit.softBytes)
+  const budget = { maxBytes, maxImageBytes: limit.maxBytes, imageTargetBytes: maxBytes }
   const longEdge = Math.max(ref.width, ref.height)
-  if (!(longEdge > limit.maxEdge)) return undefined
+  if (!(longEdge > limit.maxEdge)) {
+    if (limit.softBytes === undefined || !(ref.bytes !== undefined && ref.bytes > maxBytes)) return undefined
+    return { width: ref.width, height: ref.height, maxPixels: ref.width * ref.height, ...budget }
+  }
   const short = (edge: number): number => Math.max(1, Math.floor(edge * limit.maxEdge / longEdge))
   const width = ref.width >= ref.height ? limit.maxEdge : short(ref.width)
   const height = ref.width >= ref.height ? short(ref.height) : limit.maxEdge
-  return { width, height, maxPixels: width * height, maxBytes: limit.maxBytes }
+  return { width, height, maxPixels: width * height, ...budget }
+}
+
+/**
+ * Read path of one stored image for the offload placeholder, so the model can
+ * reopen an omitted image with its own tools as on the host's built-in routes.
+ * Undefined when the host predates `resolveImageAttachmentAccess`, no mapper
+ * is mounted, or the reference cannot be resolved: the placeholder then keeps
+ * its no-path wording rather than failing the request.
+ */
+export function offloadedImageAccess(
+  attachments: AttachmentStore | undefined,
+  mapHostPath: HostPathMapper | undefined,
+  ref: ImageAttachmentRef,
+): ImageAccess | undefined {
+  if (attachments === undefined || mapHostPath === undefined) return undefined
+  const resolve = (llm as {
+    resolveImageAttachmentAccess?: (store: AttachmentStore, map: HostPathMapper, ref: ImageAttachmentRef) => ImageAccess | undefined
+  }).resolveImageAttachmentAccess
+  if (typeof resolve !== 'function') return undefined
+  try {
+    return resolve(attachments, mapHostPath, ref)
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -157,6 +221,8 @@ export function imageRequestTarget(
  * @param signal - cancellation for the storage reads.
  * @param limit - the route's outgoing image cap; oversized images are sent
  *   downscaled while the stored attachment and history stay untouched.
+ * @param mapHostPath - the mounted filesystem's host-path mapping; when
+ *   present, offload placeholders name a read-only copy the model can reopen.
  * @returns the same messages with image blocks resolved for the translators.
  */
 export async function resolveImages(
@@ -164,6 +230,7 @@ export async function resolveImages(
   attachments: AttachmentStore | undefined,
   signal?: AbortSignal,
   limit?: ImageRequestLimit,
+  mapHostPath?: HostPathMapper,
 ): Promise<readonly TranslatableMessage[]> {
   const hasImage = (block: ContentBlock): boolean => block.type === 'image'
     || (block.type === 'tool-result' && block.content.some(hasImage))
@@ -203,8 +270,8 @@ export async function resolveImages(
     if ('offloaded' in block && block.offloaded === true) {
       // New hosts own the omission decision. Never restore omitted bytes,
       // including when the original attachment is no longer readable.
-      const format = (llm as { offloadedImageText?: (ref: ImageAttachmentRef) => string }).offloadedImageText
-      return [{ type: 'text', text: format?.(block.attachment)
+      const format = (llm as { offloadedImageText?: (ref: ImageAttachmentRef, access?: ImageAccess) => string }).offloadedImageText
+      return [{ type: 'text', text: format?.(block.attachment, offloadedImageAccess(attachments, mapHostPath, block.attachment))
         ?? `[image omitted to fit request image limits; ${block.attachment.attachmentId}]` }]
     }
     const { data, mediaType: sentType, ref } = await readForRequest(block.attachment)

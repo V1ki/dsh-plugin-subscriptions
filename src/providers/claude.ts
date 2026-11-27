@@ -19,15 +19,18 @@ import type { ProviderId } from '../auth/store.js'
 import type { PoolAdapter } from './pool.js'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { hostSupportsImageOffload, IMAGE_OFFLOAD_REQUIRED, requiredImageOffloadCount, resolveImages } from '../translate/resolved.js'
-import type { TranslatableMessage } from '../translate/resolved.js'
+import type { HostPathMapper, ImageRequestLimit, TranslatableMessage } from '../translate/resolved.js'
 import {
+  assembleAnthropicMessages,
+  isRefusedThinkingError,
   markMessageCache,
+  requestBaseDigest,
   streamAnthropic,
-  toAnthropicMessages,
   toAnthropicSystem,
   toAnthropicTools,
+  toAnthropicToolsDeferred,
 } from '../translate/anthropic.js'
-import type { PromptCacheTtl } from '../translate/anthropic.js'
+import type { PromptCacheTtl, ThinkingBinding } from '../translate/anthropic.js'
 import {
   httpLlmError,
   idleWatchdog,
@@ -121,7 +124,6 @@ const CLAUDE_VERSION_PROBES: readonly (readonly [string, readonly string[], { sh
     : [['claude', ['--version'], {}]]
 
 export function detectClaudeVersion(): string {
-  let lastError: unknown
   for (const [command, args, options] of CLAUDE_VERSION_PROBES) {
     try {
       const raw = execFileSync(command, [...args], {
@@ -132,13 +134,9 @@ export function detectClaudeVersion(): string {
       })
       const match = raw.match(/(\d+\.\d+\.\d+)/)
       if (match) return match[1]
-    } catch (error) {
-      lastError = error
+    } catch {
+      // Expected when Claude Code is absent; silently fall back to the floor.
     }
-  }
-  // This is debug-only: the fallback is expected when Claude Code is absent.
-  if (lastError !== undefined) {
-    console.debug('dsh-plugin-subscriptions: Claude CLI version detection fell back', lastError)
   }
   return CLAUDE_CLI_FALLBACK_VERSION
 }
@@ -552,6 +550,8 @@ export interface ClaudeAdapterOptions {
   rateLimit?: RateLimitWait
   /** Resolve the attachment service per request; absent means image requests fail loudly. */
   resolveAttachments?: () => AttachmentStore | undefined
+  /** Resolve the filesystem's host-path mapping per request, so offloaded images keep a readable path. */
+  resolveHostPathMapper?: () => HostPathMapper | undefined
   /** Durable catalog store seeding capability metadata across restarts. */
   catalogStore?: CatalogPersistence
   onCatalogChanged?: () => void
@@ -571,6 +571,13 @@ export interface ClaudeAdapterOptions {
    * the next turn without a restart; undefined falls back to `promptCacheTtl`.
    */
   promptCacheTtlOverride?: () => PromptCacheTtl | undefined
+  /**
+   * Tool-name patterns sent with `defer_loading: true`, with the server-side
+   * tool search tool added. Empty or absent keeps the request body exactly as
+   * it was before this option existed. A function so a caller may supply a live
+   * value; `apply` passes the configured list, which changes with a config reload.
+   */
+  deferToolPatterns?: () => readonly string[]
 }
 
 /**
@@ -578,8 +585,11 @@ export interface ClaudeAdapterOptions {
  * images, and every later turn resends the history, so one oversized
  * screenshot would fail the session for good (#110). Images are sent within
  * this cap; 3.75MB encoded stays under the 5MB base64 per-image limit.
+ * Images over 1MB are re-encoded at their own size too: a lossless 2–4MB
+ * screenshot would otherwise let only five or six images fit the request
+ * image budget below before older ones are offloaded.
  */
-const CLAUDE_IMAGE_LIMIT = { maxEdge: 2000, maxBytes: 3_750_000 }
+export const CLAUDE_IMAGE_LIMIT: ImageRequestLimit = { maxEdge: 2000, maxBytes: 3_750_000, softBytes: 1_000_000 }
 
 /**
  * Inline image data a Claude request may carry, in base64 bytes. Every turn
@@ -592,6 +602,47 @@ export const CLAUDE_REQUEST_IMAGE_BUDGET = 20 * 1024 * 1024
 
 /** The Claude 4.5 family accepts image input. */
 const CLAUDE_MODALITIES: readonly ('text' | 'image')[] = ['text', 'image']
+
+/**
+ * Beta that lets a request choose what happens to a replayed thinking block
+ * whose prefix no longer matches, and makes the API report every dropped
+ * block in `input_transformations`. Claude Code sends it.
+ * https://platform.claude.com/docs/en/build-with-claude/preserved-thinking#preserved-thinking-controls
+ */
+export const CLAUDE_THINKING_BINDING_BETA = 'thinking-binding-controls-2026-08-01'
+
+/**
+ * Whether a model checks a replayed thinking block's prefix: Claude 5.1 and
+ * later. Ids spell the version as `-<major>-<minor>` (`claude-opus-5-5`,
+ * `claude-fable-5-1`); a bare major (`claude-opus-5`) or a date suffix is x.0.
+ */
+export function checksThinkingPrefix(model: string): boolean {
+  const match = /^claude-[a-z]+-(\d+)(?:-(\d{1,2}))?(?:-|$)/.exec(model)
+  if (match === null) return false
+  const major = Number(match[1])
+  const minor = match[2] === undefined ? 0 : Number(match[2])
+  return major > 5 || (major === 5 && minor >= 1)
+}
+
+/**
+ * The request's `thinking` parameter with `block_binding` set to drop, not
+ * reject, a replayed block that no longer matches its prefix.
+ *
+ * The plugin only replays blocks whose recorded prefix still matches, so this
+ * is a backstop for a mismatch it cannot see. Accounts created on or after
+ * 2026-08-31 otherwise get an HTTP 400 for it. It is sent only to models that
+ * run the check ({@link checksThinkingPrefix}), only alongside
+ * {@link CLAUDE_THINKING_BINDING_BETA} (without which the API rejects the
+ * field), and only on adaptive thinking, which Sonnet and Haiku 5.5 require
+ * for it.
+ * @param model - the concrete model.
+ * @param thinking - the thinking parameter the model takes, if any.
+ * @returns the parameter to send.
+ */
+export function withThinkingBinding(model: string, thinking: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (thinking?.type !== 'adaptive' || !checksThinkingPrefix(model)) return thinking
+  return { ...thinking, block_binding: { prefix_mismatch_behavior: 'drop_block' } }
+}
 
 /**
  * Assemble the Anthropic request body.
@@ -607,6 +658,7 @@ const CLAUDE_MODALITIES: readonly ('text' | 'image')[] = ['text', 'image']
  * @param thinking - the thinking parameter, when the model takes one.
  * @param effort - the reasoning effort, when the model advertises efforts.
  * @param cacheTtl - lifetime of every cache breakpoint; defaults to five minutes.
+ * @param deferToolPatterns - tool-name patterns to send deferred (see {@link toAnthropicToolsDeferred}); empty keeps the body unchanged.
  * Requests that carry a `purpose` (compaction, session titles) always use five
  * minutes to preserve their existing auxiliary-request behavior. A five-minute
  * mark can still read an entry a one-hour mark wrote.
@@ -619,22 +671,59 @@ export function claudeRequestBody(
   thinking?: Record<string, unknown>,
   effort?: string,
   cacheTtl?: PromptCacheTtl,
+  deferToolPatterns: readonly string[] = [],
 ): Record<string, unknown> {
+  return claudeRequest(options, messages, maxTokens, thinking, effort, cacheTtl, true, deferToolPatterns).body
+}
+
+/**
+ * {@link claudeRequestBody} plus the binding the response to it must record.
+ * @param replayThinking - false sends no replayed thinking (the fallback after
+ * the API refused a replayed block).
+ * @param deferToolPatterns - tool-name patterns to send deferred (see {@link toAnthropicToolsDeferred}); empty keeps the body unchanged.
+ */
+export function claudeRequest(
+  options: GenerateOptions<string>,
+  messages: readonly TranslatableMessage[],
+  maxTokens: number,
+  thinking?: Record<string, unknown>,
+  effort?: string,
+  cacheTtl?: PromptCacheTtl,
+  replayThinking = true,
+  deferToolPatterns: readonly string[] = [],
+): { body: Record<string, unknown>; binding: ThinkingBinding; replayedThinking: number } {
   const ttl = options.purpose === undefined ? cacheTtl : undefined
-  const anthropicMessages = toAnthropicMessages(messages)
-  markMessageCache(anthropicMessages, ttl)
-  return {
+  const system = toAnthropicSystem(options.system, messages, ttl)
+  const tools = options.tools !== undefined && options.tools.length > 0
+    ? (deferToolPatterns.length === 0 && !options.tools.some(tool => tool.deferLoading === true)
+      ? toAnthropicTools(options.tools)
+      : toAnthropicToolsDeferred(options.tools, { deferPatterns: deferToolPatterns }))
+    : undefined
+  // Signed thinking goes back only to the route and model that produced it,
+  // and only while its prefix is unchanged; the account pool has already
+  // narrowed replay to the same account.
+  const assembled = assembleAnthropicMessages(messages, {
+    provider: options.provider,
     model: options.model,
-    max_tokens: maxTokens,
-    system: toAnthropicSystem(options.system, messages, ttl),
-    messages: anthropicMessages,
-    ...options.tools !== undefined && options.tools.length > 0
-      ? { tools: toAnthropicTools(options.tools) }
-      : {},
-    ...thinking === undefined ? {} : { thinking },
-    ...effort === undefined ? {} : { output_config: { effort } },
-    stream: true,
-    ...options.sessionId !== undefined ? { metadata: { user_id: String(options.sessionId) } } : {},
+    base: requestBaseDigest(system, tools),
+    ...replayThinking ? {} : { disabled: true },
+  })
+  markMessageCache(assembled.messages, ttl)
+  const bound = withThinkingBinding(options.model, thinking)
+  return {
+    body: {
+      model: options.model,
+      max_tokens: maxTokens,
+      system,
+      messages: assembled.messages,
+      ...tools === undefined ? {} : { tools },
+      ...bound === undefined ? {} : { thinking: bound },
+      ...effort === undefined ? {} : { output_config: { effort } },
+      stream: true,
+      ...options.sessionId !== undefined ? { metadata: { user_id: String(options.sessionId) } } : {},
+    },
+    binding: assembled.binding,
+    replayedThinking: assembled.replayedThinking,
   }
 }
 
@@ -823,21 +912,26 @@ export class ClaudeAdapter extends LlmAdapter {
     const watchdog = idleWatchdog(options.signal, this.options.streamIdleTimeoutMs)
     try {
       let session = await this.options.tokens.session(account)
-      let response = await this.request(options, session, watchdog.signal)
-      if (response.status === 401) {
+      let sent = await this.request(options, session, watchdog.signal)
+      if (sent.response.status === 401) {
         session = await this.options.tokens.session(account, true)
-        response = await this.request(options, session, watchdog.signal)
+        sent = await this.request(options, session, watchdog.signal)
       }
-      if (!response.ok) {
-        throw await httpLlmError(response, 'claude API', {
-          rateLimitReset: claudeRateLimitReset,
-          ...this.options.onWarn === undefined ? {} : { onWarn: this.options.onWarn },
-        })
+      let failure = sent.response.ok ? undefined : await this.failure(sent.response)
+      if (failure !== undefined && sent.replayedThinking > 0 && isRefusedThinkingError(failure)) {
+        // The API refused a replayed thinking block (an invalid signature, or a
+        // prefix it no longer matches). Resending the same body fails the same
+        // way, so send the turn once without replayed thinking; the response
+        // records the refusal, so no thinking from before it is sent again.
+        this.options.onWarn?.(`claude: replayed thinking was refused; retrying without it (${failure.message.slice(0, 200)})`)
+        sent = await this.request(options, session, watchdog.signal, false)
+        failure = sent.response.ok ? undefined : await this.failure(sent.response)
       }
-      if (response.body === null) {
+      if (failure !== undefined) throw failure
+      if (sent.response.body === null) {
         throw new LlmError('claude API returned no response body', EMPTY_RESPONSE_CODE)
       }
-      yield* streamAnthropic(response.body, () => { watchdog.pulse() })
+      yield* streamAnthropic(sent.response.body, () => { watchdog.pulse() }, sent.binding)
     } catch (error: unknown) {
       throw mapFetchFailure('claude API', error, watchdog, options.signal)
     } finally {
@@ -862,8 +956,22 @@ export class ClaudeAdapter extends LlmAdapter {
     return undefined
   }
 
-  private async request(options: GenerateOptions, session: ClaudeSession, signal: AbortSignal): Promise<Response> {
-    const messages = await resolveImages(options.messages, this.options.resolveAttachments?.(), signal, CLAUDE_IMAGE_LIMIT)
+  private failure(response: Response): Promise<LlmError> {
+    return httpLlmError(response, 'claude API', {
+      rateLimitReset: claudeRateLimitReset,
+      ...this.options.onWarn === undefined ? {} : { onWarn: this.options.onWarn },
+    })
+  }
+
+  private async request(
+    options: GenerateOptions,
+    session: ClaudeSession,
+    signal: AbortSignal,
+    replayThinking = true,
+  ): Promise<{ response: Response; binding: ThinkingBinding; replayedThinking: number }> {
+    const messages = await resolveImages(
+      options.messages, this.options.resolveAttachments?.(), signal, CLAUDE_IMAGE_LIMIT, this.options.resolveHostPathMapper?.(),
+    )
     if (hostSupportsImageOffload()) {
       const offloadImages = requiredImageOffloadCount(messages, CLAUDE_REQUEST_IMAGE_BUDGET)
       if (offloadImages > 0) {
@@ -884,22 +992,27 @@ export class ClaudeAdapter extends LlmAdapter {
       ? String(options.reasoningEffort)
       : undefined
     const cacheTtl = this.options.promptCacheTtlOverride?.() ?? this.options.promptCacheTtl
-    const body = claudeRequestBody(options, messages, maxTokens, thinking, effort, cacheTtl)
+    const built = claudeRequest(
+      options, messages, maxTokens, thinking, effort, cacheTtl, replayThinking, this.options.deferToolPatterns?.() ?? [],
+    )
+    const bound = (built.body.thinking as Record<string, unknown> | undefined)?.block_binding !== undefined
     const cliVersion = await (this.options.resolveCliVersion ?? localClaudeCliVersion)()
-    return proxiedFetch(CLAUDE_API_URL, {
+    const response = await proxiedFetch(CLAUDE_API_URL, {
       method: 'POST',
       headers: {
         'authorization': `Bearer ${session.accessToken}`,
         'anthropic-version': '2023-06-01',
-        'anthropic-beta': CLAUDE_BETA_FLAGS,
+        // `block_binding` is only accepted alongside its beta.
+        'anthropic-beta': bound ? `${CLAUDE_BETA_FLAGS},${CLAUDE_THINKING_BINDING_BETA}` : CLAUDE_BETA_FLAGS,
         'user-agent': claudeCliUserAgent(cliVersion),
         'x-app': 'cli',
         'anthropic-dangerous-direct-browser-access': 'true',
         'accept': 'text/event-stream',
         'content-type': 'application/json',
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(built.body),
       signal,
     })
+    return { response, binding: built.binding, replayedThinking: built.replayedThinking }
   }
 }

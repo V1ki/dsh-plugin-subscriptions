@@ -17,6 +17,15 @@ export class ResetRedemption {
     private readonly read: (account: string, signal: AbortSignal) => Promise<ProviderUsage>,
     private readonly consume: (account: string, creditId: string, requestId: string, signal: AbortSignal) => Promise<void>,
     private readonly invalidate: (account: string) => void,
+    /**
+     * Told the exact instant a redemption is confirmed, so the usage window
+     * tracker can split the account's windows there. Never
+     * called for a rejected or uncertain outcome: those are left to the
+     * tracker's early-reset detection. The caller reports its own
+     * errors; any that escape are swallowed, since the credit is already
+     * spent and the redemption must still succeed.
+     */
+    private readonly onRedeemed?: (account: string, at: number) => void,
   ) {}
 
   private eligible(usage: ProviderUsage): number {
@@ -61,6 +70,11 @@ export class ResetRedemption {
         throw new Error('Reset outcome could not be confirmed. Do not retry or restart to bypass this block; verify credits and limits in Codex first.')
       }
       this.uncertain.delete(account)
+      try {
+        this.onRedeemed?.(account, Date.now())
+      } catch {
+        // Tracking is best effort; see the constructor.
+      }
     } finally {
       this.invalidate(account)
       this.busy.delete(account)

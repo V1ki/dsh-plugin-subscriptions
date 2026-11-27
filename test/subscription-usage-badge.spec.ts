@@ -11,7 +11,7 @@ const css = registerHooks({ load(url, context, nextLoad) {
     ? { format: 'module', source: 'export default {}', shortCircuit: true }
     : nextLoad(url, context)
 } })
-const { AccountWindows, CodexExhaustionNotice, compactSegment, createCurrentModelReader, previewWindows,
+const { AccountWindows, CodexExhaustionNotice, compactSegment, createCurrentModelReader, enabledBadgeRoster, previewWindows,
   collapsedDisplays, expandedDisplays, retainSubscriptionSelection, usageBadgeIcon, compactQuotaRows, budgetTargetRemaining, budgetTargetTone, compactQuotaColor } = await import('../src/client/SubscriptionUsageBadge.js')
 const { ImageGenerateToolview } = await import('../src/client/ImageGenerateToolview.js')
 const { VideoGenerateToolview } = await import('../src/client/VideoGenerateToolview.js')
@@ -126,30 +126,54 @@ test('native shared account panel follows used/remaining quota display mode desp
     for (const percent of [27, 7, 77, 0]) assert.ok(usedHtml.includes(translate('quotaUsedPercent', { percent })))
     assert.ok(!usedHtml.includes('gemini-4-argon-') && !usedHtml.includes('<details'))
     assert.equal(compactSegment(display('antigravity', shared), 'gemini-4-argon', translate),
-      `Antigravity · ${translate('quotaDefaultAccount')} ${translate('usageWeekly')} ${translate('quotaUsedPercent', { percent: 27 })} · ${translate('usageFiveHourLimit')} ${translate('quotaUsedPercent', { percent: 7 })}`)
+      `Antigravity · ${translate('quotaUsedPercent', { percent: 7 })} / ${translate('quotaUsedPercent', { percent: 27 })}`,
+      'the pill keeps two percentages, session window first, and no account or window label')
 
     const remainingHtml = renderToStaticMarkup(createElement(AccountWindows, {
       windows: filtered, model: 'gemini-4-argon', provider: 'antigravity', translate, mode: 'remaining',
     }))
     for (const percent of [73, 93, 23, 100]) assert.ok(remainingHtml.includes(translate('quotaRemainingPercent', { percent })))
     assert.equal(compactSegment(display('antigravity', shared), 'gemini-4-argon', translate, 'remaining'),
-      `Antigravity · ${translate('quotaDefaultAccount')} ${translate('usageWeekly')} ${translate('quotaRemainingPercent', { percent: 73 })} · ${translate('usageFiveHourLimit')} ${translate('quotaRemainingPercent', { percent: 93 })}`)
+      `Antigravity · ${translate('quotaRemainingPercent', { percent: 93 })} / ${translate('quotaRemainingPercent', { percent: 73 })}`)
   }
 })
 
 test('Antigravity compact readout selects exact current model, not the entire catalog', () => {
   const d = display('antigravity', [...windows, { kind: 'weekly', scope: 'gemini-model-59', usedPercent: 81 }])
-  assert.equal(compactSegment(d, 'gemini-model-59'), 'Antigravity · Default account Window 59% used · Weekly 81% used')
-  assert.equal(compactSegment(d), 'Antigravity · Default account 60 model quotas')
-  assert.equal(compactSegment(d, 'missing'), 'Antigravity · Default account Current model quota unavailable')
+  assert.equal(compactSegment(d, 'gemini-model-59'), 'Antigravity · 81% used / 59% used')
+  assert.equal(compactSegment(d), 'Antigravity · 60 model quotas')
+  assert.equal(compactSegment(d, 'missing'), 'Antigravity · Current model quota unavailable')
   assert.ok(compactSegment(d, 'gemini-model-1').length < 90)
+})
+
+test('the compact readout drops window labels, freshness, overflow and credits', () => {
+  const d = display('codex', [{ kind: 'session', usedPercent: 13 }, { kind: 'weekly', usedPercent: 25 }])
+  d.accounts[0]!.usage = { supported: true, stale: true, fetchedAt: 1, credits: { hasCredits: true, unlimited: false, balance: '12.5' } }
+  const label = compactSegment(d)
+  assert.equal(label, 'Codex · 13% used / 25% used')
+  assert.doesNotMatch(label, /Default account|Listed account|stale|credits|\+/)
+  assert.ok(compactSegment(display('codex')).length < 40, 'a long catalogue never widens the pill')
 })
 
 test('compact summary counts signed-in accounts without aggregating their percentages', () => {
   const d = display('codex', [{ kind: 'session', usedPercent: 13 }, { kind: 'weekly', usedPercent: 25 }])
   d.accounts.unshift({ key: 'other', isDefault: false, windows: [{ kind: 'session', usedPercent: 99 }] })
   assert.equal(compactSegment(d), 'Codex · 2 signed-in accounts')
-  assert.ok(compactSegment(display('codex')).endsWith('+58'))
+  assert.equal(compactSegment(display('codex', [
+    { kind: 'session', usedPercent: 13 }, { kind: 'weekly', usedPercent: 25 }, { kind: 'weekly', usedPercent: 40 },
+  ])), 'Codex · 13% used / 25% used', 'extra windows are counted in the dialog, never on the pill')
+})
+
+test('enabledBadgeRoster skips disabled Antigravity accounts so the badge neither polls nor displays them', () => {
+  const roster = enabledBadgeRoster({
+    codex: { busy: false, accounts: [{ key: 'c1', isDefault: true }] },
+    antigravity: { busy: false, enabled: false, accounts: [{ key: 'a1', isDefault: true }] },
+  })
+  assert.deepEqual(roster, [{ provider: 'codex', account: { key: 'c1', isDefault: true } }])
+  const enabledRoster = enabledBadgeRoster({
+    antigravity: { busy: false, accounts: [{ key: 'a1', isDefault: true }] },
+  })
+  assert.deepEqual(enabledRoster, [{ provider: 'antigravity', account: { key: 'a1', isDefault: true } }])
 })
 
 test('preview promotes current-model windows without losing, merging, or mutating data', () => {
@@ -208,19 +232,20 @@ test('provider ordering stays independent from model-window filtering', () => {
   assert.deepEqual(collapsedDisplays(all, 'grok'), [])
 })
 
-test('non-subscription selections retain only the last subscription and its model scope', () => {
+test('a non-subscription model clears the badge instead of keeping the last subscription', () => {
   const codex = { provider: 'codex', model: 'gpt-test' }
   const anti = { provider: 'antigravity', model: 'gemini-model-59' }
   const api = { provider: 'deepseek', model: 'deepseek-chat' }
   assert.equal(retainSubscriptionSelection(undefined, api), undefined)
   assert.equal(retainSubscriptionSelection(undefined, undefined), undefined)
   assert.equal(retainSubscriptionSelection(undefined, codex), codex)
-  assert.equal(retainSubscriptionSelection(codex, api), codex)
+  assert.equal(retainSubscriptionSelection(codex, api), undefined, 'an API model drops the pill')
   assert.equal(retainSubscriptionSelection(codex, anti), anti)
-  assert.equal(retainSubscriptionSelection(anti, api), anti)
-  assert.equal(retainSubscriptionSelection(anti, undefined), anti)
-  assert.deepEqual(collapsedDisplays([display('codex'), display()], retainSubscriptionSelection(anti, api)?.provider).map(d => d.provider), ['antigravity'])
+  assert.equal(retainSubscriptionSelection(anti, api), undefined, 'switching away from a subscription drops the pill')
+  assert.equal(retainSubscriptionSelection(anti, undefined), anti, 'an unreadable model keeps the pill instead of flickering')
+  assert.deepEqual(collapsedDisplays([display('codex'), display()], retainSubscriptionSelection(anti, api)?.provider).map(d => d.provider), [])
   assert.deepEqual(collapsedDisplays([display('codex')], anti.provider), [])
+  assert.deepEqual(collapsedDisplays([display('codex'), display('antigravity')], retainSubscriptionSelection(anti, undefined)?.provider).map(d => d.provider), ['antigravity'])
 })
 
 test('data icon supports both DSH export names without requiring either named import', () => {
@@ -286,13 +311,14 @@ test('Antigravity badge previews variant quota scopes for the grouped current mo
   assert.deepEqual(preview.hidden, [windows[0]])
 })
 
-test('single-account summaries identify fallback source, mode, stale data and unknown values', () => {
+test('the compact readout keeps the percentage mode and unknown values, and leaves source detail to the dialog', () => {
   const d = display('claude', [{ kind: 'weekly', scope: 'Opus', usedPercent: 28 }])
+  d.name = 'Claude'
   d.accounts[0]!.isDefault = false
   d.accounts[0]!.usage = { supported: true, stale: true, fetchedAt: 1 }
-  assert.match(compactSegment(d, undefined, undefined, 'remaining'), /Listed account.*72% remaining.*stale/)
+  assert.equal(compactSegment(d, undefined, undefined, 'remaining'), 'Claude · 72% remaining')
   d.accounts[0]!.windows[0]!.usedPercent = NaN
-  assert.match(compactSegment(d, undefined, undefined, 'remaining'), /Unknown quota/)
+  assert.equal(compactSegment(d, undefined, undefined, 'remaining'), 'Claude · Unknown quota')
   assert.doesNotMatch(compactSegment(d, undefined, undefined, 'remaining'), /100%/)
   d.accounts.push({ key: 'unknown', isDefault: false, windows: [] })
   assert.match(compactSegment(d), /2 signed-in accounts/)

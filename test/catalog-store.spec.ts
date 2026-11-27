@@ -223,3 +223,23 @@ test('Antigravity roster metadata survives disk and rejects malformed variant pr
     assert.equal(sanitizeSnapshot({ at: 1, models: [{ ...model, antigravity }] }), undefined)
   }
 })
+
+test('Grok contextWindowOptions survive disk and reject malformed tier lists', async () => {
+  const path = await tempStorePath()
+  const store = catalogStore('grok', path)
+  const model = {
+    id: 'grok-4.7',
+    name: 'Grok 4.7',
+    contextWindow: 256_000,
+    contextWindowOptions: [256_000, 500_000],
+  }
+  await store.save({ at: 1, models: [model] })
+  assert.deepEqual((await store.load())?.models[0], model)
+  for (const contextWindowOptions of [null, [], [0], [-1], [1.5], ['500000'], [256_000, Number.MAX_SAFE_INTEGER + 1], 500_000]) {
+    assert.equal(
+      sanitizeSnapshot({ at: 1, models: [{ id: 'grok-4.7', name: 'Grok 4.7', contextWindowOptions }] }),
+      undefined,
+      `Invalid contextWindowOptions: ${JSON.stringify(contextWindowOptions)}`,
+    )
+  }
+})

@@ -38,15 +38,17 @@ try {
     await page.waitForFunction(({ reads, provider }) => Number(document.documentElement.dataset.modelReads) > reads && document.documentElement.dataset.lastRead === provider, { reads, provider })
   }
   for (const [name, provider, expected] of [
-    ['codex', 'codex', 'Codex'], ['api', 'deepseek', 'Codex'],
-    ['grok', 'grok', 'Grok'], ['api', 'deepseek', 'Grok'],
-    ['antigravity', 'antigravity', 'Antigravity'], ['api', 'deepseek', 'Antigravity'],
+    ['codex', 'codex', 'Codex'], ['grok', 'grok', 'Grok'], ['antigravity', 'antigravity', 'Antigravity'],
   ]) {
     await choose(name, provider)
     await badge.waitFor()
     assert.equal(await badge.count(), 1)
     assert.match(await badge.innerText(), new RegExp(`^${expected} .*%`))
     assert.equal((await badge.innerText()).includes('|'), false)
+    // A non-subscription model hides the pill instead of keeping the last subscription.
+    await choose('api', 'deepseek')
+    await badge.waitFor({ state: 'detached' })
+    assert.equal(await badge.count(), 0, `${expected} is not left on screen after an API model`)
   }
   await choose('grok', 'grok')
   await page.getByRole('button', { name: 'Rename Grok', exact: true }).click()
@@ -71,22 +73,19 @@ try {
   await page.getByRole('button', { name: 'Reset Grok', exact: true }).click()
   assert.match(await badge.innerText(), /^Grok /)
   await choose('antigravity', 'antigravity')
-  await choose('api', 'deepseek')
-  console.log('40%: current/recent single-provider selection verified')
+  console.log('40%: single-provider selection and non-subscription hiding verified')
   await badge.click()
   await panel.waitFor()
   const anti = panel.locator('section').filter({ hasText: 'Antigravity' })
-  // The dialog follows the retained subscription the badge shows: first, with
-  // its model previewed, but not tagged current while an API model is selected.
+  // The dialog follows the subscription the badge shows: first, with its model previewed.
   assert.match(await panel.locator('section').first().innerText(), /^Antigravity/)
-  assert.equal(await anti.getByText('current', { exact: true }).count(), 0)
+  assert.equal(await anti.getByText('current', { exact: true }).count(), 1)
   assert.equal(await anti.locator('dt:visible').count(), 1)
   assert.match(await anti.locator('dt:visible').innerText(), /gemini-model-29/)
   await anti.locator('summary').click()
   assert.equal(await anti.locator('dt:visible').count(), 30)
   await page.keyboard.press('Escape')
   await panel.waitFor({ state: 'detached' })
-  await choose('antigravity', 'antigravity')
   await badge.click()
   await panel.waitFor()
   assert.equal(await anti.locator('dt:visible').count(), 1)
