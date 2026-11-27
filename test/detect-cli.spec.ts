@@ -40,6 +40,27 @@ test('detectClaudeVersion returns the fallback when claude is not in PATH', () =
   }
 })
 
+test('detectClaudeVersion falls back silently without logging when claude is absent', () => {
+  const originalPath = process.env.PATH
+  const originalDebug = console.debug
+  const originalWarn = console.warn
+  const originalError = console.error
+  const calls: string[] = []
+  console.debug = (...args: unknown[]) => { calls.push(`debug:${args.map(String).join(' ')}`) }
+  console.warn = (...args: unknown[]) => { calls.push(`warn:${args.map(String).join(' ')}`) }
+  console.error = (...args: unknown[]) => { calls.push(`error:${args.map(String).join(' ')}`) }
+  try {
+    process.env.PATH = ''
+    assert.equal(detectClaudeVersion(), CLAUDE_CLI_FALLBACK_VERSION)
+    assert.deepEqual(calls, [])
+  } finally {
+    process.env.PATH = originalPath
+    console.debug = originalDebug
+    console.warn = originalWarn
+    console.error = originalError
+  }
+})
+
 /** A working CLI must win over the hard-coded fallback version. */
 test('detectClaudeVersion reads a resolvable CLI rather than the fallback', () => {
   const bin = join(mkdtempSync(join(tmpdir(), 'claude-probe-')), process.platform === 'win32' ? 'claude.cmd' : 'claude')
